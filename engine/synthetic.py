@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-# Synthetic: FlawPrint: Cross-Domain Multimodal Fake News Detection via Copula Residuals of Physical Imperfection Traces
+# FlawPrint: Cross-Domain Multimodal Fake News Detection via Copula Residuals of Physical Imperfection Traces
 
 from __future__ import annotations
 from pathlib import Path
@@ -59,3 +59,6 @@ def image_demo(output: str = "./data/demo", seed: int = 42, per_split: int = 16)
         manifest.append(dict(row, image=path.as_posix()))
     write_rows(root / "manifest.jsonl", manifest)
     return {"manifest": (root / "manifest.jsonl").as_posix(), "samples": len(manifest), "scope": "Artificial images for integration checks only"}
+
+# Author: Weiliang Zhu
+# Email: wlzchina05@gmail.com

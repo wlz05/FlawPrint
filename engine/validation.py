@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-# Validation: FlawPrint: Cross-Domain Multimodal Fake News Detection via Copula Residuals of Physical Imperfection Traces
+# FlawPrint: Cross-Domain Multimodal Fake News Detection via Copula Residuals of Physical Imperfection Traces
 
 from __future__ import annotations
 from collections import Counter, defaultdict
@@ -99,3 +99,6 @@ def preflight(records: list[dict], check_images: bool = False, benchmark: bool =
         if leaking:
             errors.append(f"Image bytes cross splits under {len(leaking)} content hashes")
     return {"version": "FlawPrint preflight 1", "passed": not errors, "errors": errors, "warnings": warnings, "samples": len(rows), "counts": {key: dict(value) for key, value in sorted(counts.items())}, "missing_images": missing_images, "empty_text": empty_text, "semantic_scores": semantic, "audit": audit, "image_check_requested": check_images, "images": image_report, "benchmark_check_requested": benchmark, "minimum_profile_size": min_samples, "label_contract": "zero-real-one-fake", "path_base": "process working directory"}
+
+# Author: Weiliang Zhu
+# Email: wlzchina05@gmail.com

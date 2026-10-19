@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-# Environment Check: FlawPrint: Cross-Domain Multimodal Fake News Detection via Copula Residuals of Physical Imperfection Traces
+# FlawPrint: Cross-Domain Multimodal Fake News Detection via Copula Residuals of Physical Imperfection Traces
 
 from __future__ import annotations
 import argparse
@@ -72,3 +72,6 @@ def main() -> None:
         parser.error(str(error))
 if __name__ == "__main__":
     main()
+
+# Author: Weiliang Zhu
+# Email: wlzchina05@gmail.com

@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-# Streaming Adaptation: FlawPrint: Cross-Domain Multimodal Fake News Detection via Copula Residuals of Physical Imperfection Traces
+# FlawPrint: Cross-Domain Multimodal Fake News Detection via Copula Residuals of Physical Imperfection Traces
 
 from __future__ import annotations
 from dataclasses import replace
@@ -85,3 +85,6 @@ def adapt(prior: DomainProfile, bundle: dict | None, domain: str, n0: float = 10
     complete = complete and (not prior.quality.get("genuine_calibration_identifiers") or prior.quality.get("genuine_calibration_history") is not None)
     result.quality.update(target_samples=count, shrinkage_weight=weight, n0=n0, cold_start=count < prior.config.min_samples, reference_scope="F24 convex prior shrinkage; inherited sign stability and target empirical marginals", evidence_history_complete=complete)
     return result
+
+# Author: Weiliang Zhu
+# Email: wlzchina05@gmail.com

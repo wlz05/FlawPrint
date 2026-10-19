@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-# Test Integrity: FlawPrint: Cross-Domain Multimodal Fake News Detection via Copula Residuals of Physical Imperfection Traces
+# FlawPrint: Cross-Domain Multimodal Fake News Detection via Copula Residuals of Physical Imperfection Traces
 
 from __future__ import annotations
 import copy
@@ -350,3 +350,6 @@ class IntegrityTests(unittest.TestCase):
             corrupt([{"id": "image", "image": "missing.png"}], self.root.as_posix(), "noise", np.nan)
 if __name__ == "__main__":
     unittest.main()
+
+# Author: Weiliang Zhu
+# Email: wlzchina05@gmail.com

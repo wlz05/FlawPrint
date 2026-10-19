@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-# Evaluation Metrics: FlawPrint: Cross-Domain Multimodal Fake News Detection via Copula Residuals of Physical Imperfection Traces
+# FlawPrint: Cross-Domain Multimodal Fake News Detection via Copula Residuals of Physical Imperfection Traces
 
 from __future__ import annotations
 from collections import defaultdict
@@ -112,3 +112,6 @@ def quadrants(rows: list[dict]) -> dict:
         key = f"semantic_{'high' if row['semantic_logit'] >= 0 else 'low'}_physical_{'high' if row['physical_risk'] >= 0 else 'low'}"
         groups[key].append(row)
     return {key: evaluate(value) for key, value in sorted(groups.items())}
+
+# Author: Weiliang Zhu
+# Email: wlzchina05@gmail.com

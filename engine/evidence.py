@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-# Increment and Role Audit: FlawPrint: Cross-Domain Multimodal Fake News Detection via Copula Residuals of Physical Imperfection Traces
+# FlawPrint: Cross-Domain Multimodal Fake News Detection via Copula Residuals of Physical Imperfection Traces
 
 from __future__ import annotations
 from collections import defaultdict
@@ -233,3 +233,6 @@ def mixture(pool: dict, test: dict, domain: str, config: ProfileConfig, fraction
             screening = availability(profile.reference)
             rows.append({"requested_fake_fraction": fraction, "actual_fake_fraction": fake_count / size, "real_samples": real_count, "fake_samples": fake_count, "repetition": repetition, "samples": size, "profile_ids": profile.identifiers, "retained_features": profile.names, "condition_number": profile.quality["condition_number"], "gap_to_real_sd": screening["gap_to_real_sd"], "model_power_screen": screening["power_screen"], "metrics": report})
     return {"results": rows, "skipped": skipped, "seed": seed, "image_only": image_only, "repeats": repeats, "scope": "Offline label-assisted mixture construction; all labels removed before fitting; independent frozen test set; repeated draws share a finite pool and are not independent domains; model power screening is not a genuine-label guarantee"}
+
+# Author: Weiliang Zhu
+# Email: wlzchina05@gmail.com

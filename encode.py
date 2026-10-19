@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-# Semantic Encoding: FlawPrint: Cross-Domain Multimodal Fake News Detection via Copula Residuals of Physical Imperfection Traces
+# FlawPrint: Cross-Domain Multimodal Fake News Detection via Copula Residuals of Physical Imperfection Traces
 
 from __future__ import annotations
 import argparse
@@ -48,3 +48,6 @@ def main() -> None:
     write_rows(args.output, output)
 if __name__ == "__main__":
     main()
+
+# Author: Weiliang Zhu
+# Email: wlzchina05@gmail.com

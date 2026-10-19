@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-# Copula: FlawPrint: Cross-Domain Multimodal Fake News Detection via Copula Residuals of Physical Imperfection Traces
+# FlawPrint: Cross-Domain Multimodal Fake News Detection via Copula Residuals of Physical Imperfection Traces
 
 from __future__ import annotations
 from dataclasses import dataclass
@@ -108,3 +108,6 @@ def decompose(z: np.ndarray, reference: np.ndarray, names: list[str], top: int =
     constant = float(-np.linalg.slogdet(reference)[1])
     total = float(diagonal.sum() + sum(pair["contribution"] for pair in pairs) + constant)
     return {"constant": constant, "diagonal_sum": float(diagonal.sum()), "pair_sum": float(sum(pair["contribution"] for pair in pairs)), "reconstructed_score": total, "most_negative_pairs": sorted(pairs, key=lambda pair: pair["contribution"])[:top]}
+
+# Author: Weiliang Zhu
+# Email: wlzchina05@gmail.com

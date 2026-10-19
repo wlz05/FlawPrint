@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-# Experiment Protocol: FlawPrint: Cross-Domain Multimodal Fake News Detection via Copula Residuals of Physical Imperfection Traces
+# FlawPrint: Cross-Domain Multimodal Fake News Detection via Copula Residuals of Physical Imperfection Traces
 
 from __future__ import annotations
 from collections import defaultdict
@@ -205,3 +205,6 @@ def domain_matrix(bundle: dict, method: str = "trace_logistic", seed: int = 42) 
         row["auc_drop"] = own["auc"] - row["auc"] if own and own["auc"] is not None and row["auc"] is not None else None
         row["f1_drop"] = own["macro_f1"] - row["macro_f1"] if own else None
     return {"pairs": result, "unavailable_source_domains": unavailable, "fixed_detector_complements": complements}
+
+# Author: Weiliang Zhu
+# Email: wlzchina05@gmail.com

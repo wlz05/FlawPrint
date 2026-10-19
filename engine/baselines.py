@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-# Baselines: FlawPrint: Cross-Domain Multimodal Fake News Detection via Copula Residuals of Physical Imperfection Traces
+# FlawPrint: Cross-Domain Multimodal Fake News Detection via Copula Residuals of Physical Imperfection Traces
 
 from __future__ import annotations
 from dataclasses import dataclass
@@ -136,3 +136,6 @@ class Baseline:
         if not np.isfinite(result).all():
             raise ValueError("Baseline predictions must be finite")
         return result
+
+# Author: Weiliang Zhu
+# Email: wlzchina05@gmail.com

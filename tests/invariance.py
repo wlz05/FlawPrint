@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-# Test Invariance: FlawPrint: Cross-Domain Multimodal Fake News Detection via Copula Residuals of Physical Imperfection Traces
+# FlawPrint: Cross-Domain Multimodal Fake News Detection via Copula Residuals of Physical Imperfection Traces
 
 from __future__ import annotations
 import unittest
@@ -118,3 +118,6 @@ class InvarianceTests(unittest.TestCase):
             pairing(self.reference[:, :1], self.query[:, :1])
 if __name__ == "__main__":
     unittest.main()
+
+# Author: Weiliang Zhu
+# Email: wlzchina05@gmail.com

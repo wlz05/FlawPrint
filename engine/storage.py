@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-# Portable Storage: FlawPrint: Cross-Domain Multimodal Fake News Detection via Copula Residuals of Physical Imperfection Traces
+# FlawPrint: Cross-Domain Multimodal Fake News Detection via Copula Residuals of Physical Imperfection Traces
 
 from __future__ import annotations
 import csv
@@ -212,3 +212,6 @@ def subset(bundle: dict, indices: np.ndarray | list[int]) -> dict:
     if selected.ndim != 1 or selected.dtype.kind not in "iu" or np.any(selected < 0) or np.any(selected >= len(bundle["rows"])) or len(np.unique(selected)) != len(selected):
         raise ValueError("Sample indices must be unique integers within the bundle")
     return {"values": bundle["values"][selected], "observed": bundle["observed"][selected], "patches": bundle["patches"][selected], "names": bundle["names"].copy(), "rows": [copy.deepcopy(bundle["rows"][int(index)]) for index in selected]}
+
+# Author: Weiliang Zhu
+# Email: wlzchina05@gmail.com
