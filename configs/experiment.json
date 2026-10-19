@@ -1,5 +1,5 @@
 {
-  "reference": "https://github.com/wlz05/DDIN",
+  "method": "FlawPrint",
   "datasets": [
     "weibo",
     "weibo21",

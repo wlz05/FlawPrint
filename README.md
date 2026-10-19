@@ -2,7 +2,7 @@
 
 **FlawPrint** detects multimodal fake news through the dependence between image and narrative traces. It removes marginal scale through rank normalization, estimates a domain copula, and measures departures from its joint structure. Local sign evidence identifies inconsistent trace relationships, while a frozen semantic detector scores the news narrative.
 
-**FlawPrint achieves state-of-the-art performance on Weibo, Weibo21, and FineFake.** Experiments follow the [DDIN](https://github.com/wlz05/DDIN) setup on a **single NVIDIA GeForce RTX 4090**, using seeds **42, 52, 3047, and 3407**.
+**FlawPrint achieves state-of-the-art performance on Weibo, Weibo21, and FineFake.** Experiments run on a **single NVIDIA GeForce RTX 4090**, using seeds **42, 52, 3047, and 3407**.
 
 ---
 
@@ -125,7 +125,7 @@ python -B main.py benchmark ./data/fixture.npz --config ./configs/quick.json --b
 
 ### 3. Prepare data
 
-Use the DDIN dataset layout: `./data` for Weibo, `./weibo21` for Weibo21, and `./FineFake` for FineFake. For canonical input:
+Store Weibo in `./data`, Weibo21 in `./weibo21`, and FineFake in `./FineFake`. For canonical input:
 
 ```bash
 python -B main.py prepare ./data/raw.jsonl --labels fake-one --output ./data/manifest.jsonl
@@ -133,7 +133,7 @@ python -B main.py validate ./data/manifest.jsonl --benchmark --check-images --ou
 python -B main.py extract ./data/manifest.jsonl --workers 1 --output ./data/features.npz
 ```
 
-Use the same released partitions as DDIN and retain their sample identities. Each evaluated domain has an independent reference pool.
+Use the supplied train, validation, and test partitions and retain their sample identities. Each evaluated domain has an independent reference pool.
 
 For dataset-specific columns and label conversion:
 
@@ -190,15 +190,15 @@ Report mean and sample standard deviation across the four seeds. Use the full se
 
 | Dataset | Domains | Data partitions |
 |---|---|---|
-| [Weibo](https://doi.org/10.1145/3123266.3123454) | 9 | The DDIN Weibo benchmark partitions |
+| [Weibo](https://doi.org/10.1145/3123266.3123454) | 9 | The released train, validation, and test partitions |
 | [Weibo21](https://github.com/kennqiang/MDFEND-Weibo21) | 9 | The released train, validation, and test partitions |
 | [FineFake](https://github.com/Accuser907/FineFake) | 7 | 60% / 20% / 20%, stratified by label with split seed 3407 |
 
-All three datasets use the same partitions as DDIN. The four experiment seeds vary training and stochastic estimation while keeping these partitions fixed. Dataset paths and training settings are recorded in [configs/experiment.json](configs/experiment.json).
+Dataset partitions remain fixed across the four experiment seeds. FineFake is stratified by label using split seed 3407. Dataset paths and training settings are recorded in [configs/experiment.json](configs/experiment.json).
 
 ## Experimental Setup
 
-We use DDIN's data partitions, semantic-backbone settings, and model-selection configuration. Experiments run on one NVIDIA GeForce RTX 4090.
+We implement FlawPrint on a single NVIDIA GeForce RTX 4090. The semantic backbone is trained for 50 epochs with a batch size of 64, a learning rate of 0.0001, and a maximum text length of 197. Early stopping uses a patience of 5 epochs. We run each experiment with seeds 42, 52, 3047, and 3407 and report the mean and sample standard deviation.
 
 | Setting | Value |
 |---|---|
