@@ -1,0 +1,28 @@
+# Local environments and caches.
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+# Local inputs and generated artifacts.
+data/
+models/
+outputs/
+references/
+tmp/
+*.log
+*.pdf
+*.png
+*.jpg
+*.jpeg
+*.npz
+# Editor and operating system files.
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+# Local credentials.
+.env
+.env.*
+*.pem
+*.key

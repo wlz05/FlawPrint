@@ -1,0 +1,203 @@
+{
+  "verified_date": "2026-10-09",
+  "papers": [
+    {
+      "id": "FineFake",
+      "title": "FineFake: A Knowledge-Enriched Dataset for Fine-Grained Multi-Domain Fake News Detection",
+      "year": 2024,
+      "role": "Dataset and cross-domain evaluation protocol",
+      "page": "https://arxiv.org/abs/2404.01336v3",
+      "pdf": "https://arxiv.org/pdf/2404.01336v3",
+      "file": "FineFake.pdf",
+      "repository": "https://github.com/Accuser907/FineFake",
+      "implementation": "External official dataset; local manifest converter"
+    },
+    {
+      "id": "MDFEND",
+      "title": "MDFEND: Multi-domain Fake News Detection",
+      "year": 2021,
+      "role": "Domain-gated semantic comparison and Weibo21",
+      "page": "https://arxiv.org/abs/2201.00987v1",
+      "pdf": "https://arxiv.org/pdf/2201.00987v1",
+      "file": "MDFEND.pdf",
+      "repository": "https://github.com/kennqiang/MDFEND-Weibo21",
+      "implementation": "External official predictions supported"
+    },
+    {
+      "id": "M3FEND",
+      "title": "Memory-Guided Multi-View Multi-Domain Fake News Detection",
+      "year": 2022,
+      "role": "Semantic multi-view and domain memory comparison",
+      "page": "https://arxiv.org/abs/2206.12808v1",
+      "pdf": "https://arxiv.org/pdf/2206.12808v1",
+      "file": "M3FEND.pdf",
+      "repository": "https://github.com/ICTMCG/M3FEND",
+      "implementation": "External official predictions supported"
+    },
+    {
+      "id": "MMDFND",
+      "title": "MMDFND: Multi-modal Multi-Domain Fake News Detection",
+      "year": 2024,
+      "role": "Multimodal multi-domain semantic comparison",
+      "page": "https://dl.acm.org/doi/10.1145/3664647.3681317",
+      "pdf": "https://openreview.net/pdf?id=sdF3MuyHtz",
+      "fallback_pdf": [
+        "https://api2.openreview.net/pdf?id=sdF3MuyHtz",
+        "https://api.openreview.net/pdf?id=sdF3MuyHtz",
+        "https://openreview.net/pdf/48770420923e953f48222c349b757195120648f6.pdf",
+        "https://dl.acm.org/doi/pdf/10.1145/3664647.3681317"
+      ],
+      "file": "MMDFND.pdf",
+      "repository": "https://github.com/yutchina/MMDFND",
+      "implementation": "External official predictions supported"
+    },
+    {
+      "id": "UniversalFakeDetect",
+      "title": "Towards Universal Fake Image Detectors that Generalize Across Generative Models",
+      "year": 2023,
+      "role": "Cross-generator image detection comparison",
+      "page": "https://arxiv.org/abs/2302.10174v1",
+      "pdf": "https://arxiv.org/pdf/2302.10174v1",
+      "file": "UniversalFakeDetect.pdf",
+      "repository": "https://github.com/WisconsinAIVision/UniversalFakeDetect",
+      "implementation": "External official predictions supported; optional local CLIP control is distinct"
+    },
+    {
+      "id": "DIRE",
+      "title": "DIRE for Diffusion-Generated Image Detection",
+      "year": 2023,
+      "role": "Diffusion reconstruction forensic comparison",
+      "page": "https://openaccess.thecvf.com/content/ICCV2023/html/Wang_DIRE_for_Diffusion-Generated_Image_Detection_ICCV_2023_paper.html",
+      "pdf": "https://openaccess.thecvf.com/content/ICCV2023/papers/Wang_DIRE_for_Diffusion-Generated_Image_Detection_ICCV_2023_paper.pdf",
+      "file": "DIRE.pdf",
+      "repository": "https://github.com/ZhendongWang6/DIRE",
+      "implementation": "External official predictions supported"
+    },
+    {
+      "id": "DAMMFND",
+      "title": "DAMMFND: Domain-Aware Multimodal Multi-view Fake News Detection",
+      "year": 2025,
+      "role": "Domain-aware multimodal multi-view comparison",
+      "page": "https://ojs.aaai.org/index.php/AAAI/article/view/32036",
+      "pdf": "https://ojs.aaai.org/index.php/AAAI/article/download/32036/34191",
+      "file": "DAMMFND.pdf",
+      "repository": "https://github.com/luweihai/DAMMFND",
+      "implementation": "External official predictions supported"
+    },
+    {
+      "id": "ConceptShift",
+      "title": "Early Detection of Misinformation for Infodemic Management: A Domain Adaptation Approach",
+      "year": 2024,
+      "role": "Concept shift background",
+      "page": "https://arxiv.org/abs/2406.10238v1",
+      "pdf": "https://arxiv.org/pdf/2406.10238v1",
+      "file": "ConceptShift.pdf",
+      "repository": null,
+      "implementation": "Background reference only"
+    },
+    {
+      "id": "ModalityBias",
+      "title": "Unveiling Modality Bias: Automated Sample-Specific Analysis for Multimodal Misinformation Benchmarks",
+      "year": 2025,
+      "role": "Modality attribution background",
+      "page": "https://arxiv.org/abs/2511.05883v1",
+      "pdf": "https://arxiv.org/pdf/2511.05883v1",
+      "file": "ModalityBias.pdf",
+      "repository": null,
+      "implementation": "Background reference only"
+    },
+    {
+      "id": "ConformalPrediction",
+      "title": "A Gentle Introduction to Conformal Prediction and Distribution-Free Uncertainty Quantification",
+      "year": 2021,
+      "role": "Labeled split conformal theory",
+      "page": "https://arxiv.org/abs/2107.07511v6",
+      "pdf": "https://arxiv.org/pdf/2107.07511v6",
+      "file": "ConformalPrediction.pdf",
+      "repository": null,
+      "implementation": "Local labeled split conformal component"
+    },
+    {
+      "id": "Sinkhorn",
+      "title": "Sinkhorn Distances: Lightspeed Computation of Optimal Transportation Distances",
+      "year": 2013,
+      "role": "Entropic transport theory",
+      "page": "https://arxiv.org/abs/1306.0895v1",
+      "pdf": "https://arxiv.org/pdf/1306.0895v1",
+      "file": "Sinkhorn.pdf",
+      "repository": null,
+      "implementation": "Local log-domain transport solver"
+    },
+    {
+      "id": "DAPTReference",
+      "title": "Don't Stop Pretraining: Adapt Language Models to Domains and Tasks",
+      "year": 2020,
+      "role": "2020 domain-adaptive pretraining background; distinct from DAPT domain-aware multimodal fake news detection (ACM MM 2025)",
+      "page": "https://aclanthology.org/2020.acl-main.740/",
+      "pdf": "https://aclanthology.org/2020.acl-main.740.pdf",
+      "file": "DAPTReference.pdf",
+      "repository": null,
+      "implementation": "Background mechanism comparison; external predictions supported"
+    },
+    {
+      "id": "DANN",
+      "title": "Domain-Adversarial Training of Neural Networks",
+      "year": 2016,
+      "role": "Gradient-reversal domain adaptation mechanism",
+      "page": "https://www.jmlr.org/beta/papers/v17/15-239.html",
+      "pdf": "https://jmlr.org/papers/volume17/15-239/15-239.pdf",
+      "file": "DANN.pdf",
+      "repository": null,
+      "implementation": "Background mechanism comparison; no local official reproduction"
+    },
+    {
+      "id": "ConceptShiftV2",
+      "title": "Early Detection of Misinformation for Infodemic Management: A Domain Adaptation Approach",
+      "year": 2026,
+      "role": "Updated DACA concept alignment reference for abstract and novelty framing",
+      "page": "https://arxiv.org/abs/2406.10238v2",
+      "pdf": "https://arxiv.org/pdf/2406.10238v2",
+      "file": "ConceptShift_v2.pdf",
+      "repository": null,
+      "implementation": "Background mechanism comparison; v1 retained separately"
+    },
+    {
+      "id": "MediaLifecycle",
+      "title": "Trustworthy synthetic visual media: Evidence across the media lifecycle",
+      "year": 2026,
+      "role": "Media lifecycle evidence and processing conditions",
+      "page": "https://arxiv.org/abs/2609.34232v1",
+      "pdf": "https://arxiv.org/pdf/2609.34232v1",
+      "file": "MediaLifecycle.pdf",
+      "repository": null,
+      "implementation": "Background reference; no first-use claim for dependency modeling"
+    }
+  ],
+  "additional_writing_references": [
+    {
+      "id": "DAPT",
+      "title": "DAPT: Domain-Aware Prompt-Tuning for Multimodal Fake News Detection",
+      "year": 2025,
+      "status": "ACM MM 2025",
+      "page": "https://doi.org/10.1145/3746027.3755192",
+      "pdf": "https://dl.acm.org/doi/pdf/10.1145/3746027.3755192",
+      "file": "DAPT.pdf",
+      "role": "Direct domain-aware comparison and writing model",
+      "date": null,
+      "authors": [
+        "Yu Tong",
+        "Weihai Lu",
+        "Xiaoxi Cui",
+        "Yifan Mao",
+        "Zhejun Zhao"
+      ],
+      "doi": "10.1145/3746027.3755192",
+      "bibliographic_metadata_source": "https://yutchina.github.io/",
+      "date_basis": "Official publication date or conference month when available",
+      "download_status": "pending publisher access",
+      "local_library": "../writing/references/README.md",
+      "implementation": "Writing reference; no local official training reproduction"
+    }
+  ],
+  "writing_references_updated_on": "2026-10-12"
+}
