@@ -6,9 +6,11 @@ import json
 import math
 import numpy as np
 from engine.data import boolean, identifier, missing, portable_image, SPLITS, SPLIT_ALIASES
+
 NUMBERS = ("label", "prediction", "probability", "fusion_risk", "physical_risk", "physical_evidence", "copula_risk", "copula_score", "semantic_logit", "sign_score", "sign_conflict_ratio", "observed_fraction")
 BOOLEANS = ("abstain", "probability_calibrated", "profile_overlap", "physical_available", "has_image", "patch_signs_valid_after_attack", "physical_manipulated", "narrative_false")
 STRUCTURES = {"prediction_set": list, "physical_gate_reasons": list, "physical_power_screen": dict, "routing_policy": dict, "copula_explanation": dict, "sign_explanation": list}
+
 def numeric(value: object, key: str) -> float:
     if isinstance(value, (bool, np.bool_)) or not np.isscalar(value):
         raise ValueError("Numeric prediction fields require real scalar values: " + key)
@@ -19,6 +21,7 @@ def numeric(value: object, key: str) -> float:
     if not math.isfinite(result):
         raise ValueError("Prediction values must be finite: " + key)
     return result
+
 def score_rows(records: list[dict], score_key: str) -> list[dict]:
     rows = prediction_rows(records)
     for row in rows:
@@ -26,6 +29,7 @@ def score_rows(records: list[dict], score_key: str) -> list[dict]:
             raise ValueError("Every scored input requires an observed score: " + score_key)
         row[score_key] = numeric(row[score_key], score_key)
     return rows
+
 def prediction_rows(records: list[dict]) -> list[dict]:
     output = []
     for number, original in enumerate(records, 1):

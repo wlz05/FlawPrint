@@ -1,0 +1,7 @@
+{
+  "dataset": "weibo21",
+  "labels": "fake-one",
+  "image_root": ".",
+  "image_policy": "error",
+  "id_mode": "source"
+}

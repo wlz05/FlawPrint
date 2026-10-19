@@ -7,11 +7,13 @@ import numpy as np
 from sklearn.metrics import roc_auc_score, average_precision_score, f1_score, precision_score, recall_score, balanced_accuracy_score
 from engine.conformal import validate_labels
 from engine.results import prediction_rows, score_rows
+
 def valid_probabilities(values: np.ndarray, labels: np.ndarray) -> np.ndarray:
     result = np.asarray(values, dtype=float)
     if result.shape != labels.shape or not np.isfinite(result).all() or np.any((result < 0) | (result > 1)):
         raise ValueError("Invalid evaluation probabilities")
     return result
+
 def calibration_error(labels: np.ndarray, probabilities: np.ndarray, bins: int = 15) -> float:
     labels = validate_labels(labels)
     probabilities = valid_probabilities(probabilities, labels)
@@ -24,6 +26,7 @@ def calibration_error(labels: np.ndarray, probabilities: np.ndarray, bins: int =
         if chosen.any():
             result += chosen.mean() * abs(labels[chosen].mean() - probabilities[chosen].mean())
     return float(result)
+
 def binary(labels: np.ndarray, scores: np.ndarray, probabilities: np.ndarray | None = None, predictions: np.ndarray | None = None) -> dict:
     labels, scores = validate_labels(labels), np.asarray(scores, dtype=float)
     if scores.shape != labels.shape or not np.isfinite(scores).all():
@@ -37,11 +40,14 @@ def binary(labels: np.ndarray, scores: np.ndarray, probabilities: np.ndarray | N
     false_negative = int(np.sum((labels == 1) & (predictions == 0)))
     true_negative = int(np.sum((labels == 0) & (predictions == 0)))
     result = {"samples": len(labels), "fake_fraction": float(labels.mean()), "accuracy": float(np.mean(predictions == labels)), "balanced_accuracy": float(balanced_accuracy_score(labels, predictions)) if both else None, "macro_f1": float(f1_score(labels, predictions, labels=[0, 1], average="macro", zero_division=0)), "fake_f1": float(f1_score(labels, predictions, zero_division=0)), "fake_precision": float(precision_score(labels, predictions, zero_division=0)), "fake_recall": float(recall_score(labels, predictions, zero_division=0)), "auc": float(roc_auc_score(labels, scores)) if both else None, "average_precision": float(average_precision_score(labels, scores)) if both else None, "tp": true_positive, "fp": false_positive, "fn": false_negative, "tn": true_negative}
+    # Report each class under the same decision threshold.
+    result.update(real_precision=float(precision_score(labels, predictions, pos_label=0, zero_division=0)), real_recall=float(recall_score(labels, predictions, pos_label=0, zero_division=0)), real_f1=float(f1_score(labels, predictions, pos_label=0, zero_division=0)))
     if probabilities is not None:
         probabilities = valid_probabilities(probabilities, labels)
         clipped = np.clip(probabilities, 1e-12, 1 - 1e-12)
         result.update(ece=calibration_error(labels, probabilities), brier=float(np.mean((labels - probabilities) ** 2)), log_loss=float(-np.mean(labels * np.log(clipped) + (1 - labels) * np.log1p(-clipped))))
     return result
+
 def risk_coverage(labels: np.ndarray, probabilities: np.ndarray, predictions: np.ndarray | None = None, points: int = 20) -> list[dict]:
     labels = validate_labels(labels)
     probabilities = valid_probabilities(probabilities, labels)
@@ -53,6 +59,7 @@ def risk_coverage(labels: np.ndarray, probabilities: np.ndarray, predictions: np
     mistakes = predictions[order] != labels[order]
     sizes = np.unique(np.maximum(1, np.ceil(np.linspace(1 / points, 1, points) * len(labels)).astype(int)))
     return [{"coverage": float(size / len(labels)), "risk": float(mistakes[:size].mean()), "accepted": int(size), "confidence_cutoff": float(confidence[order[size - 1]])} for size in sizes]
+
 def evaluate(rows: list[dict], score_key: str = "fusion_risk") -> dict:
     rows = score_rows(rows, score_key)
     if not rows or any("label" not in row or score_key not in row for row in rows):
@@ -82,6 +89,7 @@ def evaluate(rows: list[dict], score_key: str = "fusion_risk") -> dict:
         accepted = np.asarray([len(value) == 1 for value in sets])
         report["conformal"] = {"empirical_label_coverage": float(np.mean([label in value for label, value in zip(labels, sets)])), "singleton_fraction": float(accepted.mean()), "empty_fraction": float(np.mean([not value for value in sets])), "average_set_size": float(np.mean([len(value) for value in sets])), "singleton_risk": float(np.mean(predictions[accepted] != labels[accepted])) if accepted.any() else None}
     return report
+
 def group_bootstrap(rows: list[dict], score_key: str = "fusion_risk", repeats: int = 500, seed: int = 42, group_key: str = "domain") -> dict:
     if isinstance(repeats, bool) or not isinstance(repeats, int) or repeats < 1:
         raise ValueError("Bootstrap repeats must be positive")
@@ -104,6 +112,7 @@ def group_bootstrap(rows: list[dict], score_key: str = "fusion_risk", repeats: i
             if result.get(metric) is not None:
                 values[metric].append(result[metric])
     return {"unit": group_key, "independent_groups": len(keys), "repeats": repeats, "intervals": {metric: {"lower": float(np.quantile(samples, 0.025)), "upper": float(np.quantile(samples, 0.975)), "valid_repeats": len(samples)} for metric, samples in values.items()}}
+
 def quadrants(rows: list[dict]) -> dict:
     groups = defaultdict(list)
     for row in rows:

@@ -14,6 +14,7 @@ from engine.provenance import source_digest
 from engine.results import prediction_rows
 from engine.storage import digest, load_bundle, read_json, read_rows, relative_path, same_path, subset, write_json
 from doctor import environment
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Evaluate paired increments, evidence roles, profile sensitivity, and copula mechanisms.")
     commands = parser.add_subparsers(dest="command", required=True)
@@ -81,7 +82,7 @@ def main() -> None:
     channels.add_argument("--output", default="./outputs/research/channels.json")
     for command in (comparison, strata, sensitivity, demonstration, direction, geometry, selection, channels):
         command.add_argument("--scope", choices=("synthetic",) if command in (demonstration, direction) else ("synthetic", "real"), required=True)
-        command.add_argument("--dataset", required=True)
+        command.add_argument("--dataset", type=str.lower, required=True)
         command.add_argument("--seed", type=int, default=42)
     args = parser.parse_args()
     try:
@@ -121,6 +122,7 @@ def main() -> None:
         print(f"Saved the {args.command} evidence to {args.output}")
     except (ValueError, TypeError, KeyError, OSError) as error:
         parser.error(str(error))
+
 if __name__ == "__main__":
     main()
 

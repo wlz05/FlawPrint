@@ -9,6 +9,7 @@ from scipy.special import expit
 from scipy.optimize import minimize
 from engine.results import prediction_rows, score_rows
 from engine.lineage import collect, disjoint, ensure_disjoint, scope
+
 def validate_labels(labels: np.ndarray) -> np.ndarray:
     original = np.asarray(labels)
     if original.dtype.kind == "b" or original.dtype.kind == "O" and any(isinstance(value, (bool, np.bool_)) for value in original.flat):
@@ -17,6 +18,7 @@ def validate_labels(labels: np.ndarray) -> np.ndarray:
     if labels.ndim != 1 or not len(labels) or not np.isfinite(labels).all() or np.any((labels != 0) & (labels != 1)):
         raise ValueError("Expected binary labels")
     return labels.astype(int)
+
 def fuse(physical_risk: np.ndarray, semantic_logits: np.ndarray | None = None, semantic_threshold: float = 0.0) -> np.ndarray:
     physical = np.asarray(physical_risk, dtype=float)
     if physical.ndim != 1 or not np.isfinite(physical).all() or not np.isfinite(semantic_threshold):
@@ -27,14 +29,17 @@ def fuse(physical_risk: np.ndarray, semantic_logits: np.ndarray | None = None, s
     if semantic.shape != physical.shape or not np.isfinite(semantic).all():
         raise ValueError("Fusion score shapes must match")
     return np.maximum(physical, semantic - semantic_threshold)
+
 @dataclass
 class Platt:
     slope: float = 1.0
     intercept: float = 0.0
     calibrated: bool = False
+
     def __post_init__(self) -> None:
         if not np.isfinite((self.slope, self.intercept)).all() or self.slope < 0 or not isinstance(self.calibrated, bool):
             raise ValueError("Probability calibration parameters must be finite and orientation preserving")
+
     @classmethod
     def fit(cls, scores: np.ndarray, labels: np.ndarray) -> Platt:
         labels = validate_labels(labels)
@@ -51,11 +56,13 @@ class Platt:
         if not fitted.success:
             raise RuntimeError("Probability calibration did not converge")
         return cls(float(fitted.x[0]), float(fitted.x[1]), True)
+
     def probability(self, scores: np.ndarray) -> np.ndarray:
         scores = np.asarray(scores, dtype=float)
         if scores.ndim != 1 or not np.isfinite(scores).all():
             raise ValueError("Probability prediction requires finite one-dimensional scores")
         return expit(self.slope * scores + self.intercept)
+
 @dataclass
 class SplitConformal:
     alpha: float
@@ -63,11 +70,13 @@ class SplitConformal:
     sample_count: int
     identifiers: list[str]
     exchangeability_scope: str = "Coverage requires exchangeable labeled calibration and test examples"
+
     def __post_init__(self) -> None:
         if not 0 < self.alpha < 1 or not 0 <= self.quantile <= 1 or isinstance(self.sample_count, bool) or not isinstance(self.sample_count, (int, np.integer)) or self.sample_count < 1:
             raise ValueError("Invalid split conformal state")
         if not isinstance(self.identifiers, list) or len(self.identifiers) not in (0, self.sample_count) or any(not isinstance(identifier, str) or not identifier.strip() for identifier in self.identifiers) or len(set(self.identifiers)) != len(self.identifiers):
             raise ValueError("Conformal identifiers must be unique and match the sample count")
+
     @classmethod
     def fit(cls, probabilities: np.ndarray, labels: np.ndarray, alpha: float = 0.1, identifiers: list[str] | None = None) -> SplitConformal:
         if not 0 < alpha < 1:
@@ -81,11 +90,13 @@ class SplitConformal:
         # Include the finite-sample conformal correction.
         quantile = float(np.sort(scores)[order - 1]) if order <= len(scores) else 1.0
         return cls(alpha, quantile, len(scores), list(identifiers or []))
+
     def prediction_sets(self, probabilities: np.ndarray) -> list[list[int]]:
         probabilities = np.asarray(probabilities, dtype=float)
         if probabilities.ndim != 1 or not np.isfinite(probabilities).all() or np.any((probabilities < 0) | (probabilities > 1)):
             raise ValueError("Prediction sets require finite probabilities in the unit interval")
         return [[label for label, nonconformity in ((0, probability), (1, 1 - probability)) if nonconformity <= self.quantile] for probability in probabilities]
+
 def validate_partitions(*partitions: list[dict]) -> list[list[str]]:
     identifiers, seen = [], set()
     histories = []
@@ -99,6 +110,7 @@ def validate_partitions(*partitions: list[dict]) -> list[list[str]]:
         seen.update(current)
     disjoint(*histories)
     return identifiers
+
 def calibrate_rows(validation: list[dict], calibration: list[dict], alpha: float = 0.1, score_key: str = "fusion_risk") -> dict:
     validation, calibration = score_rows(validation, score_key), score_rows(calibration, score_key)
     first, second = validate_partitions(validation, calibration)
@@ -110,6 +122,7 @@ def calibrate_rows(validation: list[dict], calibration: list[dict], alpha: float
     probabilities = platt.probability(np.array([row[score_key] for row in calibration]))
     conformal = SplitConformal.fit(probabilities, np.array([row["label"] for row in calibration]), alpha, [row["id"] for row in calibration])
     return {"version": "flawprint-calibration-v1", "score_key": score_key, "platt": vars(platt), "conformal": vars(conformal), "validation_identifiers": sorted(first), "evidence_history": collect(validation, calibration)}
+
 def apply_calibration(rows: list[dict], state: dict | None = None) -> list[dict]:
     rows = prediction_rows(rows)
     validate_partitions(rows)

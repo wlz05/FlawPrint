@@ -11,6 +11,7 @@ from engine.conformal import validate_labels, validate_partitions, SplitConforma
 from engine.evidence import paired, transitions
 from engine.metrics import evaluate
 from engine.lineage import collect, ensure_disjoint
+
 def compare(semantic: list[dict], physical: list[dict], deep: list[dict], provenance: dict, repeats: int = 200, seed: int = 42, group_key: str = "group", alpha: float = 0.1, regularization: float = 1e-4) -> dict:
     if not np.isfinite(regularization) or regularization < 0 or not 0 < alpha < 1:
         raise ValueError("Channel comparison requires valid regularization and conformal alpha")

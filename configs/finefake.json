@@ -1,0 +1,7 @@
+{
+  "dataset": "finefake",
+  "labels": "real-one",
+  "image_root": ".",
+  "image_policy": "error",
+  "id_mode": "source"
+}

@@ -10,16 +10,19 @@ from pathlib import Path
 import re
 import tokenize
 from engine.storage import relative_path, read_json, write_json, same_path
+
 def document_path(manuscript: str | None = None) -> Path:
     if manuscript is not None:
         return relative_path(manuscript)
     internal = relative_path("../writing/FlawPrint.md")
     return internal if internal.is_file() else relative_path("./README.md")
+
 def snapshot_path(manuscript: str | None = None, snapshot: str | None = None) -> Path:
     if snapshot is not None:
         return relative_path(snapshot)
     internal = relative_path("../writing/FlawPrint.md")
     return relative_path("../procedure/materials/implementation/manuscript_snapshot.md") if same_path(document_path(manuscript), internal) else relative_path("./outputs/audit_snapshot.md")
+
 def manuscript_status(manuscript: str | None = None, snapshot: str | None = None, accept: bool = False) -> dict:
     path, saved = document_path(manuscript), snapshot_path(manuscript, snapshot)
     if same_path(path, saved) or same_path(path, saved.with_suffix(".json")):
@@ -35,14 +38,17 @@ def manuscript_status(manuscript: str | None = None, snapshot: str | None = None
         saved.write_bytes(content)
         write_json(saved.with_suffix(".json"), {key: value for key, value in result.items() if key != "diff"})
     return result
+
 def source_files(root: str = ".") -> list[Path]:
     return sorted(path for path in relative_path(root).rglob("*.py") if not set(path.parts).intersection((".git", ".venv", "venv", "node_modules", "__pycache__")))
+
 def source_digest(root: str = ".") -> str:
     checksum = hashlib.sha256()
     for path in source_files(root):
         checksum.update(path.relative_to(relative_path(root)).as_posix().encode("utf-8") + b"\x00")
         checksum.update(path.read_bytes() + b"\x00")
     return checksum.hexdigest()
+
 def manuscript_title(manuscript: str | None = None) -> str:
     for line in document_path(manuscript).read_text(encoding="utf-8-sig").splitlines():
         if line.startswith("# "):
@@ -51,6 +57,7 @@ def manuscript_title(manuscript: str | None = None) -> str:
                 raise ValueError("The manuscript requires an English ASCII top-level title")
             return title
     raise ValueError("The manuscript has no top-level title")
+
 def conventions(root: str = ".", manuscript: str | None = None) -> dict:
     files = source_files(root)
     issues, lines, comments = [], 0, 0
@@ -70,7 +77,7 @@ def conventions(root: str = ".", manuscript: str | None = None) -> dict:
         if not valid_footer:
             issues.append({"file": path.as_posix(), "rule": "author-footer"})
         for number, line in enumerate(source.splitlines(), 1):
-            if not line.strip() and number != 3 and not (valid_footer and number == len(content) - 2):
+            if not line.strip() and number > 1 and not content[number - 2].strip():
                 issues.append({"file": path.as_posix(), "line": number, "rule": "blank-line"})
             if not line.isascii():
                 issues.append({"file": path.as_posix(), "line": number, "rule": "non-english-source"})

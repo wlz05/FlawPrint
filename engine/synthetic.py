@@ -8,6 +8,7 @@ from PIL import Image
 from scipy.ndimage import gaussian_filter
 from engine.traces import NAMES
 from engine.storage import relative_path, write_rows, save_bundle
+
 def fixture(seed: int = 42, per_split: int = 24) -> dict:
     if per_split < 12:
         raise ValueError("Synthetic splits require twelve examples")
@@ -32,10 +33,12 @@ def fixture(seed: int = 42, per_split: int = 24) -> dict:
                     row["label"] = label
                 rows.append(row)
     return {"values": np.asarray(values), "observed": np.ones((len(rows), dimension), dtype=bool), "patches": np.asarray(patches), "names": np.asarray(NAMES), "rows": rows}
+
 def write_fixture(output: str, seed: int = 42, per_split: int = 24) -> dict:
     bundle = fixture(seed, per_split)
     save_bundle(output, bundle["values"], bundle["observed"], bundle["patches"], bundle["rows"], NAMES)
     return {"samples": len(bundle["rows"]), "features": len(NAMES), "output": output, "scope": "Synthetic feature fixture only"}
+
 def image_demo(output: str = "./data/demo", seed: int = 42, per_split: int = 16) -> dict:
     bundle = fixture(seed, per_split)
     root = relative_path(output)

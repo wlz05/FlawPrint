@@ -8,6 +8,7 @@ from PIL import Image
 from engine.data import audit_splits, normalize
 from engine.storage import digest, relative_path
 from engine.traces import TraceConfig
+
 def preflight(records: list[dict], check_images: bool = False, benchmark: bool = False, min_samples: int = 20, config: TraceConfig | None = None) -> dict:
     if isinstance(min_samples, bool) or not isinstance(min_samples, int) or min_samples < 2:
         raise ValueError("The minimum profile size must be an integer of at least two")

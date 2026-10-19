@@ -14,7 +14,9 @@ from engine.results import prediction_rows, score_rows
 from engine.dependence import availability
 from engine.data import missing
 from engine.storage import subset, validate_bundle
+
 METRICS = ("auc", "macro_f1", "accuracy", "ece", "brier", "log_loss", "macro_domain_auc", "macro_domain_f1")
+
 def orientation(genuine: np.ndarray, fake: np.ndarray, fractions: list[float] | None = None) -> dict:
     if any(np.asarray(reference).dtype.kind == "b" for reference in (genuine, fake)):
         raise ValueError("Class correlation matrices require numeric values")
@@ -49,6 +51,7 @@ def orientation(genuine: np.ndarray, fake: np.ndarray, fractions: list[float] | 
         crossing, status = float(endpoints[1] == 0), "endpoint_crossing"
     maximum = crossing if crossing is not None else None if status == "class_references_indistinguishable_at_tolerance" else 0.0 if endpoints[0] < 0 else 1.0
     return {"genuine_reference": genuine.tolist(), "fake_reference": fake.tolist(), "points": points, "endpoint_gaps": endpoints, "crossing_fraction": crossing, "crossing_status": status, "gaussian_entropy_maximizing_fraction": maximum, "reference_difference_tolerance": 1e-10, "strict_decrease_condition": "Distinct positive definite class references under the stated common-marginal population model", "scope": "Offline class-reference mechanism analysis with zero means, common standard normal marginals and unregularized linear population correlation mixing; the Gaussian projection entropy is not the actual mixture entropy; mean direction is not an AUC guarantee; class references and test labels never choose deployment orientation"}
+
 def mechanism(rho: float = 0.8, samples: int = 5000, pool_size: int = 1000, repeats: int = 3, fractions: list[float] | None = None, shrinkage: float = 0.1, seed: int = 42) -> dict:
     if not np.isfinite(rho) or not 0 < rho < 1 or not np.isfinite(shrinkage) or not 0 <= shrinkage <= 1:
         raise ValueError("Mechanism correlation must be positive below one and shrinkage must lie in the unit interval")
@@ -90,8 +93,10 @@ def mechanism(rho: float = 0.8, samples: int = 5000, pool_size: int = 1000, repe
             screening = availability(fitted)
             estimated.append({"requested_fake_fraction": fraction, "actual_fake_fraction": fake_count / pool_size, "repetition": repetition, "profile_samples": pool_size, "estimated_correlation": float(fitted[0, 1]), "observed_gap": float(values[:samples].mean() - values[samples:].mean()), "gaussian_power_screen": screening["power_screen"], "pool_fourth_moment_excess": float(np.mean(pool[:, 0] ** 2 * pool[:, 1] ** 2) - 1), "metrics": binary(labels, -values)})
     return {"settings": {"rho": rho, "samples_per_class": samples, "profile_samples": pool_size, "repeats": repeats, "fractions": fractions.tolist(), "shrinkage": shrinkage, "seed": seed}, "population": population, "estimated": estimated, "marginal_controls": {"population_single_coordinate_auc": 0.5, "empirical_single_coordinate_auc": [binary(labels, queries[:, column])["auc"] for column in range(2)]}, "oracle_class_likelihood_ratio_metrics": binary(labels, (score(queries, fake_reference) - score(queries, genuine_reference)) / 2), "class_self_reference_mean": -float(np.log1p(-rho ** 2)), "genuine_covariance": genuine_reference.tolist(), "fake_covariance": fake_reference.tolist(), "test_set_policy": "One frozen independently generated test set shared across all profile fractions and repetitions", "population_reference_policy": "Known standard-normal marginals and exact Gaussian correlation summary of a component mixture", "estimated_reference_policy": "Fresh independent profile draws, empirical PIT and configured correlation shrinkage; no labels passed to marginal fitting or correlation estimation", "scope": "Synthetic component labels are not verified news veracity; equal marginals can conceal dependence; zero correlation does not imply independence; model availability does not establish label orientation or real-world benefit"}
+
 def differences(reference: dict, candidate: dict) -> dict:
     return {key: candidate[key] - reference[key] if candidate.get(key) is not None and reference.get(key) is not None else None for key in METRICS}
+
 def paired(reference: list[dict], candidate: list[dict], score_key: str = "fusion_risk", repeats: int = 1000, seed: int = 42, group_key: str = "domain") -> dict:
     if isinstance(repeats, bool) or not isinstance(repeats, int) or repeats < 20 or group_key not in ("domain", "group"):
         raise ValueError("Paired evaluation requires twenty repeats and a domain or event grouping key")
@@ -138,6 +143,7 @@ def paired(reference: list[dict], candidate: list[dict], score_key: str = "fusio
         first_report, second_report = evaluate([reference[index] for index in selected], score_key), evaluate([candidate[index] for index in selected], score_key)
         domains[domain] = {"samples": len(selected), "reference": first_report, "candidate": second_report, "delta": differences(first_report, second_report)}
     return {"samples": len(reference), "reference": left, "candidate": right, "delta": differences(left, right), "paired_intervals": intervals, "unit": group_key, "independent_groups": len(keys), "repeats": repeats, "seed": seed, "domains": domains, "decision_coverage": {"reference": float(np.mean([not row.get("abstain", False) for row in reference])), "candidate": float(np.mean([not row.get("abstain", False) for row in candidate]))}, "scope": "Paired descriptive cluster bootstrap; full-score classification and selective decision coverage are separate; one group cannot provide a group confidence interval; this does not establish official SOTA provenance"}
+
 def transitions(reference: list[dict], candidate: list[dict], score_key: str) -> dict:
     reference, candidate = score_rows(reference, score_key), score_rows(candidate, score_key)
     validate_partitions(reference)
@@ -158,6 +164,7 @@ def transitions(reference: list[dict], candidate: list[dict], score_key: str) ->
     decided = rescued + harmed + unchanged_correct + unchanged_wrong
     wrong_reference, correct_reference = rescued + unchanged_wrong, harmed + unchanged_correct
     return {"samples": len(reference), "joint_decided": decided, "joint_decision_coverage": decided / len(reference) if reference else None, "rescued": rescued, "harmed": harmed, "unchanged_correct": unchanged_correct, "unchanged_wrong": unchanged_wrong, "reference_wrong": wrong_reference, "reference_correct": correct_reference, "rescue_rate_given_reference_error": rescued / wrong_reference if wrong_reference else None, "harm_rate_given_reference_correct": harmed / correct_reference if correct_reference else None, "rescue_fraction": rescued / decided if decided else None, "harm_fraction": harmed / decided if decided else None, "matched_accuracy_delta": (rescued - harmed) / decided if decided else None, "scope": "Error transitions use only rows decided by both methods; full-score metrics retain every input"}
+
 def stratified(reference: list[dict], candidate: list[dict], annotations: list[dict], score_key: str = "fusion_risk", repeats: int = 1000, seed: int = 42, group_key: str = "domain") -> dict:
     reference, candidate, annotations = prediction_rows(reference), prediction_rows(candidate), prediction_rows(annotations)
     overall = paired(reference, candidate, score_key, repeats, seed, group_key)
@@ -197,6 +204,7 @@ def stratified(reference: list[dict], candidate: list[dict], annotations: list[d
     changes = transitions(reference, candidate, score_key)
     known = sum(status != "unknown" for status in statuses.values())
     return {"overall": overall, "transitions": changes, "physical_status": status_reports, "cells": cells, "annotation_coverage": {"known": known, "unknown": len(identifiers) - known, "total": len(identifiers), "fraction": known / len(identifiers), "sources": sorted(sources)}, "accuracy_accounting": {"cell_rescued_total": sum(cell["transitions"]["rescued"] for cell in cells), "cell_harmed_total": sum(cell["transitions"]["harmed"] for cell in cells), "cell_joint_decided_total": sum(cell["transitions"]["joint_decided"] for cell in cells), "matched_accuracy_delta": changes["matched_accuracy_delta"], "full_population_identity_applicable": changes["joint_decided"] == len(identifiers)}, "annotation_policy": "Offline external physical attributes; missing status remains unknown; annotations never change predictions, reference fitting, thresholds or deployment gates", "scope": "Descriptive physical-status and news-label heterogeneity; single-class AUC and absent cells are undefined; subgroup intervals do not test interactions or establish causal effects; aggregate improvements can conceal subgroup harm"}
+
 def mixture(pool: dict, test: dict, domain: str, config: ProfileConfig, fractions: list[float], size: int = 40, repeats: int = 5, seed: int = 42, image_only: bool = False) -> dict:
     validate_bundle(pool)
     validate_bundle(test)

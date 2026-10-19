@@ -9,14 +9,17 @@ import json
 import os
 import numpy as np
 from engine.storage import relative_path
+
 SPLITS = ("train", "validation", "calibration", "profile", "test")
 SPLIT_ALIASES = {"val": "validation", "valid": "validation", "dev": "validation", "training": "train", "testing": "test", "cal": "calibration"}
+
 def missing(value: object) -> bool:
     if value is None or type(value).__name__ in ("NAType", "NaTType"):
         return True
     if isinstance(value, (float, np.floating)):
         return bool(np.isnan(value))
     return isinstance(value, str) and value.strip().casefold() in ("", "none", "null", "nan", "<na>")
+
 def identifier(value: object) -> str:
     if missing(value):
         return ""
@@ -27,9 +30,11 @@ def identifier(value: object) -> str:
     if not isinstance(value, (str, int, np.integer)) or isinstance(value, bool):
         raise ValueError("Identifiers must be strings or integer values")
     return str(value).strip()
+
 def stable_identifier(text: str, image: str, domain: str) -> str:
     content = json.dumps({"text": text, "image": image, "domain": domain}, sort_keys=True, ensure_ascii=True, separators=(",", ":"))
     return "sample:" + hashlib.sha256(content.encode("utf-8")).hexdigest()[:24]
+
 def portable_image(value: object, root: str | Path = ".") -> str:
     if missing(value):
         return ""
@@ -42,6 +47,7 @@ def portable_image(value: object, root: str | Path = ".") -> str:
     if base.parts and image.parts[:len(base.parts)] != base.parts:
         image = base / image
     return Path(os.path.normpath(image)).as_posix()
+
 def boolean(value: object) -> bool:
     if isinstance(value, (bool, np.bool_)):
         return bool(value)
@@ -50,6 +56,7 @@ def boolean(value: object) -> bool:
     if isinstance(value, (int, float, np.integer, np.floating)) and value in (0, 1):
         return bool(value)
     raise ValueError("Boolean metadata must be true, false, zero, or one")
+
 def normalize(rows: list[dict], image_root: str = ".", label_convention: str = "fake-one", domain_key: str = "domain") -> list[dict]:
     if label_convention not in ("fake-one", "real-one"):
         raise ValueError("Unknown label convention")
@@ -107,6 +114,7 @@ def normalize(rows: list[dict], image_root: str = ".", label_convention: str = "
                 row.pop(key, None)
         output.append(row)
     return output
+
 def partition(rows: list[dict], target_domains: list[str], seed: int = 42, profile_fraction: float = 0.35) -> list[dict]:
     if not 0 < profile_fraction < 1:
         raise ValueError("Profile fraction must be between zero and one")
@@ -144,6 +152,7 @@ def partition(rows: list[dict], target_domains: list[str], seed: int = 42, profi
                     row.pop("label", None)
                 result.append(row)
     return sorted(result, key=lambda row: row["id"])
+
 def audit_splits(rows: list[dict], check_files: bool = False) -> dict:
     groups, images, contents = defaultdict(set), defaultdict(set), defaultdict(set)
     counts = defaultdict(int)
@@ -164,6 +173,7 @@ def audit_splits(rows: list[dict], check_files: bool = False) -> dict:
     if any(leaks.values()):
         raise ValueError(f"Cross-split leakage detected: {leaks}")
     return {"counts": dict(counts), "samples": len(rows), "leakage": leaks, "label_convention": "zero-real-one-fake"}
+
 def join_predictions(rows: list[dict], predictions: list[dict], score_key: str = "logit", real_positive: bool = False) -> list[dict]:
     lookup = {}
     for prediction in predictions:

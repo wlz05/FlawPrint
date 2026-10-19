@@ -7,6 +7,7 @@ from pathlib import Path
 from engine.storage import digest, read_json, read_rows, relative_path, resolved, same_path, write_json, write_rows
 from engine.data import audit_splits, normalize
 from engine.formats import Conversion, FIELDS, convert_records
+
 def convert_files(inputs: list[str], config: Conversion, encoding: str = "utf-8-sig", delimiter: str | None = None, records_key: str | None = None, sheet: str | int = 0, trusted_pickle: bool = False, check_files: bool = False) -> tuple[list[dict], dict]:
     paths = [relative_path(item) for item in inputs]
     if not paths or any(same_path(first, second) for index, first in enumerate(paths) for second in paths[index + 1:]):
@@ -25,10 +26,11 @@ def convert_files(inputs: list[str], config: Conversion, encoding: str = "utf-8-
         raise ValueError("No samples remain after conversion")
     audit = audit_splits(rows, check_files)
     return rows, {"version": "FlawPrint conversion 1", "configuration": config.state(), "reader": {"encoding": encoding, "delimiter": delimiter, "records_key": records_key, "sheet": sheet, "trusted_pickle": trusted_pickle}, "inputs": reports, "samples": len(rows), "audit": audit, "label_contract": "zero-real-one-fake", "path_base": "process working directory"}
+
 def arguments() -> tuple[argparse.ArgumentParser, argparse.Namespace]:
     parser = argparse.ArgumentParser(description="Convert dataset tables to an audited portable manifest.")
     parser.add_argument("input", nargs="+")
-    parser.add_argument("--dataset", choices=("canonical", "finefake", "weibo21", "custom"))
+    parser.add_argument("--dataset", type=str.lower, choices=("canonical", "weibo", "finefake", "weibo21", "custom"))
     parser.add_argument("--mapping", help="Load a Conversion configuration from relative JSON")
     parser.add_argument("--trusted-pickle", action="store_true")
     parser.add_argument("--image-root")
@@ -53,6 +55,7 @@ def arguments() -> tuple[argparse.ArgumentParser, argparse.Namespace]:
     parser.add_argument("--output", default="./data/converted.jsonl")
     parser.add_argument("--report")
     return parser, parser.parse_args()
+
 def main() -> None:
     parser, args = arguments()
     try:
@@ -94,6 +97,7 @@ def main() -> None:
         print(f"Converted {len(rows)} samples; report: {report.as_posix()}")
     except (ValueError, TypeError, OSError, UnicodeError, KeyError) as error:
         parser.error(str(error))
+
 if __name__ == "__main__":
     main()
 

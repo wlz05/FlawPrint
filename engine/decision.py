@@ -13,15 +13,18 @@ from engine.storage import validate_bundle
 from engine.metrics import evaluate, binary
 from engine.results import prediction_rows
 from engine.lineage import collect, ensure_disjoint, scope
+
 @dataclass(frozen=True)
 class GatePolicy:
     min_observed: float = 0.8
     min_image_features: int = 2
     alpha: float = 0.05
     semantic_threshold: float = 0.0
+
     def validate(self) -> None:
         if not 0 < self.min_observed <= 1 or isinstance(self.min_image_features, bool) or not isinstance(self.min_image_features, (int, np.integer)) or self.min_image_features < 2 or not 0 < self.alpha < 0.5 or not np.isfinite(self.semantic_threshold):
             raise ValueError("Invalid deployment gate policy")
+
 def physical_status(profile: DomainProfile | None, bundle: dict, policy: GatePolicy) -> list[dict]:
     policy.validate()
     validate_bundle(bundle)
@@ -46,6 +49,7 @@ def physical_status(profile: DomainProfile | None, bundle: dict, policy: GatePol
             reasons.append("domain_power_screen_failed")
         result.append({"physical_available": not reasons, "physical_gate_reasons": reasons, "image_observed_fraction": observed, "image_profile_features": len(columns), "physical_power_screen": screen})
     return result
+
 def route_rows(rows: list[dict], statuses: list[dict], policy: GatePolicy) -> list[dict]:
     policy.validate()
     if len(rows) != len(statuses):
@@ -61,6 +65,7 @@ def route_rows(rows: list[dict], statuses: list[dict], policy: GatePolicy) -> li
             result["physical_available"] = False
             result["physical_gate_reasons"] = list(status["physical_gate_reasons"]) + ["missing_or_nonfinite_physical_score"]
         result["semantic_available"] = bool(semantic_ready)
+        # Route through the channels with usable evidence.
         if physical_ready and semantic_ready:
             route, risk = "fusion", max(float(physical), float(semantic) - policy.semantic_threshold)
         elif semantic_ready:
@@ -72,6 +77,7 @@ def route_rows(rows: list[dict], statuses: list[dict], policy: GatePolicy) -> li
         result.update(decision_route=route, fusion_risk=risk, prediction=int(risk >= 0) if risk is not None else None, abstain=risk is None, probability=None, probability_calibrated=False, prediction_set=None, decision_scope="Available evidence only; physical consistency does not establish factual truth", routing_policy=asdict(policy))
         output.append(result)
     return output
+
 def deploy(bundle: dict, profile: DomainProfile | None, policy: GatePolicy, explain: bool = False, signs: bool = True, calibration: dict | None = None) -> list[dict]:
     statuses = physical_status(profile, bundle, policy)
     if profile is not None:
@@ -86,6 +92,7 @@ def deploy(bundle: dict, profile: DomainProfile | None, policy: GatePolicy, expl
                 row[key] = original[key]
     routed = route_rows(rows, statuses, policy)
     return apply_routes(routed, calibration)
+
 def calibrate_routes(validation: list[dict], calibration: list[dict], alpha: float = 0.1) -> dict:
     validation, calibration = prediction_rows(validation), prediction_rows(calibration)
     if not validation or not calibration:
@@ -110,6 +117,7 @@ def calibrate_routes(validation: list[dict], calibration: list[dict], alpha: flo
     if not states:
         raise ValueError("No evidence route has independent validation and calibration samples")
     return {"version": "flawprint-route-calibration-v1", "routing_policy": policy, "routes": states, "skipped_routes": skipped, "validation_identifiers": [row["id"] for row in validation], "calibration_identifiers": [row["id"] for row in calibration], "evidence_history": collect(validation, calibration), "scope": "Route-conditional coverage requires exchangeable labeled samples within each route"}
+
 def apply_routes(rows: list[dict], state: dict | None = None) -> list[dict]:
     rows = prediction_rows(rows)
     validate_partitions(rows)
@@ -142,6 +150,7 @@ def apply_routes(rows: list[dict], state: dict | None = None) -> list[dict]:
         result["route_overlap_audit"] = scope(state.get("evidence_history")) if state else "not_calibrated"
         output.append(result)
     return output
+
 def deployment_report(rows: list[dict], stratify: bool = True) -> dict:
     rows = prediction_rows(rows)
     if not rows:

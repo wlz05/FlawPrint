@@ -8,7 +8,9 @@ from decimal import Decimal, InvalidOperation
 import json
 import math
 from engine.data import SPLITS, SPLIT_ALIASES, identifier, missing, normalize, stable_identifier, portable_image
+
 FIELDS = {"id": ("id", "news_id", "post_id", "tweet_id", "uid"), "image": ("image", "image_path", "images", "image_url", "picture"), "text": ("text", "content", "body", "news_text"), "label": ("label", "target", "class", "y"), "domain": ("domain", "topic", "category"), "platform": ("platform",), "group": ("group", "event_id", "cluster_id"), "split": ("split", "partition", "subset"), "semantic_logit": ("semantic_logit", "logit")}
+
 @dataclass
 class Conversion:
     dataset: str = "canonical"
@@ -26,10 +28,15 @@ class Conversion:
     split: str | None = None
     exclude_domains: list[str] = field(default_factory=list)
     keep_columns: list[str] = field(default_factory=list)
+
     def validate(self) -> None:
+        if not isinstance(self.dataset, str):
+            raise ValueError("The dataset name must be a string")
+        # Normalize names before selecting dataset rules.
+        self.dataset = self.dataset.strip().lower()
         if not isinstance(self.columns, dict) or any(not isinstance(value, list) for value in (self.exclude_domains, self.keep_columns)):
             raise ValueError("Columns must be an object and exclusions and retained fields must be lists")
-        if self.dataset not in ("canonical", "finefake", "weibo21", "custom") or self.labels not in (None, "fake-one", "real-one"):
+        if self.dataset not in ("canonical", "weibo", "finefake", "weibo21", "custom") or self.labels not in (None, "fake-one", "real-one"):
             raise ValueError("Unknown dataset or label convention")
         if self.image_policy not in ("error", "first", "all") or self.id_mode not in ("source", "content"):
             raise ValueError("Unknown image policy or ID mode")
@@ -50,11 +57,14 @@ class Conversion:
             raise ValueError("Image separators and removable prefixes must be nonempty")
         if not isinstance(self.id_prefix, str) or any(not isinstance(item, str) for item in (*self.exclude_domains, *self.keep_columns)):
             raise ValueError("ID prefixes, excluded domains, and retained columns must be strings")
+
     def state(self) -> dict:
         return asdict(self)
+
 def canonical_split(value: object) -> str:
     text = "unspecified" if missing(value) else str(value).strip().casefold()
     return SPLIT_ALIASES.get(text, text)
+
 def resolve_columns(records: list[dict], config: Conversion) -> dict[str, str]:
     names = {key for row in records for key in row}
     folded = {}
@@ -78,7 +88,7 @@ def resolve_columns(records: list[dict], config: Conversion) -> dict[str, str]:
                 raise ValueError(f"Ambiguous {field} columns; provide an explicit mapping")
             if candidates:
                 selected[field] = candidates[0]
-    required = ("text", "label", "domain") if config.dataset in ("finefake", "weibo21") else ()
+    required = ("text", "label", "domain") if config.dataset in ("weibo", "finefake", "weibo21") else ()
     if any(field not in selected for field in required):
         raise ValueError("Required columns are missing: " + ", ".join(field for field in required if field not in selected))
     if "text" not in selected and "image" not in selected:
@@ -86,6 +96,7 @@ def resolve_columns(records: list[dict], config: Conversion) -> dict[str, str]:
     if any(name not in names for name in config.keep_columns):
         raise ValueError("A requested retained column does not exist")
     return selected
+
 def images(value: object, config: Conversion) -> list[str]:
     if missing(value):
         return [""]
@@ -122,6 +133,7 @@ def images(value: object, config: Conversion) -> list[str]:
             raise ValueError("An image list contains a duplicate path")
         output.append(path)
     return output or [""]
+
 def label_token(value: object) -> str:
     token = str(value).strip()
     try:
@@ -131,6 +143,7 @@ def label_token(value: object) -> str:
     except InvalidOperation:
         pass
     return token
+
 def convert_records(records: list[dict], config: Conversion, source: str = "") -> tuple[list[dict], dict]:
     config.validate()
     if not records:

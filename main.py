@@ -28,20 +28,24 @@ from engine.theory import verify
 from engine.invariance import verify as verify_invariance
 from engine.decision import GatePolicy, deploy, calibrate_routes, deployment_report
 from engine.package import VERSION
+
 def profile_config(path: str | None) -> ProfileConfig:
     config = ProfileConfig(**read_json(path)) if path else ProfileConfig()
     config.validate()
     return config
+
 def choose(bundle: dict, split: str | None = None, domain: str | None = None) -> dict:
     selected = [index for index, row in enumerate(bundle["rows"]) if (split is None or row["split"] == split) and (domain is None or row["domain"] == domain)]
     if not selected:
         raise ValueError("The requested sample selection is empty")
     return subset(bundle, selected)
+
 def command_prepare(args: argparse.Namespace) -> dict:
     rows = normalize(read_rows(args.input, args.encoding, args.delimiter, args.records_key), args.image_root, args.labels, args.domain_key)
     audit = audit_splits(rows)
     write_rows(args.output, rows)
     return {"samples": len(rows), "output": args.output, "label_convention": "zero-real-one-fake", "audit": audit}
+
 def command_validate(args: argparse.Namespace) -> dict:
     config = TraceConfig(args.max_side, args.tile_grid, args.min_side)
     result = preflight(read_rows(args.input), args.check_images, args.benchmark, args.min_samples, config)
@@ -49,16 +53,19 @@ def command_validate(args: argparse.Namespace) -> dict:
     if not result["passed"]:
         raise ValueError("Data preflight failed; inspect " + args.output)
     return {key: result[key] for key in ("passed", "samples", "counts", "warnings")}
+
 def command_split(args: argparse.Namespace) -> dict:
     rows = normalize(read_rows(args.input))
     result = partition(rows, args.target_domain, args.seed, args.profile_fraction)
     audit = audit_splits(result, args.check_files)
     write_rows(args.output, result)
     return audit
+
 def command_join(args: argparse.Namespace) -> dict:
     rows = join_predictions(normalize(read_rows(args.input)), read_rows(args.predictions), args.score_key, args.real_positive)
     write_rows(args.output, rows)
     return {"samples": len(rows), "output": args.output}
+
 def command_extract(args: argparse.Namespace) -> dict:
     from engine.storage import digest
     original_hash = digest(args.input)
@@ -66,11 +73,13 @@ def command_extract(args: argparse.Namespace) -> dict:
     audit = audit_splits(rows, True)
     config = TraceConfig(args.max_side, args.tile_grid, args.min_side)
     values, observed, patches, metadata = extract(rows, config, args.workers)
+    # Verify input stability before saving extracted features.
     if digest(args.input) != original_hash:
         raise ValueError("The manifest changed during extraction; rerun with a stable input")
     save_bundle(args.output, values, observed, patches, metadata, NAMES)
     write_json(str(relative_path(args.output).with_suffix(".provenance.json")), {"version": VERSION, "manifest": {"path": args.input, "sha256": original_hash}, "features": {"path": args.output, "sha256": digest(args.output), "names": NAMES}, "trace_config": asdict(config), "workers": args.workers, "source_sha256": source_digest(), "environment": environment(), "audit": audit})
     return {"samples": len(rows), "features": len(NAMES), "tiles": patches.shape[1], "output": args.output, "config": asdict(config), "audit": audit}
+
 def command_profile(args: argparse.Namespace) -> dict:
     from engine.storage import digest
     predictions, metadata = getattr(args, "selector_predictions", None), getattr(args, "selector_metadata", None)
@@ -91,6 +100,7 @@ def command_profile(args: argparse.Namespace) -> dict:
         raise ValueError("A profile input changed during fitting")
     profile.save(args.output)
     return profile.quality
+
 def command_predict(args: argparse.Namespace) -> dict:
     bundle = choose(load_bundle(args.features), args.split, args.domain)
     profile = DomainProfile.load(args.profile)
@@ -105,11 +115,13 @@ def command_predict(args: argparse.Namespace) -> dict:
     rows = apply_calibration(rows, read_json(args.calibration) if args.calibration else None)
     write_rows(args.output, rows)
     return {"samples": len(rows), "output": args.output, "calibrated": bool(args.calibration), "profile_domain": profile.domain}
+
 def command_calibrate(args: argparse.Namespace) -> dict:
     validation, calibration = prediction_rows(read_rows(args.validation)), prediction_rows(read_rows(args.calibration))
     state = calibrate_routes(validation, calibration, args.alpha) if args.routed else calibrate_rows(validation, calibration, args.alpha, args.score_key)
     write_json(args.output, state)
     return {"output": args.output, "alpha": args.alpha, "calibration_samples": len(calibration), "routed": args.routed}
+
 def command_deploy(args: argparse.Namespace) -> dict:
     bundle = choose(load_bundle(args.features), args.split, args.domain)
     profile = DomainProfile.load(args.profile) if args.profile else None
@@ -119,6 +131,7 @@ def command_deploy(args: argparse.Namespace) -> dict:
     report = deployment_report(rows)
     write_json(args.report, report)
     return {key: report[key] for key in ("samples", "accepted_samples", "decision_coverage", "routes", "gate_reasons")}
+
 def command_evaluate(args: argparse.Namespace) -> dict:
     rows = prediction_rows(read_rows(args.predictions))
     if rows and all("decision_route" in row for row in rows):
@@ -130,6 +143,7 @@ def command_evaluate(args: argparse.Namespace) -> dict:
         result["bootstrap"] = group_bootstrap(rows, args.score_key, args.bootstrap, args.seed, args.group_key)
     write_json(args.output, result)
     return {key: result.get(key) for key in ("samples", "auc", "macro_f1", "ece", "brier", "macro_domain_auc")}
+
 def command_benchmark(args: argparse.Namespace) -> dict:
     from engine.storage import digest
     original_hash = digest(args.features)
@@ -140,18 +154,23 @@ def command_benchmark(args: argparse.Namespace) -> dict:
     provenance_path = relative_path(args.output) / "provenance.json"
     provenance = read_json(provenance_path)
     provenance["input"] = {"path": args.features, "sha256": original_hash}
+    if getattr(args, "dataset", None):
+        provenance["dataset"] = args.dataset
     if args.config:
         provenance["configuration_file"] = {"path": args.config, "sha256": digest(args.config)}
     write_json(provenance_path, provenance)
     return {"methods": list(result["methods"]), "skipped": result["skipped"], "output": args.output}
+
 def command_theory(args: argparse.Namespace) -> dict:
     result = verify(args.seed, args.samples, args.repetitions)
     write_json(args.output, result)
     return {"maximum_identity_error": max(result["identity_errors"].values()), "output": args.output, "scope": result["scope"]}
+
 def command_invariance(args: argparse.Namespace) -> dict:
     result = verify_invariance(args.seed, args.samples, args.dimensions, args.repetitions)
     write_json(args.output, result)
     return {"output": args.output, "pairing_identities_verified": result["fixed_reference_pairing"]["summary"]["all_identities_verified"], "shared_map_invariance": all(item["invariance_verified"] for item in result["shared_coordinate_maps"]), "marginal_attack": result["marginal_attack"], "scope": "Synthetic F25 diagnostics with explicit reference and tie boundaries"}
+
 def command_mma(args: argparse.Namespace) -> dict:
     bundle = choose(load_bundle(args.features), args.split, args.domain)
     genuine = [index for index, row in enumerate(bundle["rows"]) if row.get("label") == 0]
@@ -174,6 +193,7 @@ def command_mma(args: argparse.Namespace) -> dict:
     report = {"before": before, "after": after, "scope": "Oracle joint feature and patch replay; semantic predictions remain unchanged" if args.joint else "Feature-space attack; local patch signs are invalid and must be disabled for this attacked bundle", "joint_replay": args.joint}
     write_json(args.report, report)
     return {"output": args.output, "report": args.report, "largest_ks_after": after["largest_ks"]}
+
 def command_dependence(args: argparse.Namespace) -> dict:
     bundle = choose(load_bundle(args.features), args.split, args.domain)
     profile = DomainProfile.load(args.profile)
@@ -184,6 +204,7 @@ def command_dependence(args: argparse.Namespace) -> dict:
     result = {"tail": tail_report(uniform, profile.names, args.tail_threshold), "permutation": permutation_calibration(z, profile.reference, args.repeats, args.alpha, args.seed, len(profile.identifiers)), "availability": availability(profile.reference, args.alpha, args.batch_size), "student": student_selection(uniform) if args.student else None}
     write_json(args.output, result)
     return {"output": args.output, "dependence_p_value": result["permutation"]["dependence_p_value"], "power_screen": result["availability"]["power_screen"]}
+
 def command_stream(args: argparse.Namespace) -> dict:
     profiles = [DomainProfile.load(path) for path in args.history]
     prior = pool(profiles, args.domain)
@@ -191,6 +212,7 @@ def command_stream(args: argparse.Namespace) -> dict:
     profile = adapt(prior, bundle, args.domain, args.n0)
     profile.save(args.output)
     return profile.quality
+
 def command_platform(args: argparse.Namespace) -> dict:
     profiles = [DomainProfile.load(path) for path in args.profiles]
     common = sorted(set.intersection(*(set(profile.columns) for profile in profiles)))
@@ -204,6 +226,7 @@ def command_platform(args: argparse.Namespace) -> dict:
     result["attenuation"] = [{"domain": domain, "coefficient": coefficient, "condition_number": float(np.linalg.cond(attenuation(reference, np.full(len(reference), coefficient)))), "mean_gap": availability(attenuation(reference, np.full(len(reference), coefficient)))["mean_gap"]} for domain, reference in references.items() for coefficient in (1.0, 0.8, 0.6, 0.4, 0.2)]
     write_json(args.output, result)
     return {"output": args.output, "domains": list(references), "common_features": len(common)}
+
 def command_audit(args: argparse.Namespace) -> dict:
     document, snapshot = document_path(args.manuscript), snapshot_path(args.manuscript, args.snapshot)
     if any(same_path(args.output, path) for path in (document, snapshot, snapshot.with_suffix(".json"))):
@@ -216,6 +239,7 @@ def command_audit(args: argparse.Namespace) -> dict:
     if not result["conventions"]["passed"]:
         raise ValueError("Code conventions failed; inspect the audit report")
     return {"code": result["conventions"], "manuscript_changed": result["manuscript"]["changed"], "formulas": result["manuscript"]["formulas"], "output": args.output}
+
 def arguments() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run the FlawPrint forensic research workflow.")
     parser.add_argument("--version", action="version", version=VERSION)
@@ -320,6 +344,7 @@ def arguments() -> argparse.Namespace:
     evaluation.set_defaults(handler=command_evaluate)
     comparison = commands.add_parser("benchmark", help="Run controls, FlawPrint, and optional ablations")
     comparison.add_argument("features")
+    comparison.add_argument("--dataset", type=str.lower, choices=("weibo", "weibo21", "finefake"))
     comparison.add_argument("--config", default="./configs/default.json")
     comparison.add_argument("--output", default="./outputs/benchmark")
     comparison.add_argument("--bootstrap", type=int, default=200)
@@ -408,9 +433,11 @@ def arguments() -> argparse.Namespace:
     demo.add_argument("--per-split", type=int, default=16)
     demo.set_defaults(handler=lambda args: image_demo(args.output, args.seed, args.per_split))
     return parser.parse_args()
+
 def save_result(path: str, result: dict) -> dict:
     write_json(path, result)
     return {"output": path}
+
 def main() -> None:
     args = arguments()
     try:
@@ -428,6 +455,7 @@ def main() -> None:
     import json
     from engine.storage import native
     print(json.dumps(native(result), ensure_ascii=True, indent=2, allow_nan=False))
+
 if __name__ == "__main__":
     main()
 

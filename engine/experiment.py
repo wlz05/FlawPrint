@@ -22,8 +22,10 @@ from engine.provenance import source_digest
 from doctor import environment
 from engine.lineage import collect
 from engine.results import prediction_rows
+
 def indices(bundle: dict, split: str, domain: str | None = None) -> list[int]:
     return [index for index, row in enumerate(bundle["rows"]) if row["split"] == split and (domain is None or row["domain"] == domain)]
+
 def bundle_digest(bundle: dict) -> str:
     checksum = hashlib.sha256(json.dumps(native(bundle["rows"]), sort_keys=True, ensure_ascii=True, allow_nan=False).encode("utf-8"))
     for key in ("values", "observed", "patches", "names"):
@@ -31,6 +33,7 @@ def bundle_digest(bundle: dict) -> str:
         checksum.update(key.encode("ascii") + str(array.shape).encode("ascii") + array.dtype.str.encode("ascii"))
         checksum.update(array.tobytes())
     return checksum.hexdigest()
+
 def named_risk(bundle: dict, risks: np.ndarray) -> list[dict]:
     result = []
     for row, risk in zip(bundle["rows"], risks):
@@ -38,6 +41,7 @@ def named_risk(bundle: dict, risks: np.ndarray) -> list[dict]:
         item.update(fusion_risk=float(risk), prediction=int(risk >= 0))
         result.append(item)
     return result
+
 def fit_profiles(bundle: dict, config: ProfileConfig, columns: list[int] | None = None) -> dict[str, DomainProfile]:
     domains = sorted({row["domain"] for row in bundle["rows"]})
     profiles = {}
@@ -51,6 +55,7 @@ def fit_profiles(bundle: dict, config: ProfileConfig, columns: list[int] | None 
             raise ValueError(f"No independent profile data for domain {domain}")
         profiles[domain] = DomainProfile.fit(subset(bundle, selected), domain, config, columns)
     return profiles
+
 def physical_rows(bundle: dict, profiles: dict[str, DomainProfile], split: str, mode: str = "physical", fallback: DomainProfile | None = None) -> list[dict]:
     output = []
     for domain in sorted({row["domain"] for row in bundle["rows"]}):
@@ -66,6 +71,7 @@ def physical_rows(bundle: dict, profiles: dict[str, DomainProfile], split: str, 
             row["fusion_risk"] = float(fuse(np.array([physical]), np.array([row["semantic_logit"]]) if mode == "fusion" and "semantic_logit" in row else None)[0])
             output.append(row)
     return sorted(output, key=lambda row: row["id"])
+
 def probability_rows(validation: list[dict], calibration: list[dict], test: list[dict], alpha: float = 0.1, conformal: bool = True) -> tuple[list[dict], dict]:
     validation, calibration, test = prediction_rows(validation), prediction_rows(calibration), prediction_rows(test)
     validate_partitions(validation, calibration, test)
@@ -87,6 +93,7 @@ def probability_rows(validation: list[dict], calibration: list[dict], test: list
         result.append(dict(row, prediction=prediction, probability=float(probability), probability_calibrated=True, prediction_set=prediction_set, abstain=prediction_set is not None and len(prediction_set) != 1, calibration_overlap_audit="identifiers_and_recorded_evidence"))
     state = {"version": "flawprint-calibration-v1" if conformal else "flawprint-probability-v1", "score_key": "fusion_risk", "platt": vars(platt), "conformal": vars(predictor) if predictor else None, "validation_identifiers": [row["id"] for row in validation], "evidence_history": collect(validation, calibration if conformal else []), "scope": "Source probability calibration; target coverage is empirical under domain shift"}
     return result, state
+
 def benchmark(bundle: dict, output: str, config: ProfileConfig, alpha: float = 0.1, bootstraps: int = 200, ablations: bool = False) -> dict:
     config.validate()
     validate_bundle(bundle)
@@ -174,8 +181,9 @@ def benchmark(bundle: dict, output: str, config: ProfileConfig, alpha: float = 0
     write_json((output_path / "report.json").as_posix(), summary)
     write_json((output_path / "calibration.json").as_posix(), states)
     write_json((output_path / "provenance.json").as_posix(), {"source_sha256": source_digest(), "environment": environment(), "configuration": asdict(config), "bootstrap_repetitions": bootstraps, "alpha": alpha, "ablations": ablations, "bundle_sha256": bundle_digest(bundle), "sample_ids_sha256": hashlib.sha256("\n".join(row["id"] for row in bundle["rows"]).encode("utf-8")).hexdigest(), "features": bundle["names"].tolist(), "scope": summary["result_scope"]})
-    write_csv((output_path / "summary.csv").as_posix(), [{"method": name, **{key: result.get(key) for key in ("auc", "macro_f1", "accuracy", "ece", "brier", "macro_domain_auc", "macro_domain_f1")}, "seconds": timing[name]} for name, result in reports.items()])
+    write_csv((output_path / "summary.csv").as_posix(), [{"method": name, **{key: result.get(key) for key in ("accuracy", "macro_f1", "fake_precision", "fake_recall", "fake_f1", "real_precision", "real_recall", "real_f1", "auc", "ece", "brier", "macro_domain_auc", "macro_domain_f1")}, "seconds": timing[name]} for name, result in reports.items()])
     return summary
+
 def domain_matrix(bundle: dict, method: str = "trace_logistic", seed: int = 42) -> dict:
     domains = sorted({row["domain"] for row in bundle["rows"]})
     result, unavailable = [], []

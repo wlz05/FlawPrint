@@ -13,16 +13,20 @@ from os.path import abspath
 from pathlib import Path, PureWindowsPath
 from typing import Any
 import numpy as np
+
 def relative_path(value: str | Path) -> Path:
     path = Path(value)
     if path.is_absolute() or PureWindowsPath(str(value)).drive or str(value).startswith(("\\", "/")):
         raise ValueError("Use a relative filesystem path")
     return path
+
 def resolved(value: str | Path) -> Path:
     return Path(abspath(relative_path(value))).resolve()
+
 def same_path(first: str | Path, second: str | Path) -> bool:
     left, right = resolved(first), resolved(second)
     return left == right or left.exists() and right.exists() and os.path.samefile(left, right)
+
 @contextmanager
 def atomic_stream(path: str | Path, encoding: str = "utf-8", newline: str = "\n"):
     target = relative_path(path)
@@ -38,12 +42,14 @@ def atomic_stream(path: str | Path, encoding: str = "utf-8", newline: str = "\n"
     finally:
         if temporary is not None and temporary.exists():
             temporary.unlink()
+
 def digest(path: str | Path) -> str:
     checksum = hashlib.sha256()
     with relative_path(path).open("rb") as stream:
         for block in iter(lambda: stream.read(1048576), b""):
             checksum.update(block)
     return checksum.hexdigest()
+
 def native(value: Any) -> Any:
     if isinstance(value, np.ndarray):
         return native(value.tolist())
@@ -58,6 +64,7 @@ def native(value: Any) -> Any:
     if isinstance(value, Path):
         return value.as_posix()
     return value
+
 def unique_object(pairs: list[tuple[str, Any]]) -> dict:
     result = {}
     for key, value in pairs:
@@ -65,15 +72,19 @@ def unique_object(pairs: list[tuple[str, Any]]) -> dict:
             raise ValueError("JSON object keys must be unique: " + key)
         result[key] = value
     return result
+
 def invalid_constant(value: str) -> None:
     raise ValueError("JSON values must be finite; use null for missing cells")
+
 def read_json(path: str | Path) -> Any:
     with relative_path(path).open("r", encoding="utf-8-sig") as stream:
         return json.load(stream, object_pairs_hook=unique_object, parse_constant=invalid_constant)
+
 def write_json(path: str | Path, value: Any) -> None:
     content = json.dumps(native(value), ensure_ascii=True, indent=2, allow_nan=False) + "\n"
     with atomic_stream(path) as stream:
         stream.write(content)
+
 def read_rows(path: str | Path, encoding: str = "utf-8-sig", delimiter: str | None = None, records_key: str | None = None, sheet: str | int = 0, trusted_pickle: bool = False) -> list[dict]:
     target = relative_path(path)
     suffix = target.suffix.lower()
@@ -147,6 +158,7 @@ def read_rows(path: str | Path, encoding: str = "utf-8-sig", delimiter: str | No
     if any(not isinstance(row, dict) or any(not isinstance(key, str) for key in row) for row in result):
         raise ValueError("Every input row must be an object with string column names")
     return result
+
 def write_rows(path: str | Path, rows: list[dict]) -> None:
     target = relative_path(path)
     if target.suffix.lower() == ".json":
@@ -160,6 +172,7 @@ def write_rows(path: str | Path, rows: list[dict]) -> None:
     with atomic_stream(target) as stream:
         for row in rows:
             stream.write(json.dumps(native(row), ensure_ascii=True, allow_nan=False) + "\n")
+
 def write_csv(path: str | Path, rows: list[dict], delimiter: str = ",") -> None:
     target = relative_path(path)
     fields = list(dict.fromkeys(key for row in rows for key in row))
@@ -172,18 +185,21 @@ def write_csv(path: str | Path, rows: list[dict], delimiter: str = ",") -> None:
         writer.writeheader()
         for row in native(rows):
             writer.writerow({key: json.dumps(value, ensure_ascii=True) if isinstance(value, (list, dict)) else value for key, value in row.items()})
+
 def save_bundle(path: str | Path, values: np.ndarray, observed: np.ndarray, patches: np.ndarray, rows: list[dict], names: list[str]) -> None:
     validate_bundle({"values": values, "observed": observed, "patches": patches, "rows": rows, "names": np.asarray(names)})
     target = relative_path(path)
     target.parent.mkdir(parents=True, exist_ok=True)
     with target.open("wb") as stream:
         np.savez_compressed(stream, values=values, observed=observed, patches=patches, metadata=np.asarray(json.dumps(native(rows), ensure_ascii=True)), names=np.asarray(names))
+
 def load_bundle(path: str | Path) -> dict:
     with np.load(relative_path(path), allow_pickle=False) as archive:
         result = {key: archive[key].copy() for key in ("values", "observed", "patches", "names")}
         result["rows"] = json.loads(str(archive["metadata"].item()))
     validate_bundle(result)
     return result
+
 def validate_bundle(bundle: dict) -> None:
     if not isinstance(bundle, dict) or not {"values", "observed", "patches", "names", "rows"}.issubset(bundle):
         raise ValueError("The feature bundle is missing required fields")
@@ -205,6 +221,7 @@ def validate_bundle(bundle: dict) -> None:
     for array in (values, patches):
         if array.dtype.kind not in "fiu" or not np.isfinite(array).all():
             raise ValueError("Feature bundles must contain finite real values")
+
 def subset(bundle: dict, indices: np.ndarray | list[int]) -> dict:
     selected = np.asarray(indices)
     if selected.size == 0:
