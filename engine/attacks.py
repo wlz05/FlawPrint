@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-# Attacks: FlawPrint: Cross-Domain Multimodal Fake News Detection via Copula Residuals of Physical Imperfection Traces
+# FlawPrint: Cross-Domain Multimodal Fake News Detection via Copula Residuals of Physical Imperfection Traces
 
 from __future__ import annotations
 import numpy as np
@@ -86,3 +86,6 @@ def reachable(plan: np.ndarray, first: np.ndarray, second: np.ndarray, tolerance
     residual = np.asarray(plan) - np.outer(first, second)
     row_error, column_error = float(np.max(np.abs(residual.sum(axis=1)))), float(np.max(np.abs(residual.sum(axis=0))))
     return {"zero_row_error": row_error, "zero_column_error": column_error, "nonnegative": bool(np.min(plan) >= -tolerance), "feasible": bool(max(row_error, column_error) <= tolerance and np.min(plan) >= -tolerance), "residual": residual}
+
+# Author: Weiliang Zhu
+# Email: wlzchina05@gmail.com

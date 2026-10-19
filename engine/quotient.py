@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-# Attenuation Quotient: FlawPrint: Cross-Domain Multimodal Fake News Detection via Copula Residuals of Physical Imperfection Traces
+# FlawPrint: Cross-Domain Multimodal Fake News Detection via Copula Residuals of Physical Imperfection Traces
 
 from __future__ import annotations
 from dataclasses import dataclass
@@ -223,3 +223,6 @@ def audit(document: dict) -> dict:
         result.update(id=query["id"], measurement=metadata)
         results.append(result)
     return {"kind": "attenuation_quotient", "representation": "pearson", "observation_unit": unit, "columns": columns, "reference_measurement": reference_metadata, "alternative_measurement": alternative_metadata, "panel": panel.document(), "queries": results, "coverage": {"input": len(results), "measurable": sum(row["status"] != "unresolved" for row in results), "conditionally_bounded": sum(row["attenuation_rejected"] is not None for row in results)}, "scope": "Separate mechanism extension; error bounds are declared, not estimated; no class labels, p-values, or deployment gating"}
+
+# Author: Weiliang Zhu
+# Email: wlzchina05@gmail.com

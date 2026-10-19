@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-# Study: FlawPrint: Cross-Domain Multimodal Fake News Detection via Copula Residuals of Physical Imperfection Traces
+# FlawPrint: Cross-Domain Multimodal Fake News Detection via Copula Residuals of Physical Imperfection Traces
 
 from __future__ import annotations
 import argparse
@@ -246,3 +246,6 @@ def main() -> None:
     print(f"Saved the {args.study} study to {args.output}")
 if __name__ == "__main__":
     main()
+
+# Author: Weiliang Zhu
+# Email: wlzchina05@gmail.com

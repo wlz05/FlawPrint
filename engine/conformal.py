@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-# Probability Calibration: FlawPrint: Cross-Domain Multimodal Fake News Detection via Copula Residuals of Physical Imperfection Traces
+# FlawPrint: Cross-Domain Multimodal Fake News Detection via Copula Residuals of Physical Imperfection Traces
 
 from __future__ import annotations
 from dataclasses import dataclass
@@ -138,3 +138,6 @@ def apply_calibration(rows: list[dict], state: dict | None = None) -> list[dict]
         result["prediction"] = prediction_set[0] if prediction_set is not None and len(prediction_set) == 1 else int(probability >= 0.5)
         output.append(result)
     return output
+
+# Author: Weiliang Zhu
+# Email: wlzchina05@gmail.com

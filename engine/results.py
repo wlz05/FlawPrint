@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-# Prediction Normalization: FlawPrint: Cross-Domain Multimodal Fake News Detection via Copula Residuals of Physical Imperfection Traces
+# FlawPrint: Cross-Domain Multimodal Fake News Detection via Copula Residuals of Physical Imperfection Traces
 
 from __future__ import annotations
 import json
@@ -94,3 +94,6 @@ def prediction_rows(records: list[dict]) -> list[dict]:
             row[key] = value
         output.append(row)
     return output
+
+# Author: Weiliang Zhu
+# Email: wlzchina05@gmail.com

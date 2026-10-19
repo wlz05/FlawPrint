@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-# Domain Profiles: FlawPrint: Cross-Domain Multimodal Fake News Detection via Copula Residuals of Physical Imperfection Traces
+# FlawPrint: Cross-Domain Multimodal Fake News Detection via Copula Residuals of Physical Imperfection Traces
 
 from __future__ import annotations
 from dataclasses import dataclass, asdict
@@ -172,3 +172,6 @@ class DomainProfile:
         except (KeyError, TypeError, AttributeError) as error:
             raise ValueError("Malformed domain profile") from error
         return result
+
+# Author: Weiliang Zhu
+# Email: wlzchina05@gmail.com

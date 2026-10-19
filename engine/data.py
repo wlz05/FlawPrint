@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-# Data Contracts: FlawPrint: Cross-Domain Multimodal Fake News Detection via Copula Residuals of Physical Imperfection Traces
+# FlawPrint: Cross-Domain Multimodal Fake News Detection via Copula Residuals of Physical Imperfection Traces
 
 from __future__ import annotations
 from collections import defaultdict
@@ -177,3 +177,6 @@ def join_predictions(rows: list[dict], predictions: list[dict], score_key: str =
     if set(lookup) != {row["id"] for row in rows}:
         raise ValueError("External predictions must match manifest identifiers exactly")
     return [dict(row, semantic_logit=lookup[row["id"]]) for row in rows]
+
+# Author: Weiliang Zhu
+# Email: wlzchina05@gmail.com

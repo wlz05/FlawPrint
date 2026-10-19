@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-# Signs: FlawPrint: Cross-Domain Multimodal Fake News Detection via Copula Residuals of Physical Imperfection Traces
+# FlawPrint: Cross-Domain Multimodal Fake News Detection via Copula Residuals of Physical Imperfection Traces
 
 from __future__ import annotations
 import numpy as np
@@ -56,3 +56,6 @@ def count_quantile(probabilities: np.ndarray, level: float = 0.95) -> int:
     if not 0 < level < 1:
         raise ValueError("Quantile level must be between zero and one")
     return int(np.searchsorted(np.cumsum(poisson_binomial(probabilities)), level, side="left"))
+
+# Author: Weiliang Zhu
+# Email: wlzchina05@gmail.com

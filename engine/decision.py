@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-# Evidence Routing: FlawPrint: Cross-Domain Multimodal Fake News Detection via Copula Residuals of Physical Imperfection Traces
+# FlawPrint: Cross-Domain Multimodal Fake News Detection via Copula Residuals of Physical Imperfection Traces
 
 from __future__ import annotations
 from collections import Counter
@@ -163,3 +163,6 @@ def deployment_report(rows: list[dict], stratify: bool = True) -> dict:
         if any(value != "unspecified" for value in scenarios):
             report["scenarios"] = {value: deployment_report([row for row in rows if str(row.get("scenario", "unspecified")) == value], False) for value in scenarios}
     return report
+
+# Author: Weiliang Zhu
+# Email: wlzchina05@gmail.com

@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-# Test Attenuation Quotient: FlawPrint: Cross-Domain Multimodal Fake News Detection via Copula Residuals of Physical Imperfection Traces
+# FlawPrint: Cross-Domain Multimodal Fake News Detection via Copula Residuals of Physical Imperfection Traces
 
 from __future__ import annotations
 import copy
@@ -231,3 +231,6 @@ class QuotientTests(unittest.TestCase):
             rejected = subprocess.run(arguments + [source], capture_output=True, text=True)
             self.assertNotEqual(rejected.returncode, 0)
             self.assertEqual(Path(source).read_bytes(), original)
+
+# Author: Weiliang Zhu
+# Email: wlzchina05@gmail.com

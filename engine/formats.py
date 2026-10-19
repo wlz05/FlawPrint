@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-# Formats: FlawPrint: Cross-Domain Multimodal Fake News Detection via Copula Residuals of Physical Imperfection Traces
+# FlawPrint: Cross-Domain Multimodal Fake News Detection via Copula Residuals of Physical Imperfection Traces
 
 from __future__ import annotations
 import ast
@@ -197,3 +197,6 @@ def convert_records(records: list[dict], config: Conversion, source: str = "") -
     rows = normalize(rows)
     report = {"input_rows": len(records), "output_rows": len(rows), "columns": columns, "input_label_convention": "explicit-map" if config.label_map else convention, "generated_ids": generated, "excluded_rows": excluded, "expanded_images": expanded, "discarded_images": discarded, "profile_labels_removed": removed_labels, "sample_unit": "image-news-pair" if expanded else "news", "image_policy": config.image_policy}
     return rows, report
+
+# Author: Weiliang Zhu
+# Email: wlzchina05@gmail.com

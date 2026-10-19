@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-# Evidence History: FlawPrint: Cross-Domain Multimodal Fake News Detection via Copula Residuals of Physical Imperfection Traces
+# FlawPrint: Cross-Domain Multimodal Fake News Detection via Copula Residuals of Physical Imperfection Traces
 
 from __future__ import annotations
 import os
@@ -54,3 +54,6 @@ def disjoint(*histories: dict | None) -> None:
 def scope(history: dict | None, complete: bool = True) -> str:
     validate(history)
     return "identifiers_and_recorded_evidence" if history is not None and complete else "identifiers_and_partial_recorded_evidence" if history is not None else "identifiers_only"
+
+# Author: Weiliang Zhu
+# Email: wlzchina05@gmail.com

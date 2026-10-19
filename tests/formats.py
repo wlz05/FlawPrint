@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-# Test Formats: FlawPrint: Cross-Domain Multimodal Fake News Detection via Copula Residuals of Physical Imperfection Traces
+# FlawPrint: Cross-Domain Multimodal Fake News Detection via Copula Residuals of Physical Imperfection Traces
 
 from __future__ import annotations
 import copy
@@ -348,3 +348,6 @@ class FormatTests(unittest.TestCase):
         manuscript_status(str(path), str(snapshot), accept=True)
         self.assertEqual(snapshot.read_bytes(), path.read_bytes())
         self.assertFalse(manuscript_status(str(path), str(snapshot))["changed"])
+
+# Author: Weiliang Zhu
+# Email: wlzchina05@gmail.com

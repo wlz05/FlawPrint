@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-# Test Reference Selection: FlawPrint: Cross-Domain Multimodal Fake News Detection via Copula Residuals of Physical Imperfection Traces
+# FlawPrint: Cross-Domain Multimodal Fake News Detection via Copula Residuals of Physical Imperfection Traces
 
 from __future__ import annotations
 import copy
@@ -180,3 +180,6 @@ class ChannelTests(unittest.TestCase):
             self.run_comparison(modified)
 if __name__ == "__main__":
     unittest.main()
+
+# Author: Weiliang Zhu
+# Email: wlzchina05@gmail.com

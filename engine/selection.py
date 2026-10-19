@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-# Reference Selection: FlawPrint: Cross-Domain Multimodal Fake News Detection via Copula Residuals of Physical Imperfection Traces
+# FlawPrint: Cross-Domain Multimodal Fake News Detection via Copula Residuals of Physical Imperfection Traces
 
 from __future__ import annotations
 import copy
@@ -129,3 +129,6 @@ def filtering(pool: dict, test: dict, predictions: list[dict], metadata: dict, d
                     item["methods"][method] = {"status": "unavailable", "reason": str(error), "metrics": None}
             results.append(item)
     return {"results": results, "skipped": skipped, "seed": seed, "scope": "Offline label-controlled composition; selection and fitting receive no pool labels; frozen test identities; target labels only evaluate results; source confidence does not guarantee preserved class copulas"}
+
+# Author: Weiliang Zhu
+# Email: wlzchina05@gmail.com

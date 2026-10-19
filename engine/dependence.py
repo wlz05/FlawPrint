@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-# Dependence: FlawPrint: Cross-Domain Multimodal Fake News Detection via Copula Residuals of Physical Imperfection Traces
+# FlawPrint: Cross-Domain Multimodal Fake News Detection via Copula Residuals of Physical Imperfection Traces
 
 from __future__ import annotations
 import numpy as np
@@ -112,3 +112,6 @@ def platform_alignment(references: dict[str, np.ndarray]) -> dict:
         raise ValueError("Platform references must use the same feature dimensions")
     pairs = [{"first": first, "second": second, "absolute_cosine": float(abs(directions[first] @ directions[second])) if directions[first] is not None and directions[second] is not None else None} for first in sorted(directions) for second in sorted(directions)]
     return {"pairs": pairs, "directions": directions, "diagnostics": diagnostics, "scope": "F23 diagnostic; missing or degenerate dominant directions have null alignment and do not identify platform causes"}
+
+# Author: Weiliang Zhu
+# Email: wlzchina05@gmail.com

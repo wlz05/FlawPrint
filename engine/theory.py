@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-# Theory: FlawPrint: Cross-Domain Multimodal Fake News Detection via Copula Residuals of Physical Imperfection Traces
+# FlawPrint: Cross-Domain Multimodal Fake News Detection via Copula Residuals of Physical Imperfection Traces
 
 from __future__ import annotations
 import numpy as np
@@ -75,3 +75,6 @@ def verify(seed: int = 42, samples: int = 100000, repetitions: int = 40) -> dict
     if errors["equal_scalar_summary"] > 1e-10 or sign_difference != 4:
         raise AssertionError("The scalar-summary counterexample failed")
     return {"seed": seed, "samples": samples, "scalar_summary_counterexample": scalar_counterexample, "identity_errors": errors, "moments": observed_moments, "moment_formulas": closed, "mma": mma, "transport": {"sinkhorn_error": entropic["marginal_error"], "exact_error": exact["marginal_error"], "sinkhorn_cost": entropic["transport_cost"], "exact_cost": exact["transport_cost"]}, "conformal": {"repetitions": repetitions, "mean_coverage": float(np.mean(coverages)), "coverage_standard_error": float(np.std(coverages, ddof=1) / np.sqrt(repetitions)), "nominal": 0.9}, "scope": "Algebraic identities and synthetic distributions only"}
+
+# Author: Weiliang Zhu
+# Email: wlzchina05@gmail.com

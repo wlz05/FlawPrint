@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-# Manuscript and Source Audit: FlawPrint: Cross-Domain Multimodal Fake News Detection via Copula Residuals of Physical Imperfection Traces
+# FlawPrint: Cross-Domain Multimodal Fake News Detection via Copula Residuals of Physical Imperfection Traces
 
 from __future__ import annotations
 import ast
@@ -61,13 +61,16 @@ def conventions(root: str = ".", manuscript: str | None = None) -> dict:
         source = path.read_text(encoding="utf-8")
         lines += len(source.splitlines())
         content = source.splitlines()
-        valid_header = bool(len(content) >= 2 and re.fullmatch(r"# [A-Za-z][A-Za-z ]*: " + re.escape(title), content[1]))
+        valid_header = bool(len(content) >= 2 and content[1] == "# " + title)
+        valid_footer = len(content) >= 7 and content[-3:] == ["", "# Author: Weiliang Zhu", "# Email: wlzchina05@gmail.com"]
         if not content or content[0] != "# -*- coding: utf-8 -*-":
             issues.append({"file": path.as_posix(), "rule": "utf8-header"})
         if len(content) < 4 or not valid_header or content[2] != "":
             issues.append({"file": path.as_posix(), "rule": "title-header"})
+        if not valid_footer:
+            issues.append({"file": path.as_posix(), "rule": "author-footer"})
         for number, line in enumerate(source.splitlines(), 1):
-            if not line.strip() and number != 3:
+            if not line.strip() and number != 3 and not (valid_footer and number == len(content) - 2):
                 issues.append({"file": path.as_posix(), "line": number, "rule": "blank-line"})
             if not line.isascii():
                 issues.append({"file": path.as_posix(), "line": number, "rule": "non-english-source"})
@@ -83,4 +86,7 @@ def conventions(root: str = ".", manuscript: str | None = None) -> dict:
                         issues.append({"file": path.as_posix(), "line": token.start[0], "rule": "comment-length"})
         except (SyntaxError, tokenize.TokenError) as error:
             issues.append({"file": path.as_posix(), "rule": "syntax", "reason": str(error)})
-    return {"python_files": len(files), "code_lines": lines, "comments": comments, "header_title": title, "encoding": "utf-8", "header_blank_line": 3, "issues": issues, "passed": not issues}
+    return {"python_files": len(files), "code_lines": lines, "comments": comments, "header_title": title, "encoding": "utf-8", "header_blank_line": 3, "author": "Weiliang Zhu", "email": "wlzchina05@gmail.com", "issues": issues, "passed": not issues}
+
+# Author: Weiliang Zhu
+# Email: wlzchina05@gmail.com

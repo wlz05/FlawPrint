@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-# Channel Complementarity: FlawPrint: Cross-Domain Multimodal Fake News Detection via Copula Residuals of Physical Imperfection Traces
+# FlawPrint: Cross-Domain Multimodal Fake News Detection via Copula Residuals of Physical Imperfection Traces
 
 from __future__ import annotations
 import re
@@ -78,3 +78,6 @@ def compare(semantic: list[dict], physical: list[dict], deep: list[dict], proven
     for reference, candidate in (("semantic", "semantic_physical"), ("semantic", "semantic_deep"), ("semantic_deep", "semantic_physical_deep"), ("semantic_physical", "semantic_physical_deep")):
         contrasts[candidate + "_vs_" + reference] = {"paired": paired(predictions[reference], predictions[candidate], "fusion_risk", repeats, seed, group_key), "transitions": transitions(predictions[reference], predictions[candidate], "fusion_risk")}
     return {"version": "flawprint-channel-comparison-v1", "provenance": provenance, "methods": reports, "contrasts": contrasts, "heads": states, "predictions": predictions, "denominator": len(parts["test"]), "scope": "Auxiliary source-fitted nonnegative heads compare frozen channels on identical news labels and test identities; these are complementarity controls, not the deployed FlawPrint max rule; target conformal coverage is empirical"}
+
+# Author: Weiliang Zhu
+# Email: wlzchina05@gmail.com

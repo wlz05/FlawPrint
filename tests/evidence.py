@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-# Test Increment and Role Audit: FlawPrint: Cross-Domain Multimodal Fake News Detection via Copula Residuals of Physical Imperfection Traces
+# FlawPrint: Cross-Domain Multimodal Fake News Detection via Copula Residuals of Physical Imperfection Traces
 
 from __future__ import annotations
 import copy
@@ -270,3 +270,6 @@ class EvidenceTests(unittest.TestCase):
         for fractions in ([], [True], [np.nan], [-0.1], [1.1], [[0.2]]):
             with self.subTest(fractions=fractions), self.assertRaises(ValueError):
                 orientation(valid, valid, fractions)
+
+# Author: Weiliang Zhu
+# Email: wlzchina05@gmail.com

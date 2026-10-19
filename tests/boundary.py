@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-# Test Boundary Handling: FlawPrint: Cross-Domain Multimodal Fake News Detection via Copula Residuals of Physical Imperfection Traces
+# FlawPrint: Cross-Domain Multimodal Fake News Detection via Copula Residuals of Physical Imperfection Traces
 
 from __future__ import annotations
 import copy
@@ -251,20 +251,20 @@ class BoundaryTests(unittest.TestCase):
         self.assertEqual(source.read_bytes(), before)
     def test_header_exception_requires_exactly_one_blank_line(self) -> None:
         path = self.root / "sample.py"
-        header = "# -*- coding: utf-8 -*-\n# Sample: " + manuscript_title() + "\n"
-        path.write_text(header + "\nvalue = 1\n", encoding="utf-8")
+        header = "# -*- coding: utf-8 -*-\n# " + manuscript_title() + "\n"
+        path.write_text(header + "\nvalue = 1\n\n# Author: Weiliang Zhu\n# Email: wlzchina05@gmail.com\n", encoding="utf-8")
         self.assertTrue(conventions(self.root.as_posix())["passed"])
-        path.write_text(header + "\n\nvalue = 1\n", encoding="utf-8")
+        path.write_text(header + "\n\nvalue = 1\n\n# Author: Weiliang Zhu\n# Email: wlzchina05@gmail.com\n", encoding="utf-8")
         self.assertTrue(any(issue["rule"] == "blank-line" for issue in conventions(self.root.as_posix())["issues"]))
     def test_header_cannot_substitute_the_project_abbreviation(self) -> None:
         path = self.root / "sample.py"
-        path.write_text("# -*- coding: utf-8 -*-\n# Sample: FlawPrint\n\nvalue = 1\n", encoding="utf-8")
+        path.write_text("# -*- coding: utf-8 -*-\n# FlawPrint\n\nvalue = 1\n\n# Author: Weiliang Zhu\n# Email: wlzchina05@gmail.com\n", encoding="utf-8")
         self.assertTrue(any(issue["rule"] == "title-header" for issue in conventions(self.root.as_posix())["issues"]))
     def test_failed_code_audit_cannot_accept_a_manuscript_snapshot(self) -> None:
         from main import command_audit
         manuscript, snapshot = self.root / "paper.md", self.root / "snapshot.md"
         manuscript.write_text("# Official English Title\n", encoding="utf-8")
-        (self.root / "sample.py").write_text("# -*- coding: utf-8 -*-\n# Sample: Wrong Title\n\nvalue = 1\n", encoding="utf-8")
+        (self.root / "sample.py").write_text("# -*- coding: utf-8 -*-\n# Wrong Title\n\nvalue = 1\n\n# Author: Weiliang Zhu\n# Email: wlzchina05@gmail.com\n", encoding="utf-8")
         args = Namespace(root=self.root.as_posix(), manuscript=manuscript.as_posix(), snapshot=snapshot.as_posix(), accept=True, manifest=None, output=(self.root / "audit.json").as_posix())
         with self.assertRaises(ValueError):
             command_audit(args)
@@ -275,7 +275,7 @@ class BoundaryTests(unittest.TestCase):
         from main import command_audit
         title = manuscript_title()
         (self.root / "README.md").write_text("# " + title + "\n", encoding="utf-8")
-        (self.root / "sample.py").write_text("# -*- coding: utf-8 -*-\n# Sample: " + title + "\n\nvalue = 1\n", encoding="utf-8")
+        (self.root / "sample.py").write_text("# -*- coding: utf-8 -*-\n# " + title + "\n\nvalue = 1\n\n# Author: Weiliang Zhu\n# Email: wlzchina05@gmail.com\n", encoding="utf-8")
         previous = Path.cwd()
         try:
             os.chdir(self.root)
@@ -294,7 +294,7 @@ class BoundaryTests(unittest.TestCase):
         with self.assertRaises(FileNotFoundError):
             manuscript_title((self.root / "missing.md").as_posix())
     def test_encoding_declaration_is_required(self) -> None:
-        (self.root / "sample.py").write_text("# Sample: " + manuscript_title() + "\n\nvalue = 1\n", encoding="utf-8")
+        (self.root / "sample.py").write_text("# " + manuscript_title() + "\n\nvalue = 1\n\n# Author: Weiliang Zhu\n# Email: wlzchina05@gmail.com\n", encoding="utf-8")
         self.assertTrue(any(issue["rule"] == "utf8-header" for issue in conventions(self.root.as_posix())["issues"]))
     def test_snapshot_metadata_cannot_overwrite_document(self) -> None:
         from engine.provenance import manuscript_status
@@ -303,3 +303,6 @@ class BoundaryTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "must be distinct"):
             manuscript_status(document.as_posix(), (self.root / "snapshot.md").as_posix(), True)
         self.assertEqual(document.read_text(), "# Official English Title\n")
+
+# Author: Weiliang Zhu
+# Email: wlzchina05@gmail.com

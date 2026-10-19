@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-# Traces: FlawPrint: Cross-Domain Multimodal Fake News Detection via Copula Residuals of Physical Imperfection Traces
+# FlawPrint: Cross-Domain Multimodal Fake News Detection via Copula Residuals of Physical Imperfection Traces
 
 from __future__ import annotations
 from dataclasses import dataclass
@@ -138,3 +138,6 @@ def extract(rows: list[dict], config: TraceConfig, workers: int = 1) -> tuple[np
         result = list(executor.map(lambda row: extract_one(row, config), rows))
     values, observed, patches, metadata = zip(*result)
     return np.asarray(values), np.asarray(observed), np.asarray(patches), list(metadata)
+
+# Author: Weiliang Zhu
+# Email: wlzchina05@gmail.com

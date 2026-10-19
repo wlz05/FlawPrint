@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-# Test Workflow: FlawPrint: Cross-Domain Multimodal Fake News Detection via Copula Residuals of Physical Imperfection Traces
+# FlawPrint: Cross-Domain Multimodal Fake News Detection via Copula Residuals of Physical Imperfection Traces
 
 from __future__ import annotations
 import copy
@@ -179,3 +179,6 @@ class WorkflowTests(unittest.TestCase):
         self.assertTrue(conventions()["passed"])
 if __name__ == "__main__":
     unittest.main()
+
+# Author: Weiliang Zhu
+# Email: wlzchina05@gmail.com

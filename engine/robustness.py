@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-# Robustness: FlawPrint: Cross-Domain Multimodal Fake News Detection via Copula Residuals of Physical Imperfection Traces
+# FlawPrint: Cross-Domain Multimodal Fake News Detection via Copula Residuals of Physical Imperfection Traces
 
 from __future__ import annotations
 from pathlib import Path
@@ -47,3 +47,6 @@ def corrupt(rows: list[dict], output: str, operation: str, severity: float, seed
         results.append(item)
     write_rows(folder / "manifest.jsonl", results)
     return results
+
+# Author: Weiliang Zhu
+# Email: wlzchina05@gmail.com
