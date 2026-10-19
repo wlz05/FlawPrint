@@ -16,10 +16,13 @@ from engine.copula import correlation
 from engine.conformal import validate_labels, validate_partitions, fuse
 from engine.storage import validate_bundle
 from engine.traces import NAMES
+
 METHODS = ("trace_logistic", "marginal_nb", "single_trace", "text_tfidf", "gaussian_novelty", "semantic_external", "trace_rbf", "image_rbf", "trace_rbf_fusion", "image_rbf_fusion")
 RBF_METHODS = ("trace_rbf", "image_rbf", "trace_rbf_fusion", "image_rbf_fusion")
+
 def needs_semantic(method: str) -> bool:
     return method == "semantic_external" or method.endswith("_fusion")
+
 def labels(bundle: dict) -> np.ndarray:
     if any("label" not in row for row in bundle["rows"]):
         raise ValueError("Supervised controls require source labels")
@@ -27,6 +30,7 @@ def labels(bundle: dict) -> np.ndarray:
     if len(np.unique(result)) != 2:
         raise ValueError("Supervised training requires both classes")
     return result
+
 @dataclass
 class Baseline:
     method: str
@@ -40,12 +44,14 @@ class Baseline:
     schema: list[str] | None = None
     columns: list[int] | None = None
     fit_state: dict | None = None
+
     def clean(self, bundle: dict) -> np.ndarray:
         validate_bundle(bundle)
         if self.schema is not None and bundle["names"].tolist() != self.schema:
             raise ValueError("Baseline feature names and order must match training")
         values = np.where(bundle["observed"], bundle["values"], self.medians)
         return values[:, self.columns] if self.columns is not None else values
+
     @classmethod
     def fit(cls, method: str, train: dict, validation: dict | None = None, seed: int = 42) -> Baseline:
         if method not in METHODS:
@@ -106,6 +112,7 @@ class Baseline:
             else:
                 instance.threshold = float(np.quantile(reference_scores[target == 0], 0.95))
         return instance
+
     def raw(self, bundle: dict) -> np.ndarray:
         validate_bundle(bundle)
         if self.schema is not None and bundle["names"].tolist() != self.schema:
@@ -131,6 +138,7 @@ class Baseline:
                 raise ValueError("Fusion controls require complete frozen semantic logits")
             risk = fuse(risk, np.asarray([row["semantic_logit"] for row in bundle["rows"]], dtype=float))
         return risk
+
     def predict(self, bundle: dict) -> np.ndarray:
         result = self.raw(bundle) - self.threshold
         if not np.isfinite(result).all():

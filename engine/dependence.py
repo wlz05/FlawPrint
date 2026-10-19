@@ -8,6 +8,7 @@ from scipy.stats import t, hypergeom
 from scipy.linalg import cho_factor, cho_solve
 from engine.copula import rank_normal, correlation, score, moments, matrix, positive_matrix
 from engine.attacks import independent_shuffle
+
 def student_score(uniform: np.ndarray, reference: np.ndarray, degrees: float = 4.0) -> np.ndarray:
     uniform = matrix(uniform, 1)
     reference = positive_matrix(reference, True)
@@ -22,6 +23,7 @@ def student_score(uniform: np.ndarray, reference: np.ndarray, degrees: float = 4
     joint = gammaln((degrees + dimension) / 2) - gammaln(degrees / 2) - 0.5 * (dimension * np.log(degrees * np.pi) + logdet) - (degrees + dimension) / 2 * np.log1p(quadratic / degrees)
     marginal = np.sum(t.logpdf(z, degrees), axis=1)
     return 2 * (joint - marginal)
+
 def student_selection(uniform: np.ndarray, references: list[float] | None = None, shrinkage: float = 0.1) -> dict:
     candidates = references or [3.0, 4.0, 6.0, 10.0, 30.0]
     results = []
@@ -32,6 +34,7 @@ def student_selection(uniform: np.ndarray, references: list[float] | None = None
         results.append({"degrees": degrees, "mean_log_density": likelihood, "reference": reference})
     best = max(results, key=lambda result: result["mean_log_density"])
     return {"selected": best, "candidates": [{key: value for key, value in item.items() if key != "reference"} for item in results], "scope": "Exploratory profile likelihood; use held-out data to compare copula families"}
+
 def permutation_calibration(heldout_z: np.ndarray, reference: np.ndarray, repeats: int = 500, alpha: float = 0.05, seed: int = 42, reference_samples: int | None = None) -> dict:
     heldout_z = matrix(heldout_z, 4)
     if isinstance(repeats, bool) or not isinstance(repeats, int) or repeats < 10 or not 0 < alpha < 1 or (reference_samples is not None and (isinstance(reference_samples, bool) or not isinstance(reference_samples, int) or reference_samples < 2)):
@@ -44,6 +47,7 @@ def permutation_calibration(heldout_z: np.ndarray, reference: np.ndarray, repeat
     p_value = float((1 + np.sum(null >= observed)) / (repeats + 1))
     quantile = float(np.quantile(null, 1 - alpha, method="higher"))
     return {"observed_mean_score": observed, "independence_upper_quantile": quantile, "dependence_p_value": p_value, "dependence_detected": p_value <= alpha, "reference_samples": reference_samples, "heldout_samples": len(heldout_z), "repeats": repeats, "alpha": alpha, "null_mean": float(null.mean()), "null_standard_deviation": float(null.std(ddof=1)), "scope": "Fixed reference with fitting disjointness checked by caller identifiers; tests independence rather than authenticity"}
+
 def false_discovery(p_values: np.ndarray) -> np.ndarray:
     values = np.asarray(p_values, dtype=float)
     if values.ndim != 1 or not np.isfinite(values).all() or np.any((values < 0) | (values > 1)):
@@ -54,6 +58,7 @@ def false_discovery(p_values: np.ndarray) -> np.ndarray:
     result = np.empty_like(values)
     result[order] = np.minimum(adjusted, 1.0)
     return result
+
 def tail_report(uniform: np.ndarray, names: list[str], threshold: float = 0.1) -> dict:
     uniform = matrix(uniform, 4)
     if uniform.shape[1] != len(names) or len(names) < 2 or len(set(names)) != len(names) or not 0 < threshold < 0.5 or np.any((uniform < 0) | (uniform > 1)):
@@ -75,12 +80,14 @@ def tail_report(uniform: np.ndarray, names: list[str], threshold: float = 0.1) -
     denominator = count * threshold ** 2 * (1 - threshold ** 2)
     statistic = sum((pair["upper_count"] - count * threshold ** 2) ** 2 / denominator for pair in pairs)
     return {"samples": count, "threshold": threshold, "iid_uniform_expected_count": count * threshold ** 2, "tail_sample_size_adequate": count * threshold ** 2 >= 50, "upper_statistic": float(statistic), "pairs": pairs, "scope": "Finite-threshold estimates; conditional permutation count null is hypergeometric for empirical ranks, not iid binomial"}
+
 def attenuation(reference: np.ndarray, coefficients: np.ndarray) -> np.ndarray:
     reference = positive_matrix(reference, True)
     coefficients = np.asarray(coefficients, dtype=float)
     if coefficients.shape != (len(reference),) or not np.isfinite(coefficients).all() or np.any((coefficients < 0) | (coefficients > 1)):
         raise ValueError("Attenuation coefficients must lie in the unit interval")
     return reference * np.outer(coefficients, coefficients) + np.diag(1 - coefficients ** 2)
+
 def availability(reference: np.ndarray, alpha: float = 0.05, batch_size: int = 1, kappa: float | None = None) -> dict:
     if not 0 < alpha < 1 or isinstance(batch_size, bool) or not isinstance(batch_size, (int, np.integer)) or batch_size < 1:
         raise ValueError("Invalid availability settings")
@@ -93,6 +100,7 @@ def availability(reference: np.ndarray, alpha: float = 0.05, batch_size: int = 1
     gap = result["mean_gap"]
     result.update(alpha=alpha, kappa=multiplier, batch_size=batch_size, genuine_lower=float(result["real_mean"] - multiplier * deviation), power_screen=bool(gap > multiplier * deviation), gap_to_real_sd=float(gap / max(np.sqrt(result["real_variance"]), 1e-12)), minimum_batch_size=max(1, int(np.floor((multiplier * np.sqrt(result["real_variance"]) / max(gap, 1e-12)) ** 2)) + 1), scope="F16/F22 usability screen; normal quantiles do not imply distribution-free error control")
     return result
+
 def platform_alignment(references: dict[str, np.ndarray]) -> dict:
     if not references:
         raise ValueError("Platform alignment requires reference matrices")

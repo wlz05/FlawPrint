@@ -10,6 +10,7 @@ from engine.storage import read_json, write_json, validate_bundle
 from engine.conformal import validate_labels
 from engine.lineage import collect, overlaps, validate as validate_history, disjoint, scope
 from engine.results import prediction_rows
+
 @dataclass(frozen=True)
 class ProfileConfig:
     shrinkage: float = 0.1
@@ -21,6 +22,7 @@ class ProfileConfig:
     sign_weight: float = 1.0
     kappa: float = 2.0
     seed: int = 42
+
     def validate(self) -> None:
         settings = (self.shrinkage, self.local_shrinkage, self.min_observed, self.sign_tolerance, self.sign_weight, self.kappa)
         if not np.isfinite(settings).all() or any(isinstance(value, bool) or not isinstance(value, (int, np.integer)) for value in (self.min_samples, self.bootstrap, self.seed)) or self.seed < 0:
@@ -29,6 +31,7 @@ class ProfileConfig:
             raise ValueError("Invalid profile sample settings")
         if not 0 <= self.shrinkage <= 1 or not 0 <= self.local_shrinkage <= 1 or self.sign_weight < 0 or self.sign_tolerance < 0 or self.kappa <= 0:
             raise ValueError("Invalid profile score settings")
+
 @dataclass
 class DomainProfile:
     domain: str
@@ -44,6 +47,7 @@ class DomainProfile:
     config: ProfileConfig
     quality: dict
     history: dict | None = None
+
     @classmethod
     def fit(cls, bundle: dict, domain: str, config: ProfileConfig, columns: list[int] | None = None) -> DomainProfile:
         config.validate()
@@ -59,6 +63,7 @@ class DomainProfile:
         # Ignore labels when estimating the domain profile.
         if not candidates or any(isinstance(column, bool) or not isinstance(column, (int, np.integer)) for column in candidates) or len(set(candidates)) != len(candidates) or min(candidates) < 0 or max(candidates) >= values.shape[1]:
             raise ValueError("Invalid profile feature selection")
+        # Estimate imputation values from the reference pool only.
         medians = np.array([np.median(values[observed[:, column], column]) if observed[:, column].any() else 0 for column in candidates])
         clean = np.where(observed[:, candidates], values[:, candidates], medians)
         retain = [index for index, column in enumerate(candidates) if observed[:, column].mean() >= config.min_observed and np.ptp(clean[:, index]) > 1e-10]
@@ -73,12 +78,14 @@ class DomainProfile:
         quality = separation(reference, config.kappa)
         quality.update(samples=len(values), retained_features=len(selected), dropped_features=[str(bundle["names"][column]) for column in candidates if column not in selected], condition_number=float(np.linalg.cond(reference)), observed_fraction=observed[:, selected].mean(axis=0).tolist(), reference_scope="Unlabeled mixture profile; genuine-reference moments are conditional diagnostics", correlation_parameters=len(selected) * (len(selected) - 1) // 2, samples_per_dimension=len(values) / len(selected), unregularized_rank_bound=min(len(selected), len(values) - 1), estimation_scope="Shrinkage permits inversion; dimension and conditioning do not certify estimation accuracy or class direction")
         return cls(domain, selected, [str(bundle["names"][column]) for column in selected], medians, marginals, reference, directions, weights, stability, [str(row["id"]) for row in bundle["rows"]], config, quality, collect(bundle["rows"]))
+
     def overlap(self, rows: list[dict]) -> list[bool]:
         rows = prediction_rows(rows)
         history = overlaps(rows, self.history)
         calibration = overlaps(rows, self.quality.get("genuine_calibration_history"))
         identifiers = set(self.identifiers) | set(self.quality.get("genuine_calibration_identifiers", [])) | set(self.quality.get("selector_fit_identifiers", []))
         return [row["id"] in identifiers or first or second for row, first, second in zip(rows, history, calibration)]
+
     def transform(self, bundle: dict) -> np.ndarray:
         validate_bundle(bundle)
         if max(self.columns) >= bundle["values"].shape[1]:
@@ -88,6 +95,7 @@ class DomainProfile:
             raise ValueError("Feature schema does not match the domain profile")
         clean = np.where(bundle["observed"][:, self.columns], bundle["values"][:, self.columns], self.medians)
         return self.marginals.transform(clean)
+
     def predict(self, bundle: dict, explain: bool = False, signs: bool = True) -> list[dict]:
         if signs and any(row.get("patch_signs_valid_after_attack") is False for row in bundle["rows"]):
             raise ValueError("Disable patch signs for a feature-space MMA bundle")
@@ -112,6 +120,7 @@ class DomainProfile:
                 result["sign_explanation"] = evidence["conflicts"]
             output.append(result)
         return output
+
     def calibrate_genuine(self, bundle: dict, alpha: float = 0.05) -> None:
         if not 0 < alpha < 1 or any("label" not in row for row in bundle["rows"]):
             raise ValueError("Genuine calibration requires labeled validation samples")
@@ -125,9 +134,11 @@ class DomainProfile:
             raise ValueError("Genuine calibration overlaps the fitted domain profile")
         values = np.asarray([row["physical_evidence"] for row in scored])
         self.quality.update(threshold=float(np.quantile(values, alpha, method="lower")), threshold_policy="Source genuine validation quantile on the target profile scale", genuine_calibration_samples=len(values), genuine_calibration_identifiers=[row["id"] for row in scored], genuine_calibration_history=collect(scored), transfer_scope="Error control requires transferable genuine copula and an independent evaluation set")
+
     def document(self) -> dict:
         self.validate()
         return {"version": "flawprint-profile-v1", "domain": self.domain, "columns": self.columns, "names": self.names, "medians": self.medians, "sorted_values": self.marginals.sorted_values, "reference": self.reference, "directions": self.directions, "weights": self.weights, "stability": self.stability, "identifiers": self.identifiers, "config": asdict(self.config), "quality": self.quality, "evidence_history": self.history}
+
     def validate(self) -> None:
         self.config.validate()
         validate_history(self.history)
@@ -159,8 +170,10 @@ class DomainProfile:
         for key in ("real_variance", "independent_variance"):
             if not np.isfinite(self.quality.get(key, np.nan)) or not np.isclose(self.quality[key], expected[key], rtol=1e-8, atol=1e-10):
                 raise ValueError("Profile score scales disagree with the reference matrix")
+
     def save(self, path: str) -> None:
         write_json(path, self.document())
+
     @classmethod
     def load(cls, path: str) -> DomainProfile:
         value = read_json(path)

@@ -6,12 +6,13 @@ import argparse
 from PIL import Image
 from engine.storage import read_rows, write_rows, relative_path, same_path
 from engine.data import normalize
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Compute optional local CLIP alignment control scores.")
     parser.add_argument("manifest")
     parser.add_argument("--model", default="./models/clip")
     parser.add_argument("--output", default="./data/clip_predictions.jsonl")
-    parser.add_argument("--batch-size", type=int, default=8)
+    parser.add_argument("--batch-size", type=int, default=64)
     parser.add_argument("--device", default="cpu")
     args = parser.parse_args()
     if args.batch_size < 1:
@@ -46,6 +47,7 @@ def main() -> None:
             similarities = (image_features * text_features).sum(-1).cpu().numpy()
         output.extend({"id": row["id"], "logit": float(-similarity), "alignment_cosine": float(similarity), "method": "clip_alignment_control", "score_scope": "Negative alignment is a control score, not a calibrated fake-news probability"} for row, similarity in zip(batch, similarities))
     write_rows(args.output, output)
+
 if __name__ == "__main__":
     main()
 

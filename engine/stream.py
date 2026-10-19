@@ -10,6 +10,7 @@ from engine.copula import Marginals, correlation, partial_correlation, separatio
 from engine.storage import validate_bundle
 from engine.lineage import collect, merge, disjoint
 from engine.results import prediction_rows
+
 def pool(profiles: list[DomainProfile], domain: str = "pooled") -> DomainProfile:
     if not profiles:
         raise ValueError("Cold-start pooling requires historical profiles")
@@ -40,6 +41,7 @@ def pool(profiles: list[DomainProfile], domain: str = "pooled") -> DomainProfile
     quality = separation(reference, profiles[0].config.kappa)
     quality.update(samples=len(raw), historical_domains=[profile.domain for profile in profiles], cold_start=True, target_samples=0, shrinkage_weight=0.0, reference_scope="Historical pooled copula with source marginals; target transfer is an empirical assumption", evidence_history_complete=all(profile.history is not None and profile.quality.get("evidence_history_complete", True) and (not profile.quality.get("genuine_calibration_identifiers") or profile.quality.get("genuine_calibration_history") is not None) for profile in profiles))
     return DomainProfile(domain, common, names, np.median(raw, axis=0), marginals, reference, directions, weights, stability, identifiers, profiles[0].config, quality, merge(*histories))
+
 def adapt(prior: DomainProfile, bundle: dict | None, domain: str, n0: float = 100.0) -> DomainProfile:
     prior.validate()
     if not np.isfinite(n0) or n0 <= 0:

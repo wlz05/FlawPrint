@@ -9,6 +9,7 @@ from engine.copula import score, moments, partial_correlation, rank_normal, deco
 from engine.attacks import sinkhorn, exact_transport, reachable, quantile_match, independent_shuffle, marginal_report
 from engine.signs import poisson_binomial
 from engine.conformal import SplitConformal
+
 def verify(seed: int = 42, samples: int = 100000, repetitions: int = 40) -> dict:
     if samples < 1000 or repetitions < 5:
         raise ValueError("Theory checks require sufficient Monte Carlo samples")

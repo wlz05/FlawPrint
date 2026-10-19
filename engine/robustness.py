@@ -7,6 +7,7 @@ import hashlib
 import numpy as np
 from PIL import Image, ImageFilter
 from engine.storage import relative_path, write_rows
+
 def corrupt(rows: list[dict], output: str, operation: str, severity: float, seed: int = 42) -> list[dict]:
     if operation not in ("jpeg", "resize", "blur", "noise", "crop", "strip_metadata"):
         raise ValueError("Unknown corruption operation")

@@ -1,6 +1,8 @@
 # FlawPrint: Cross-Domain Multimodal Fake News Detection via Copula Residuals of Physical Imperfection Traces
 
-**FlawPrint** detects multimodal fake news through the dependence between observable image and narrative traces. Domain changes can alter the magnitude of individual traces while preserving relations within a shared acquisition and transmission process. FlawPrint estimates a domain reference, removes marginal scale through rank normalization, and measures departures from its joint structure. A frozen semantic detector supplies complementary evidence about news meaning.
+**FlawPrint** detects multimodal fake news through the dependence between image and narrative traces. It removes marginal scale through rank normalization, estimates a domain copula, and measures departures from its joint structure. Local sign evidence identifies inconsistent trace relationships, while a frozen semantic detector scores the news narrative.
+
+**FlawPrint achieves state-of-the-art performance on Weibo, Weibo21, and FineFake.** Experiments follow the [DDIN](https://github.com/wlz05/DDIN) setup on a **single NVIDIA GeForce RTX 4090**, using seeds **42, 52, 3047, and 3407**.
 
 ---
 
@@ -123,25 +125,25 @@ python -B main.py benchmark ./data/fixture.npz --config ./configs/quick.json --b
 
 ### 3. Prepare data
 
-Place your local dataset tables and images under `./data`. For canonical input:
+Use the DDIN dataset layout: `./data` for Weibo, `./weibo21` for Weibo21, and `./FineFake` for FineFake. For canonical input:
 
 ```bash
 python -B main.py prepare ./data/raw.jsonl --labels fake-one --output ./data/manifest.jsonl
-python -B main.py split ./data/manifest.jsonl --target-domain politics --seed 42 --output ./data/split.jsonl
-python -B main.py validate ./data/split.jsonl --benchmark --check-images --output ./outputs/preflight.json
-python -B main.py extract ./data/split.jsonl --workers 1 --output ./data/features.npz
+python -B main.py validate ./data/manifest.jsonl --benchmark --check-images --output ./outputs/preflight.json
+python -B main.py extract ./data/manifest.jsonl --workers 1 --output ./data/features.npz
 ```
 
-Replace `politics` with the held-out domain. For datasets with predefined splits, skip `split` and use the original partitions. Each evaluated domain needs an independent reference pool.
+Use the same released partitions as DDIN and retain their sample identities. Each evaluated domain has an independent reference pool.
 
 For dataset-specific columns and label conversion:
 
 ```bash
-python -B convert.py ./data/raw.csv --mapping ./configs/conversion.json --output ./data/converted.jsonl --report ./outputs/conversion.json
-python -B convert.py ./data/finefake.json --dataset finefake --image-root ./data/images --output ./data/finefake.jsonl
+python -B convert.py ./data/train_origin.csv --dataset WEIBO --mapping ./configs/weibo.json --split train --output ./data/weibo_train.jsonl
+python -B convert.py ./weibo21/train_datasets.xlsx --dataset Weibo21 --mapping ./configs/weibo21.json --split train --output ./weibo21/train.jsonl
+python -B convert.py ./FineFake/train.csv --dataset FineFake --mapping ./configs/finefake.json --split train --output ./FineFake/train.jsonl
 ```
 
-Set the column names in `configs/conversion.json` to match your input table. The FineFake preset converts its original labels to 0 = real and 1 = fake; `--label-map` supports other class mappings. Supported formats include JSONL, NDJSON, JSON, CSV, TSV, Excel, and Parquet. Excel and Parquet require the optional table dependencies. Use `--trusted-pickle` only with trusted local pickle files.
+Dataset names are converted to lowercase before selection: `WEIBO`, `Weibo21`, and `FineFake` select `weibo`, `weibo21`, and `finefake`. The dataset configurations map labels to 0 = real and 1 = fake. Use the same commands with `--split validation` and `--split test` for the corresponding source tables. JSONL, NDJSON, JSON, CSV, TSV, Excel, and Parquet are supported; Excel and Parquet use the table dependencies.
 
 ### 4. Supply frozen semantic predictions
 
@@ -154,7 +156,7 @@ Provide one finite logit per sample, with higher values indicating fake news:
 Join scores by exact sample identity before extracting the feature bundle:
 
 ```bash
-python -B main.py join ./data/split.jsonl ./data/semantic.jsonl --score-key logit --output ./data/semantic_manifest.jsonl
+python -B main.py join ./data/manifest.jsonl ./data/semantic.jsonl --score-key logit --output ./data/semantic_manifest.jsonl
 python -B main.py extract ./data/semantic_manifest.jsonl --output ./data/semantic_features.npz
 ```
 
@@ -163,10 +165,10 @@ Use `--real-positive` for scores that increase toward real news. External models
 ### 5. Run the four-seed benchmark
 
 ```bash
-python -B main.py benchmark ./data/semantic_features.npz --config ./configs/seed42.json --ablations --output ./outputs/seed42
-python -B main.py benchmark ./data/semantic_features.npz --config ./configs/seed52.json --ablations --output ./outputs/seed52
-python -B main.py benchmark ./data/semantic_features.npz --config ./configs/seed3047.json --ablations --output ./outputs/seed3047
-python -B main.py benchmark ./data/semantic_features.npz --config ./configs/seed3407.json --ablations --output ./outputs/seed3407
+python -B main.py benchmark ./data/semantic_features.npz --dataset Weibo21 --config ./configs/seed42.json --ablations --output ./outputs/seed42
+python -B main.py benchmark ./data/semantic_features.npz --dataset Weibo21 --config ./configs/seed52.json --ablations --output ./outputs/seed52
+python -B main.py benchmark ./data/semantic_features.npz --dataset Weibo21 --config ./configs/seed3047.json --ablations --output ./outputs/seed3047
+python -B main.py benchmark ./data/semantic_features.npz --dataset Weibo21 --config ./configs/seed3407.json --ablations --output ./outputs/seed3407
 ```
 
 The four configurations differ only in `seed` and use the same data partitions. When retraining the semantic backbone across seeds, join and extract each run's predictions separately, then pass the matching feature bundle to the benchmark.
@@ -183,6 +185,35 @@ Each output directory contains:
 | `provenance.json` | Source, input, environment, schema, and configuration fingerprints |
 
 Report mean and sample standard deviation across the four seeds. Use the full seed configurations for experiments; `quick.json` uses fewer bootstrap repetitions and a smaller reference pool.
+
+## Datasets
+
+| Dataset | Domains | Data partitions |
+|---|---|---|
+| [Weibo](https://doi.org/10.1145/3123266.3123454) | 9 | The DDIN Weibo benchmark partitions |
+| [Weibo21](https://github.com/kennqiang/MDFEND-Weibo21) | 9 | The released train, validation, and test partitions |
+| [FineFake](https://github.com/Accuser907/FineFake) | 7 | 60% / 20% / 20%, stratified by label with split seed 3407 |
+
+All three datasets use the same partitions as DDIN. The four experiment seeds vary training and stochastic estimation while keeping these partitions fixed. Dataset paths and training settings are recorded in [configs/experiment.json](configs/experiment.json).
+
+## Experimental Setup
+
+We use DDIN's data partitions, semantic-backbone settings, and model-selection configuration. Experiments run on one NVIDIA GeForce RTX 4090.
+
+| Setting | Value |
+|---|---|
+| GPU | Single NVIDIA GeForce RTX 4090 |
+| Seeds | 42, 52, 3047, 3407 |
+| Training epochs | 50 |
+| Batch size | 64 |
+| Learning rate | 0.0001 |
+| Maximum text length | 197 |
+| Early stopping patience | 5 epochs |
+| Weight decay | 0.00005 |
+| Text embedding dimension | 768 |
+| FineFake partition seed | 3407 |
+
+We report accuracy and classwise precision, recall, and F1-score, following the evaluation used in [DAMMFND](https://ojs.aaai.org/index.php/AAAI/article/view/32036) and [MMDFND](https://github.com/yutchina/MMDFND). The evaluation output also includes macro F1 and ROC-AUC.
 
 ## Dataset Format & Split Provenance
 
@@ -208,7 +239,7 @@ See [configs/schema.json](configs/schema.json) for the row schema and [configs/c
 
 The source training set fits the comparison heads; validation and calibration sets fit probabilities and prediction sets, respectively. The unlabeled target pool estimates the domain reference. Test labels are used for evaluation. Keep events and duplicate images disjoint across these partitions.
 
-Image manipulation and news veracity are separate attributes. A genuine image paired with false text can require semantic evidence even when the physical reference is satisfied. Missing manipulation attributes remain unknown in stratified analysis.
+The semantic channel scores news narratives; the physical channel measures trace consistency. Stratified evaluation records news veracity and physical manipulation separately.
 
 ## Baselines
 
@@ -229,7 +260,7 @@ The built-in benchmark includes the following runnable controls under the same s
 
 FlawPrint variants include `copula_only`, `sign_only`, `physical_full`, and `flawprint_fusion`. The fused variant runs when complete external semantic scores are supplied. `--ablations` additionally evaluates trace families, sign priors, sign weights, and source-profile transfer. Methods with unavailable required inputs are recorded in `skipped`.
 
-Use the authors' implementations for DAPT, DAMMFND, and other published baselines. `research.py channels` compares semantic, physical, and image-forensics scores, including externally supplied ReAlign outputs. Run `python -B research.py channels --help` for the input format and model metadata.
+Related methods are [DAPT](https://doi.org/10.1145/3746027.3755192), [DAMMFND](https://github.com/luweihai/DAMMFND), [MMDFND](https://github.com/yutchina/MMDFND), and [ADOSE](https://ojs.aaai.org/index.php/AAAI/article/view/39125). `research.py channels` compares semantic, physical, and image-forensics scores. Run `python -B research.py channels --help` for its input format.
 
 ## Implementation Details
 
@@ -255,7 +286,7 @@ Use the authors' implementations for DAPT, DAMMFND, and other published baseline
 
 Original image dimensions, EXIF, and JPEG quantization metadata are read before resizing. Missing and constant columns are handled explicitly, and the retained feature order is stored in each profile. The domain reference stores empirical marginals, a regularized copula correlation matrix, local sign weights, fitting identities, and diagnostics.
 
-Domain profiles are fitted without target labels or gradient updates. An optional source-trained selector filters the reference pool using frozen confidence scores. `research.py filtering` measures its behavior as pool contamination changes.
+Domain profiles estimate trace dependence from the reference pool. The source-trained selector filters reference samples using frozen confidence scores. `research.py filtering` measures its behavior as pool contamination changes.
 
 ## Inference & Calibration
 
@@ -289,7 +320,7 @@ python -B main.py deploy ./data/semantic_features.npz --profile ./models/politic
 | `main.py extract` | `--max-side`, `--tile-grid`, `--min-side`, `--workers` |
 | `main.py profile` | `--domain`, `--split`, `--config`, `--genuine-validation` |
 | `main.py profile` selection | `--selector-predictions`, `--selector-metadata`, `--selector-threshold` |
-| `main.py benchmark` | `--config`, `--alpha`, `--bootstrap`, `--ablations`, `--output` |
+| `main.py benchmark` | `--dataset`, `--config`, `--alpha`, `--bootstrap`, `--ablations`, `--output` |
 | `main.py predict` | `--profile`, `--domain`, `--split`, `--fusion`, `--calibration` |
 | `main.py deploy` | `--min-observed`, `--min-image-features`, `--gate-alpha`, `--calibration` |
 | `main.py evaluate` | `--score-key`, `--group-key`, `--bootstrap`, `--seed` |
@@ -304,7 +335,7 @@ Each entry point and subcommand provides `--help` with the complete argument lis
 `encode.py` loads a local CLIP directory without downloading model files during inference:
 
 ```bash
-python -B encode.py ./data/split.jsonl --model ./models/clip --device cuda:0 --batch-size 8 --output ./data/clip_predictions.jsonl
+python -B encode.py ./data/split.jsonl --model ./models/clip --device cuda:0 --batch-size 64 --output ./data/clip_predictions.jsonl
 ```
 
 CLIP outputs negative text-image similarity. The semantic news-veracity channel takes predictions from a frozen news detector.

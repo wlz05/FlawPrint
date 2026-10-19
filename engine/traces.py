@@ -10,22 +10,27 @@ import numpy as np
 from PIL import Image, ExifTags
 from scipy import ndimage, fft
 from engine.storage import relative_path, digest
+
 NAMES = ["laplacian_variance", "spectral_tail_slope", "wavelet_noise_mad", "gradient_anisotropy", "radial_chromatic_difference", "noise_intensity_slope", "exposure_skew", "saliency_offset", "thirds_distance", "border_asymmetry", "saliency_concentration", "edge_density", "jpeg_quantization_mean", "dct_gap_ratio", "resampling_peak", "resolution_ladder_distance", "grid_energy", "exif_completeness", "software_tag_present", "crop_border_energy", "text_length", "character_diversity", "hashtag_density", "symbol_density", "exclamation_density", "uppercase_ratio"]
 FAMILIES = {"capture": list(range(7)), "composition": list(range(7, 12)), "transmission": list(range(12, 20)), "narrative": list(range(20, 26))}
+
 @dataclass(frozen=True)
 class TraceConfig:
     max_side: int = 768
     tile_grid: int = 4
     min_side: int = 32
+
     def validate(self) -> None:
         if any(isinstance(value, bool) or not isinstance(value, int) for value in (self.max_side, self.tile_grid, self.min_side)):
             raise ValueError("Image and tile dimensions must be integers")
         if self.min_side < 16 or self.max_side < self.min_side or not 2 <= self.tile_grid <= 8:
             raise ValueError("Invalid image or tile dimensions")
+
 def safe_skew(values: np.ndarray) -> float:
     centered = values - values.mean()
     scale = np.sqrt(np.mean(centered ** 2))
     return float(np.mean(centered ** 3) / max(scale ** 3, 1e-12))
+
 def radial_slope(gray: np.ndarray) -> float:
     window = np.outer(np.hanning(gray.shape[0]), np.hanning(gray.shape[1]))
     power = np.abs(np.fft.fftshift(np.fft.fft2((gray - gray.mean()) * window))) ** 2
@@ -34,6 +39,7 @@ def radial_slope(gray: np.ndarray) -> float:
     edges = np.linspace(0.12, 0.48, 13)
     means = [np.mean(power[(radius >= left) & (radius < right)]) for left, right in zip(edges[:-1], edges[1:])]
     return float(np.polyfit(np.log((edges[:-1] + edges[1:]) / 2), np.log(np.maximum(means, 1e-12)), 1)[0])
+
 def noise_slope(gray: np.ndarray, residual: np.ndarray) -> float:
     samples = []
     for y in range(0, gray.shape[0] - 7, 8):
@@ -47,6 +53,7 @@ def noise_slope(gray: np.ndarray, residual: np.ndarray) -> float:
     if len(values) < 3 or np.ptp(values[:, 0]) < 1e-8:
         return 0.0
     return float(np.polyfit(values[:, 0], values[:, 1], 1)[0])
+
 def pixel_traces(rgb: np.ndarray) -> np.ndarray:
     gray = rgb @ np.array([0.299, 0.587, 0.114])
     gy, gx = np.gradient(gray)
@@ -85,11 +92,13 @@ def pixel_traces(rgb: np.ndarray) -> np.ndarray:
     grid = 0.5 * ((horizontal_grid.mean() if horizontal_grid.size else 0) / max(horizontal.mean(), 1e-12) + (vertical_grid.mean() if vertical_grid.size else 0) / max(vertical.mean(), 1e-12))
     values = [ndimage.laplace(gray).var(), radial_slope(gray), wavelet_mad, anisotropy, chromatic_covariance, noise_slope(gray, residual), safe_skew(gray), np.linalg.norm(center - 0.5), np.min(np.linalg.norm(thirds - center, axis=1)), np.std(sides) / max(np.mean(sides), 1e-12), np.sum(weights ** 2) * gray.size, np.mean(magnitude > magnitude.mean() + magnitude.std()), 0.0, gap, resampling, 0.0, grid, 0.0, 0.0, sides.mean()]
     return np.nan_to_num(np.asarray(values, dtype=float), nan=0.0, posinf=0.0, neginf=0.0)
+
 def narrative_traces(text: str) -> np.ndarray:
     length = max(len(text), 1)
     letters = [char for char in text if char.isalpha()]
     symbols = sum(unicodedata.category(char).startswith("S") for char in text)
     return np.asarray([len(text), len(set(text)) / length, len(re.findall(r"#[^\s#]+", text)) / length, symbols / length, sum(char in ("!", "\uFF01") for char in text) / length, sum(char.isupper() for char in letters) / max(len(letters), 1)], dtype=float)
+
 def extract_one(row: dict, config: TraceConfig) -> tuple[np.ndarray, np.ndarray, np.ndarray, dict]:
     config.validate()
     if not row.get("image"):
@@ -106,6 +115,7 @@ def extract_one(row: dict, config: TraceConfig) -> tuple[np.ndarray, np.ndarray,
         if min(image.size) < config.min_side:
             raise ValueError(f"Image is too small: {row['id']}")
         image_format = str(image.format or "unknown")
+        # Read acquisition metadata before resizing.
         exif = image.getexif()
         tags = {ExifTags.TAGS.get(key, str(key)): value for key, value in exif.items()}
         quantization = getattr(image, "quantization", None)
@@ -130,6 +140,7 @@ def extract_one(row: dict, config: TraceConfig) -> tuple[np.ndarray, np.ndarray,
         raise ValueError("An image changed during extraction")
     metadata = dict(row, has_image=True, width=original_width, height=original_height, format=image_format, content_sha256=content_hash, trace_version="flawprint-traces-v1", resized_for_pixel_traces=max(original_width, original_height) > config.max_side, pixel_policy="RGB encoded raster without EXIF rotation or alpha compositing")
     return values, observed, np.asarray(patches), metadata
+
 def extract(rows: list[dict], config: TraceConfig, workers: int = 1) -> tuple[np.ndarray, np.ndarray, np.ndarray, list[dict]]:
     if not rows or isinstance(workers, bool) or not isinstance(workers, int) or workers < 1:
         raise ValueError("Provide samples and a positive worker count")

@@ -10,6 +10,7 @@ import io
 import requests
 from pypdf import PdfReader
 from engine.storage import read_json, write_json, relative_path, digest
+
 def fetch(paper: dict, output: Path, timeout: float = 60.0) -> dict:
     target = output / relative_path(paper["file"])
     record = dict(paper)
@@ -41,6 +42,7 @@ def fetch(paper: dict, output: Path, timeout: float = 60.0) -> dict:
     except Exception as error:
         record.update(status="failed", error=f"{type(error).__name__}: {error}")
     return record
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Fetch and validate official baseline papers.")
     parser.add_argument("--sources", default="./configs/sources.json")
@@ -66,6 +68,7 @@ def main() -> None:
         print(f"{record['id']}: {record['status']}")
     if any(record["status"] != "downloaded" for record in records):
         raise SystemExit(1)
+
 if __name__ == "__main__":
     main()
 

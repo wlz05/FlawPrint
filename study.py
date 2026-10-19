@@ -24,6 +24,7 @@ from engine.conformal import validate_partitions
 from engine.provenance import source_digest
 from engine.storage import digest
 from doctor import environment
+
 def metrics(bundle: dict, rows: list[dict], threshold: float) -> dict:
     if [row["id"] for row in bundle["rows"]] != [row["id"] for row in rows] or any(row.get("profile_overlap") for row in rows) or not np.isfinite(threshold):
         raise ValueError("Study evaluation requires aligned held-out predictions and a finite threshold")
@@ -37,6 +38,7 @@ def metrics(bundle: dict, rows: list[dict], threshold: float) -> dict:
     result["threshold"] = threshold
     result["probability_scope"] = "Sigmoid diagnostic; probabilities are not independently calibrated"
     return result
+
 def cold_start(args: argparse.Namespace) -> dict:
     bundle = load_bundle(args.features)
     histories = [DomainProfile.load(path) for path in args.history]
@@ -73,6 +75,7 @@ def cold_start(args: argparse.Namespace) -> dict:
             rows.append({"samples": count, "weight": weight, "automatic_weight": automatic.quality.get("shrinkage_weight", 0.0), "condition_number": float(np.linalg.cond(profile.reference)), **result})
     write_csv(relative_path(args.output) / "cold_start.csv", rows)
     return {"results": rows, "skipped": skipped, "n0": args.n0, "scope": "Frozen historical prior and independent target profile/test partitions"}
+
 def thresholds(args: argparse.Namespace) -> dict:
     if not 0 < args.alpha < 0.5:
         raise ValueError("Threshold study alpha must lie between zero and one half")
@@ -105,6 +108,7 @@ def thresholds(args: argparse.Namespace) -> dict:
     results = [{"method": name, **metrics(test, third, threshold)} for name, threshold in candidates.items()]
     write_csv(relative_path(args.output) / "thresholds.csv", results)
     return {"results": results, "availability": availability(profile.reference, args.alpha), "scope": "Moment threshold is a diagnostic comparison; target oracle is explicitly label-assisted"}
+
 def propagation(args: argparse.Namespace) -> dict:
     validation_path = getattr(args, "validation", None)
     if args.generations < 0 or not 0 < args.resize <= 1 or not 1 <= args.quality <= 95 or not 0 < args.alpha < 0.5:
@@ -148,9 +152,11 @@ def propagation(args: argparse.Namespace) -> dict:
         profile.save((output / f"generation_{generation}" / "profile.json").as_posix())
     write_csv(output / "propagation.csv", results)
     return {"results": results, "scope": "Paired local resize/JPEG pipeline; the same corruption is applied to profile, test, and optional source validation; source-label quantiles require transfer and compatible PIT for target error control; uncalibrated zero-threshold FPR is a diagnostic; no universal monotonicity or actual platform encoder claim"}
+
 def load_configuration(path: str) -> dict:
     from engine.storage import read_json
     return read_json(path)
+
 def latency(args: argparse.Namespace) -> dict:
     if args.repeats < 2 or args.batch_size < 1 or args.workers < 1:
         raise ValueError("Latency study needs two repeats and positive batch settings")
@@ -196,6 +202,7 @@ def latency(args: argparse.Namespace) -> dict:
         summaries[phase] = {"first_pass_seconds": sum(row["seconds"] for row in all_rows if row["repetition"] == 0), "warm_batch_p50_seconds": float(np.quantile(durations, 0.5)), "warm_batch_p95_seconds": float(np.quantile(durations, 0.95)), "warm_samples_per_second": sum(row["samples"] for row in warm) / max(durations.sum(), 1e-12), "python_traced_peak_bytes": max(row["python_traced_peak_bytes"] for row in all_rows)}
     write_csv(relative_path(args.output) / "latency.csv", records)
     return {"results": summaries, "feature_load_seconds": feature_load_seconds, "profile_load_seconds": profile_load_seconds, "samples": len(data["rows"]), "repeats": args.repeats, "batch_size": args.batch_size, "workers": args.workers, "pixels_recomputed": args.pixels, "environment": {"python": platform.python_version(), "system": platform.system(), "machine": platform.machine(), "numpy": np.__version__}, "scope": "First pass is not an OS cold-cache benchmark; traced Python allocation is not total process memory; external semantic inference and offline fitting are excluded; phase measurements are separate and not additive"}
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Run targeted FlawPrint threshold and deployment studies.")
     commands = parser.add_subparsers(dest="study", required=True)
@@ -244,6 +251,7 @@ def main() -> None:
     result["provenance"] = {"source_sha256": source_digest(), "environment": environment(), "inputs": [{"path": getattr(args, key), "sha256": digest(getattr(args, key))} for key in ("features", "profile", "config", "validation", "target_calibration") if getattr(args, key, None)]}
     write_json(relative_path(args.output) / "report.json", result)
     print(f"Saved the {args.study} study to {args.output}")
+
 if __name__ == "__main__":
     main()
 

@@ -6,6 +6,7 @@ import numpy as np
 from scipy.stats import rankdata, ks_2samp
 from scipy.special import logsumexp
 from scipy.optimize import linprog
+
 def joint_replay(bundle: dict, genuine: list[int], generated: list[int]) -> dict:
     from engine.storage import subset, validate_bundle
     validate_bundle(bundle)
@@ -21,6 +22,7 @@ def joint_replay(bundle: dict, genuine: list[int], generated: list[int]) -> dict
     for source, target in zip(genuine, generated):
         result["rows"][target] = dict(result["rows"][target], attack="feature_joint_replay", oracle_reference_id=bundle["rows"][source]["id"], patch_signs_valid_after_attack=True, attack_scope="Oracle feature-and-patch replay; no corresponding physical image is generated")
     return result
+
 def quantile_match(generated: np.ndarray, genuine: np.ndarray) -> np.ndarray:
     generated, genuine = np.asarray(generated, dtype=float), np.asarray(genuine, dtype=float)
     if generated.ndim != 2 or genuine.ndim != 2 or generated.shape[1] < 1 or generated.shape[1] != genuine.shape[1] or min(len(generated), len(genuine)) < 2 or not np.isfinite(generated).all() or not np.isfinite(genuine).all():
@@ -32,18 +34,21 @@ def quantile_match(generated: np.ndarray, genuine: np.ndarray) -> np.ndarray:
         reference_positions = (np.arange(len(genuine)) + 0.5) / len(genuine)
         output[:, index] = np.interp(positions, reference_positions, np.sort(genuine[:, index]))
     return output
+
 def marginal_report(first: np.ndarray, second: np.ndarray, names: list[str]) -> dict:
     tests = []
     for index, name in enumerate(names):
         result = ks_2samp(first[:, index], second[:, index])
         tests.append({"feature": name, "ks_statistic": float(result.statistic), "p_value": float(result.pvalue)})
     return {"features": tests, "largest_ks": max(test["ks_statistic"] for test in tests), "all_p_above_005": all(test["p_value"] > 0.05 for test in tests), "interpretation": "Failure to reject is not proof of equal marginals"}
+
 def independent_shuffle(values: np.ndarray, seed: int = 42) -> np.ndarray:
     rng = np.random.default_rng(seed)
     result = np.asarray(values).copy()
     for index in range(result.shape[1]):
         result[:, index] = rng.permutation(result[:, index])
     return result
+
 def transport_inputs(first: np.ndarray, second: np.ndarray, cost: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     first, second, cost = np.asarray(first, dtype=float), np.asarray(second, dtype=float), np.asarray(cost, dtype=float)
     if first.ndim != 1 or second.ndim != 1 or cost.shape != (len(first), len(second)) or not np.isfinite(cost).all():
@@ -53,6 +58,7 @@ def transport_inputs(first: np.ndarray, second: np.ndarray, cost: np.ndarray) ->
     if not np.isclose(first.sum(), 1) or not np.isclose(second.sum(), 1):
         raise ValueError("Transport marginals must sum to one")
     return first, second, cost
+
 def sinkhorn(first: np.ndarray, second: np.ndarray, cost: np.ndarray, epsilon: float = 0.1, tolerance: float = 1e-8, iterations: int = 5000) -> dict:
     first, second, cost = transport_inputs(first, second, cost)
     if not np.isfinite((epsilon, tolerance)).all() or epsilon <= 0 or tolerance <= 0 or isinstance(iterations, bool) or not isinstance(iterations, int) or iterations < 1:
@@ -69,6 +75,7 @@ def sinkhorn(first: np.ndarray, second: np.ndarray, cost: np.ndarray, epsilon: f
             if residual <= tolerance:
                 break
     return {"plan": plan, "marginal_error": float(residual), "converged": bool(residual <= tolerance), "iterations": step + 1, "transport_cost": float(np.sum(plan * cost)), "epsilon": epsilon}
+
 def exact_transport(first: np.ndarray, second: np.ndarray, cost: np.ndarray) -> dict:
     first, second, cost = transport_inputs(first, second, cost)
     rows, columns = len(first), len(second)
@@ -82,6 +89,7 @@ def exact_transport(first: np.ndarray, second: np.ndarray, cost: np.ndarray) -> 
         raise RuntimeError("Exact transport failed to converge")
     plan = fitted.x.reshape(rows, columns)
     return {"plan": plan, "transport_cost": float(fitted.fun), "marginal_error": float(max(np.max(abs(plan.sum(axis=1) - first)), np.max(abs(plan.sum(axis=0) - second))))}
+
 def reachable(plan: np.ndarray, first: np.ndarray, second: np.ndarray, tolerance: float = 1e-7) -> dict:
     residual = np.asarray(plan) - np.outer(first, second)
     row_error, column_error = float(np.max(np.abs(residual.sum(axis=1)))), float(np.max(np.abs(residual.sum(axis=0))))

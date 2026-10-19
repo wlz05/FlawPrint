@@ -6,11 +6,13 @@ from dataclasses import dataclass
 import numpy as np
 from scipy.special import ndtri
 from scipy.linalg import cho_factor, cho_solve
+
 def matrix(values: np.ndarray, minimum_rows: int = 2) -> np.ndarray:
     result = np.asarray(values, dtype=float)
     if result.ndim != 2 or len(result) < minimum_rows or result.shape[1] < 1 or not np.isfinite(result).all():
         raise ValueError("Expected a finite nonempty feature matrix")
     return result
+
 def correlation(values: np.ndarray, shrinkage: float = 0.1, eigen_floor: float = 1e-6) -> np.ndarray:
     values = matrix(values)
     if not 0 <= shrinkage <= 1 or not np.isfinite(eigen_floor) or eigen_floor <= 0:
@@ -27,6 +29,7 @@ def correlation(values: np.ndarray, shrinkage: float = 0.1, eigen_floor: float =
     result /= np.outer(scales, scales)
     np.fill_diagonal(result, 1.0)
     return result
+
 def positive_matrix(values: np.ndarray, unit_diagonal: bool = False) -> np.ndarray:
     result = matrix(values, 1)
     if result.shape[0] != result.shape[1] or not np.allclose(result, result.T, rtol=1e-10, atol=1e-12):
@@ -38,6 +41,7 @@ def positive_matrix(values: np.ndarray, unit_diagonal: bool = False) -> np.ndarr
     except np.linalg.LinAlgError as error:
         raise ValueError("Reference matrices must be positive definite") from error
     return result
+
 def partial_correlation(covariance: np.ndarray) -> np.ndarray:
     covariance = positive_matrix(covariance)
     precision = cho_solve(cho_factor(covariance, lower=True), np.eye(len(covariance)))
@@ -46,14 +50,17 @@ def partial_correlation(covariance: np.ndarray) -> np.ndarray:
     partial = -precision / np.sqrt(np.outer(np.diag(precision), np.diag(precision)))
     np.fill_diagonal(partial, 1.0)
     return partial
+
 def score(values: np.ndarray, reference: np.ndarray) -> np.ndarray:
     values = matrix(values, 1)
     reference = positive_matrix(reference, True)
     sign, logdet = np.linalg.slogdet(reference)
     if sign <= 0 or values.shape[1] != len(reference):
         raise ValueError("Invalid copula reference")
+    # Solve the quadratic form without forming an inverse.
     solved = cho_solve(cho_factor(reference, lower=True), values.T).T
     return np.sum(values * (values - solved), axis=1) - logdet
+
 def moments(reference: np.ndarray) -> dict:
     reference = positive_matrix(reference, True)
     dimension = len(reference)
@@ -63,6 +70,7 @@ def moments(reference: np.ndarray) -> dict:
         raise ValueError("Reference must be positive definite")
     operator = np.eye(dimension) - precision
     return {"real_mean": float(-logdet), "real_variance": float(max(0, 2 * (np.trace(reference @ reference) - dimension))), "independent_mean": float(dimension - np.trace(precision) - logdet), "independent_variance": float(max(0, 2 * np.trace(operator @ operator))), "mean_gap": float(np.trace(precision) - dimension), "dimension": dimension, "logdet": float(logdet)}
+
 def separation(reference: np.ndarray, kappa: float = 2.0) -> dict:
     if not np.isfinite(kappa) or kappa <= 0:
         raise ValueError("Kappa must be positive")
@@ -72,13 +80,16 @@ def separation(reference: np.ndarray, kappa: float = 2.0) -> dict:
     separated = genuine_lower > independent_upper
     result.update(genuine_lower=float(genuine_lower), independent_upper=float(independent_upper), moment_intervals_separate=bool(separated), separation_midpoint=float((genuine_lower + independent_upper) / 2) if separated else None, threshold=0.0, threshold_policy="Independence zero; moment bounds are diagnostics", cantelli_bound=float(1 / (1 + kappa ** 2)), bound_scope="Known Gaussian reference and exact PIT only")
     return result
+
 @dataclass
 class Marginals:
     sorted_values: np.ndarray
+
     def __post_init__(self) -> None:
         self.sorted_values = matrix(self.sorted_values)
         if np.any(np.diff(self.sorted_values, axis=0) < 0):
             raise ValueError("Marginal reference columns must be sorted")
+
     def transform(self, values: np.ndarray) -> np.ndarray:
         values = matrix(values, 1)
         if values.shape[1] != self.sorted_values.shape[1]:
@@ -92,11 +103,14 @@ class Marginals:
             right = np.searchsorted(reference, values[:, index], side="right")
             uniform[:, index] = (left + right) / (2 * count)
         return ndtri(np.clip(uniform, 0.5 / count, 1 - 0.5 / count))
+
     @classmethod
     def fit(cls, values: np.ndarray) -> Marginals:
         return cls(np.sort(matrix(values), axis=0))
+
 def rank_normal(values: np.ndarray) -> np.ndarray:
     return Marginals.fit(values).transform(values)
+
 def decompose(z: np.ndarray, reference: np.ndarray, names: list[str], top: int = 8) -> dict:
     reference = positive_matrix(reference, True)
     z = np.asarray(z, dtype=float)

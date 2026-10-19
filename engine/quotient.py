@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from numbers import Real
 import numpy as np
 from scipy.optimize import nnls
+
 def numeric(values: object, dimensions: int) -> np.ndarray:
     try:
         raw = np.asarray(values, dtype=object)
@@ -17,11 +18,13 @@ def numeric(values: object, dimensions: int) -> np.ndarray:
     if not np.isfinite(result).all():
         raise ValueError("Values must be finite")
     return result
+
 def scalar(value: object, minimum: float, maximum: float) -> float:
     result = numeric([value], 1)[0]
     if not minimum <= result <= maximum:
         raise ValueError("Scalar is outside the supported interval")
     return float(result)
+
 def pearson(values: object) -> np.ndarray:
     samples = numeric(values, 2)
     if samples.shape[0] < 4 or samples.shape[1] < 2:
@@ -36,6 +39,7 @@ def pearson(values: object) -> np.ndarray:
     result = normalized.T @ normalized
     np.fill_diagonal(result, 1)
     return correlations(result)
+
 def correlations(values: object) -> np.ndarray:
     result = numeric(values, 2)
     if result.shape[0] < 2 or result.shape[0] != result.shape[1]:
@@ -45,6 +49,7 @@ def correlations(values: object) -> np.ndarray:
     if np.linalg.eigvalsh(result).min() < -1e-8:
         raise ValueError("Correlation matrix must be positive semidefinite")
     return result.copy()
+
 def edge_indices(values: object, dimension: int) -> np.ndarray:
     try:
         rows = list(values)
@@ -63,6 +68,7 @@ def edge_indices(values: object, dimension: int) -> np.ndarray:
     if edges != sorted(edges):
         raise ValueError("Frozen edges must use lexicographic order for error bounds")
     return np.asarray(edges, dtype=int).reshape(-1, 2)
+
 @dataclass(frozen=True)
 class Panel:
     reference: np.ndarray
@@ -71,6 +77,7 @@ class Panel:
     projector: np.ndarray
     rank: int
     minimum_edge: float
+
     @classmethod
     def fit(cls, reference: object, edges: object | None = None, minimum_edge: float = 0.03) -> Panel:
         matrix = correlations(reference)
@@ -93,8 +100,10 @@ class Panel:
         for value in (matrix, selected, incidence, projector):
             value.setflags(write=False)
         return cls(matrix, selected, incidence, projector, rank, floor)
+
     def document(self) -> dict:
         return {"version": "flawprint-quotient-v1", "reference": self.reference.tolist(), "edges": self.edges.tolist(), "minimum_edge": self.minimum_edge, "rank": self.rank, "invariant_dimensions": len(self.edges) - self.rank}
+
     @classmethod
     def load(cls, document: dict) -> Panel:
         expected = {"version", "reference", "edges", "minimum_edge", "rank", "invariant_dimensions"}
@@ -105,6 +114,7 @@ class Panel:
             if isinstance(document[key], bool) or not isinstance(document[key], int) or document[key] != value:
                 raise ValueError("Stored panel dimensions disagree with the frozen graph")
         return result
+
     def compare(self, query: object, reference_error: object | None = None, query_error: object | None = None) -> dict:
         matrix = correlations(query)
         if matrix.shape != self.reference.shape:
@@ -143,6 +153,7 @@ class Panel:
         if size == self.rank:
             result["magnitude_information"] = "No quotient magnitude degrees of freedom; only signs and attenuation cone remain"
         return result
+
 def uncertainty(reference: object | None, query: object | None, size: int) -> tuple[np.ndarray, np.ndarray] | None:
     if reference is None and query is None:
         return None
@@ -159,6 +170,7 @@ def uncertainty(reference: object | None, query: object | None, size: int) -> tu
                 raise ValueError("Error bounds must match all frozen edges and lie in [0, 1)")
         results.append(vector)
     return results[0], results[1]
+
 def separation(panel: Panel, alternative: object, query: object, reference_error: object | None = None, alternative_error: object | None = None, query_error: object | None = None) -> dict:
     alternate = panel.compare(alternative, reference_error, alternative_error)
     observed = panel.compare(query, reference_error, query_error)
@@ -182,6 +194,7 @@ def separation(panel: Panel, alternative: object, query: object, reference_error
         measured_requirement = 2 * (max(radii[0], radii[1]) + radii[2])
         result.update(status="conditionally_bounded", margin_sufficient=bool(alternate["quotient_distance"] > measured_requirement + tolerance), measured_margin_requirement=measured_requirement, population_gap_lower=max(0.0, alternate["quotient_distance"] - radii[0] - radii[1]), error_radii=radii, reason="Conditional nearest-prototype guarantee if each query is a node attenuation of one same-sign population prototype and all error bounds hold")
     return result
+
 def measurement(document: dict, columns: list[str], unit: str, query: bool = False) -> tuple[np.ndarray, dict]:
     allowed = {"matrix", "samples", "relative_error", "uncertainty_source", "columns", "observation_unit"} | ({"id"} if query else set())
     if not isinstance(document, dict) or set(document) - allowed or ("matrix" in document) == ("samples" in document):
@@ -197,6 +210,7 @@ def measurement(document: dict, columns: list[str], unit: str, query: bool = Fal
     if len(result) != len(columns):
         raise ValueError("Matrix dimensions must match the declared columns")
     return result, {"input_kind": "matrix" if "matrix" in document else "samples", "samples": None if "matrix" in document else len(document["samples"]), "uncertainty_source": source}
+
 def audit(document: dict) -> dict:
     required = {"representation", "observation_unit", "columns", "reference", "queries"}
     if not isinstance(document, dict) or not required <= set(document) or set(document) - required - {"edges", "minimum_edge", "alternative"}:

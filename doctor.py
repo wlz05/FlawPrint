@@ -12,10 +12,12 @@ from pathlib import Path, PureWindowsPath
 import platform
 import re
 import sys
+
 CORE = {"numpy": "numpy", "scipy": "scipy", "Pillow": "PIL", "scikit-learn": "sklearn", "requests": "requests", "pypdf": "pypdf"}
 TABLES = {"pandas": "pandas", "openpyxl": "openpyxl", "pyarrow": "pyarrow", "xlrd": "xlrd"}
 SEMANTIC = {"torch": "torch", "transformers": "transformers"}
 LIMITS = {"numpy": ((1, 26), (3, 0)), "scipy": ((1, 11), (2, 0)), "Pillow": ((10, 0), (13, 0)), "scikit-learn": ((1, 4), (2, 0)), "requests": ((2, 31), (3, 0)), "pypdf": ((4, 0), (7, 0)), "pandas": ((2, 2), (4, 0)), "openpyxl": ((3, 1), (4, 0)), "pyarrow": ((15, 0), (30, 0)), "xlrd": ((2, 0), (3, 0)), "torch": ((2, 2), None), "transformers": ((4, 40), (5, 0))}
+
 def compatible(name: str, version: str) -> bool:
     match = re.match(r"^(\d+)\.(\d+)", version)
     if not match:
@@ -23,6 +25,7 @@ def compatible(name: str, version: str) -> bool:
     number = tuple(map(int, match.groups()))
     lower, upper = LIMITS[name]
     return number >= lower and (upper is None or number < upper)
+
 def environment(tables: bool = False, semantic: bool = False) -> dict:
     selected = dict(CORE)
     if tables:
@@ -43,11 +46,13 @@ def environment(tables: bool = False, semantic: bool = False) -> dict:
     root_ok = Path("./main.py").is_file() and Path("./configs/default.json").is_file()
     supported = sys.version_info >= (3, 10)
     return {"timestamp_utc": datetime.now(timezone.utc).isoformat(), "python": platform.python_version(), "implementation": platform.python_implementation(), "system": platform.system(), "machine": platform.machine(), "packages": versions, "missing": unavailable, "incompatible": incompatible, "python_supported": supported, "workspace_ready": root_ok, "passed": supported and root_ok and not unavailable and not incompatible, "path_base": "process working directory", "installation": "python -m pip install -r ./requirements.txt", "optional_tables": "python -m pip install -r ./tables.txt", "optional_semantic": "python -m pip install -r ./requirements-optional.txt"}
+
 def relative(value: str) -> Path:
     path = Path(value)
     if path.is_absolute() or PureWindowsPath(value).drive or value.startswith(("/", "\\")):
         raise ValueError("Use a relative output path")
     return path
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Inspect the reproduction environment using only the Python standard library.")
     parser.add_argument("--tables", action="store_true")
@@ -70,6 +75,7 @@ def main() -> None:
         raise SystemExit(0 if result["passed"] else 1)
     except (ValueError, OSError) as error:
         parser.error(str(error))
+
 if __name__ == "__main__":
     main()
 
