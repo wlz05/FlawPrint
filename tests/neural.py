@@ -15,11 +15,11 @@ from engine import embeddings
 from engine.copula import score
 from engine.experiment import indices
 from engine.profile import DomainProfile, ProfileConfig
-from engine.storage import subset, write_rows, read_json, save_bundle, write_json
+from engine.storage import subset, write_rows, read_rows, read_json, save_bundle, write_json
 from engine.synthetic import fixture
 try:
     import torch
-    from engine.neural import NeuralConfig, ResidualAttention
+    from engine.neural import NeuralConfig, ResidualAttention, potential, scramble
     from engine.learning import prepare, relation, fit, predict
 except ImportError:
     torch = None
@@ -115,6 +115,76 @@ class NeuralTests(unittest.TestCase):
         second = model(features, observed, ranks, graph, mask)["logit"]
         torch.testing.assert_close(first, second)
 
+    def test_content_queries_select_different_reference_interactions(self) -> None:
+        logits = torch.zeros(1, 2, 7, 7, requires_grad=True)
+        with torch.no_grad():
+            logits[:, :, 0, 3] = 4
+            logits[:, :, 1, 4] = 4
+        relation = torch.tensor([[[0.1, 0.4, -0.2, 0.0], [0.4, -0.1, 0.0, -0.2], [-0.2, 0.0, 0.1, 0.3], [0.0, -0.2, 0.3, -0.1]]])
+        observed = torch.ones(1, 7, dtype=torch.bool)
+        result = potential(logits, observed, relation, "coupled")
+        self.assertGreater(float((result[:, :, 0, 3:] - result[:, :, 1, 3:]).abs().max().detach()), 0.1)
+        self.assertGreater(float(result[:, :, :3, :3].abs().max().detach()), 0.1)
+        result[:, :, 0, 1].sum().backward()
+        self.assertGreater(float(logits.grad.abs().sum()), 0)
+
+    def test_reference_transport_is_bounded_and_missing_anchors_are_neutral(self) -> None:
+        torch.manual_seed(52)
+        graph = torch.randn(3, 4, 4)
+        graph = (graph + graph.transpose(-1, -2)) / 2
+        graph = graph / (1 + torch.linalg.matrix_norm(graph, keepdim=True))
+        observed = torch.ones(3, 7, dtype=torch.bool)
+        observed[0, 3:] = False
+        observed[1, 4] = False
+        values = torch.randn(3, 2, 7, 7)
+        for mode in ("coupled", "diagonal", "shuffled"):
+            bias = potential(values, observed, graph, mode)
+            self.assertTrue(torch.isfinite(bias).all())
+            self.assertLess(float(bias.abs().max()), 1)
+            self.assertTrue(torch.all(bias[0] == 0))
+            damaged = graph.clone()
+            damaged[1, 1, :], damaged[1, :, 1] = 999, 999
+            torch.testing.assert_close(bias, potential(values, observed, damaged, mode))
+
+    def test_pair_structure_survives_equal_scalar_and_row_summaries(self) -> None:
+        cycle = torch.tensor([[0., 1., -1., 0.], [1., 0., 0., -1.], [-1., 0., 0., 1.], [0., -1., 1., 0.]], dtype=torch.float64)
+        graphs = []
+        for sign in (-1, 1):
+            covariance = torch.linalg.inv(torch.eye(4, dtype=torch.float64) + sign * 0.2 * cycle)
+            scale = covariance.diagonal().sqrt()
+            reference = covariance / (scale[:, None] * scale[None, :])
+            graphs.append(torch.eye(4, dtype=torch.float64) - torch.linalg.inv(reference))
+        first, second = graphs
+        torch.testing.assert_close(first.sum(), second.sum())
+        torch.testing.assert_close(first.sum(-1), second.sum(-1))
+        torch.testing.assert_close(first.diagonal(), second.diagonal())
+        torch.testing.assert_close(first.norm(), second.norm())
+        graph = torch.stack(graphs)
+        graph = graph / (1 + torch.linalg.matrix_norm(graph, keepdim=True))
+        logits = torch.zeros(2, 1, 6, 6, dtype=torch.float64)
+        logits[:, :, 0, 2], logits[:, :, 1, 3] = 8, 8
+        observed = torch.ones(2, 6, dtype=torch.bool)
+        lifted = potential(logits, observed, graph, "coupled")
+        broadcast = potential(logits, observed, graph, "broadcast")
+        self.assertGreater(float((lifted[0, :, :2, :2] - lifted[1, :, :2, :2]).abs().max()), 0.1)
+        torch.testing.assert_close(broadcast[0, :, :2], broadcast[1, :, :2])
+
+    def test_relation_mismatch_preserves_active_spectrum_and_parameter_budget(self) -> None:
+        torch.manual_seed(3047)
+        relation = torch.randn(2, 4, 4)
+        relation = relation + relation.transpose(-1, -2)
+        mask = torch.tensor([[True, True, True, False], [False, True, False, False]])
+        relation *= mask[:, :, None] * mask[:, None, :]
+        permuted = scramble(relation, mask)
+        torch.testing.assert_close(torch.linalg.eigvalsh(relation), torch.linalg.eigvalsh(permuted))
+        torch.testing.assert_close(relation.norm(dim=(-2, -1)), permuted.norm(dim=(-2, -1)))
+        self.assertFalse(torch.allclose(relation[0], permuted[0]))
+        budgets = []
+        for mode in ("coupled", "broadcast", "diagonal", "shuffled"):
+            model = ResidualAttention({name: 4 for name in embeddings.STREAMS}, 4, replace(self.config, mode=mode))
+            budgets.append(sum(value.numel() for value in model.parameters() if value.requires_grad))
+        self.assertEqual(len(set(budgets)), 1)
+
     def test_cross_fitted_packets_ignore_target_test_annotations(self) -> None:
         altered = copy.deepcopy(self.bundle)
         for row in altered["rows"]:
@@ -138,9 +208,11 @@ class NeuralTests(unittest.TestCase):
         report = fit(self.bundle, self.archive, directory, self.config, self.profile, "cpu")
         self.assertGreater(report["trainable_parameters"], 0)
         self.assertEqual(report["image_supervised_samples"], 0)
-        predictions = predict(self.bundle, self.archive, directory, device="cpu")
+        predictions = predict(self.bundle, self.archive, directory, device="cpu", explain=True)
         self.assertEqual(len(predictions), len(indices(self.bundle, "test")))
         self.assertTrue(all(np.isfinite(row["fusion_risk"]) for row in predictions))
+        self.assertTrue(all(np.isfinite(row["potential_risk_delta"]) for row in predictions))
+        self.assertTrue(all(row["checkpoint_version"] == "flawprint-neural-v2" for row in predictions))
         self.assertEqual(read_json(Path(directory) / "model.json")["feature_order"], list(embeddings.STREAMS))
         history = read_json(Path(directory) / "model.json")["history"]
         self.assertLess(history[-1]["loss"], history[0]["loss"])
@@ -184,15 +256,16 @@ class NeuralTests(unittest.TestCase):
         command = [sys.executable, "-B", "deep.py", "train", physical.as_posix(), vectors.as_posix(), "--config", configuration.as_posix(), "--profile-config", profile.as_posix(), "--dataset", "Weibo21", "--device", "cpu", "--output", model.as_posix()]
         training = subprocess.run(command, capture_output=True, text=True, env=environment, timeout=60)
         self.assertEqual(training.returncode, 0, training.stderr)
-        prediction = subprocess.run([sys.executable, "-B", "deep.py", "predict", physical.as_posix(), vectors.as_posix(), "--model", model.as_posix(), "--device", "cpu", "--output", output.as_posix()], capture_output=True, text=True, env=environment, timeout=60)
+        prediction = subprocess.run([sys.executable, "-B", "deep.py", "predict", physical.as_posix(), vectors.as_posix(), "--model", model.as_posix(), "--device", "cpu", "--explain", "--output", output.as_posix()], capture_output=True, text=True, env=environment, timeout=60)
         self.assertEqual(prediction.returncode, 0, prediction.stderr)
         self.assertEqual(read_json(output.with_name("predictions.report.json"))["samples"], len(indices(self.bundle, "test")))
+        self.assertTrue(all("potential_risk_delta" in row for row in read_rows(output)))
         provenance = read_json(model / "provenance.json")
         self.assertEqual(provenance["dataset"], "weibo21")
         self.assertFalse(provenance["inputs_changed_during_training"])
 
     def test_all_neural_controls_have_finite_predictions(self) -> None:
-        for mode in ("unbiased", "independent", "deep", "concat"):
+        for mode in ("unbiased", "independent", "deep", "concat", "broadcast", "diagonal", "shuffled"):
             with self.subTest(mode=mode):
                 directory = (self.root / mode).as_posix()
                 fit(self.bundle, self.archive, directory, replace(self.config, mode=mode, epochs=1), self.profile, "cpu")
@@ -200,6 +273,18 @@ class NeuralTests(unittest.TestCase):
                 self.assertTrue(rows and all(np.isfinite(row["fusion_risk"]) for row in rows))
                 if mode == "deep":
                     self.assertFalse(read_json(Path(directory) / "model.json")["profiles"])
+
+    def test_legacy_checkpoint_keeps_its_broadcast_operator(self) -> None:
+        directory = self.root / "legacy"
+        fit(self.bundle, self.archive, directory.as_posix(), replace(self.config, mode="broadcast", epochs=1), self.profile, "cpu")
+        before = predict(self.bundle, self.archive, directory.as_posix(), device="cpu")
+        metadata = read_json(directory / "model.json")
+        metadata["version"], metadata["config"]["mode"] = "flawprint-neural-v1", "coupled"
+        metadata.pop("relation_operator")
+        write_json(directory / "model.json", metadata)
+        after = predict(self.bundle, self.archive, directory.as_posix(), device="cpu")
+        np.testing.assert_array_equal([row["fusion_risk"] for row in before], [row["fusion_risk"] for row in after])
+        self.assertTrue(all(row["model_mode"] == "broadcast" for row in after))
 
     def test_deep_cli_protects_its_manifest_before_loading_models(self) -> None:
         path = self.root / "manifest.jsonl"

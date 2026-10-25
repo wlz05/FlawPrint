@@ -76,10 +76,15 @@
       "unbiased",
       "independent",
       "deep",
-      "concat"
+      "concat",
+      "broadcast",
+      "diagonal",
+      "shuffled"
     ],
     "source_reference": "group cross-fitting",
     "target_reference": "independent unlabeled profile rows",
-    "target_labels_used_for_fitting": false
+    "target_labels_used_for_fitting": false,
+    "relation_operator": "content-conditioned-reference-v2",
+    "fixed_checkpoint_intervention": "deep.py predict --explain"
   }
 }

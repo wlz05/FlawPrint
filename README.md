@@ -1,28 +1,38 @@
 # FlawPrint: Cross-Domain Multimodal Fake News Detection via Copula Residuals of Physical Imperfection Traces
 
-**FlawPrint-CRA** couples deep multimodal representations with domain-referenced trace relationships. Frozen BERT, MAE, and CLIP encoders retain their full feature vectors. A low-dimensional copula reference supplies pairwise residuals inside attention, and a source-trained news head learns how to use the resulting interactions.
+**FlawPrint-CRA** learns how domain-referenced trace relationships condition news interactions. An independent domain pool defines pairwise copula residuals. Each content query selects trace coordinates, and the residual matrix is lifted into content-dependent attention through `B = U Gbar U^T`.
 
-The deterministic FlawPrint baseline achieves **state-of-the-art performance on Weibo, Weibo21, and FineFake**. CRA is the new trainable extension; its results are reported separately. Experiment settings use a **single NVIDIA GeForce RTX 4090** and seeds **42, 52, 3047, and 3407**.
+The deterministic FlawPrint baseline achieves **state-of-the-art performance on Weibo, Weibo21, and FineFake**. The content-conditioned CRA results are recorded separately. Experiment settings use a **single NVIDIA GeForce RTX 4090** and seeds **42, 52, 3047, and 3407**.
 
-## Architecture
+## Method Chain
 
 ```text
-News text and image                              Independent domain pool
-        |                                                  |
-        +--> BERT / MAE / CLIP vectors                      |
-        |              |                                   |
-        +--> 26 traces +--> Frozen rank coordinates <--- Domain copula
-                       |               |
-                       |        Pairwise residual matrix
-                       |               |
-                       +------- Residual attention
+Original text ---> BERT and CLIP text vectors ----+
+Original image -> MAE and CLIP image vectors ----+--> Content queries
+        |                                                |
+        +--> Pixel and container traces                  |
+Text ------> Narrative coordinates                        |
+                       |                                 |
+Independent pool --> Frozen ranks and domain copula      |
+                       |                                 |
+                  Pairwise residual G                    |
+                       |                                 |
+                       +------ Query-selected coordinates U
                                        |
-                              News logit and calibration
+                                B = U Gbar U^T
+                                       |
+                           Reference-conditioned attention
+                                       |
+                             News risk and calibration
 ```
 
-- **Domain-referenced interaction.** Pairwise copula residuals adjust attention before normalization, while learned content queries select useful relationships.
-- **Separate representation and reference roles.** Rich pretrained vectors encode content; the 26 trace coordinates keep domain precision estimation compact.
-- **News-specific supervision.** News labels train the joint decision. Independently observed image-manipulation labels support an optional image-only auxiliary head.
+1. **Encode content.** Retain the BERT text, MAE image, CLIP text, and CLIP image vectors as four global content nodes.
+2. **Measure trace coordinates.** Read noise, frequency, gradient, JPEG, resampling, and container proxies from the original image. Six narrative statistics complete the default 26-coordinate catalogue.
+3. **Define a domain reference.** Frozen empirical marginals establish rank coordinates. The copula precision matrix defines pairwise support relative to independent pairing.
+4. **Read relations through content.** Each attention head reuses its query/key scores to assign a distribution over available trace anchors. The lifted matrix `U Gbar U^T` supplies distinct content-to-content, content-to-trace, and trace-to-trace interaction conditions.
+5. **Learn the news decision.** Residual attention updates the nodes and the news head reads the class node. Source news labels train projections and interactions; separately observed manipulation labels supervise an optional image head.
+
+The core operation is the reference-conditioned relation readout in step 4. The encoder family supplies content representations. The reference defines measured support, and the current query determines which relationships enter each interaction. The mapping adds no separate gating-network parameters.
 
 ## Project Structure
 
@@ -164,12 +174,25 @@ Predict each checkpoint and report mean and sample standard deviation across the
 | `deep` | None | Deep multimodal attention |
 | `independent` | Rank coordinates, zero relation matrix | Ordinary attention |
 | `unbiased` | Rank and residual contributions | Ordinary attention |
-| `coupled` | Rank and residual contributions | Residual-biased attention |
+| `coupled` | Rank and residual contributions | Content-conditioned reference lifting |
 | `concat` | The same rank and residual tokens | Flattened projections and MLP |
+| `broadcast` | The same tokens | Shared row-summary bias; zero content-pair block |
+| `diagonal` | The same tokens | Lift only the residual diagonal |
+| `shuffled` | The same tokens | Lift a spectrum-preserving mismatch of relation identities |
 
-Use `--mode` with a fresh model directory to run each control. The `coupled` versus `unbiased` comparison isolates the attention potential. All controls retain the same feature caches, source supervision, split identities, and training budget; report their actual parameter counts. If image attributes exist, keep the auxiliary-loss setting identical across controls.
+Use `--mode` with a fresh model directory to run each control. The `coupled` versus `unbiased` comparison isolates the attention potential. The `coupled`, `broadcast`, `diagonal`, and `shuffled` modes have identical trainable parameter counts and node inputs. They isolate content conditioning, off-diagonal relationships, and trace-relation identity. All controls retain the same feature caches, source supervision, split identities, and training budget; report their actual parameter counts. If image attributes exist, keep the auxiliary-loss setting identical across controls.
 
 Related complete news models include [DAPT](https://doi.org/10.1145/3746027.3755192), [DAMMFND](https://github.com/luweihai/DAMMFND), [MMDFND](https://github.com/yutchina/MMDFND), and [TERN](https://www.mdpi.com/2076-3417/16/13/6759). [ReAlign](https://openaccess.thecvf.com/content/CVPR2026/papers/Huang_ReAlign_Generalizable_Image_Forgery_Detection_via_Reasoning-Aligned_Representation_CVPR_2026_paper.pdf) provides a learned image-forensics comparison. [Falsdo](https://www.ijcai.org/proceedings/2026/275) motivates artifact-matched Real/Control/Fake evaluation.
+
+### Fixed-Checkpoint Intervention
+
+```bash
+python -B deep.py predict ./data/features.npz ./data/deep.npz --model ./models/neural42 --split test --device cuda:0 --explain --output ./outputs/neural42/intervention.jsonl
+```
+
+`--explain` holds the checkpoint and relation tokens fixed, disables the attention potential, and exports `potential_disabled_risk` and `potential_risk_delta`. It adds one forward pass and records a software intervention on raw news risk. Probabilities and prediction sets still use the original calibrated risk. These fields measure model response; they do not identify a physical cause or establish factual truth.
+
+New checkpoints use `flawprint-neural-v2` and record the relation operator. Existing `v1` coupled checkpoints retain their original broadcast operation when loaded. Prediction output includes the effective mode and checkpoint version.
 
 ## Implementation Details
 
@@ -239,4 +262,4 @@ python -B main.py theory --seed 42 --output ./outputs/theory.json
 python -B main.py invariance --seed 42 --output ./outputs/invariance.json
 ```
 
-The regression suite covers local transformer extraction, checkpoint reload, missing inputs, reference overlap, target-label isolation, residual reconstruction, gradient flow, and all five neural modes. Synthetic fixtures and randomly initialized small local encoders verify implementation behavior; real-data benchmark results are recorded separately.
+The regression suite covers local transformer extraction, checkpoint reload, missing inputs, reference overlap, target-label isolation, equal-summary relation controls, bounded query-conditioned lifting, legacy reload, gradient flow, and all eight neural modes. Synthetic fixtures and randomly initialized small local encoders verify implementation behavior; real-data benchmark results are recorded separately.

@@ -2,7 +2,7 @@
 # FlawPrint: Cross-Domain Multimodal Fake News Detection via Copula Residuals of Physical Imperfection Traces
 
 from __future__ import annotations
-from dataclasses import asdict
+from dataclasses import asdict, replace
 import hashlib
 import platform
 import random
@@ -14,7 +14,7 @@ from engine.conformal import calibrate_rows, apply_calibration, validate_labels
 from engine.data import audit_splits
 from engine.lineage import collect, ensure_disjoint, identity, FIELDS
 from engine.metrics import binary
-from engine.neural import NeuralConfig, ResidualAttention
+from engine.neural import NeuralConfig, ResidualAttention, BIASED
 from engine.profile import DomainProfile, ProfileConfig
 from engine.provenance import source_digest
 from engine.storage import relative_path, subset, read_json, write_json, validate_bundle, digest
@@ -231,17 +231,19 @@ def fit(bundle: dict, archive: dict, output: str, config: NeuralConfig, profile_
     weights = destination / "parameters.pt"
     torch.save(best, weights)
     fit_rows = [rows[index] for role in ("train", "validation", "calibration") for index in partitions[role]]
-    metadata = {"version": "flawprint-neural-v1", "config": asdict(config), "dimensions": dimensions, "feature_order": list(dimensions), "trace_names": bundle["names"].tolist(), "normalizers": normalizers, "profiles": profile_paths, "profile_sha256": profile_hashes, "encoder_signature": signature(archive), "calibration": state, "fit_identifiers": [row["id"] for row in fit_rows], "fit_history": collect(fit_rows), "weights_sha256": digest(weights), "source_sha256": source_digest(), "selection_metric": "source validation macro F1", "trainable_parameters": sum(value.numel() for value in model.parameters() if value.requires_grad), "history": history, "best_validation_macro_f1": best_score, "backbones": "Frozen local feature encoders; trainable projectors, attention and heads", "target_labels_used_for_fitting": False}
+    metadata = {"version": "flawprint-neural-v2", "relation_operator": "content-conditioned-reference-v2", "config": asdict(config), "dimensions": dimensions, "feature_order": list(dimensions), "trace_names": bundle["names"].tolist(), "normalizers": normalizers, "profiles": profile_paths, "profile_sha256": profile_hashes, "encoder_signature": signature(archive), "calibration": state, "fit_identifiers": [row["id"] for row in fit_rows], "fit_history": collect(fit_rows), "weights_sha256": digest(weights), "source_sha256": source_digest(), "selection_metric": "source validation macro F1", "trainable_parameters": sum(value.numel() for value in model.parameters() if value.requires_grad), "history": history, "best_validation_macro_f1": best_score, "backbones": "Frozen local feature encoders; trainable projectors, attention and heads", "target_labels_used_for_fitting": False}
     metadata["environment"] = {"python": platform.python_version(), "torch": str(torch.__version__), "numpy": np.__version__, "device": device, "cuda_runtime": torch.version.cuda, "gpu": torch.cuda.get_device_name(torch.device(device)) if torch.device(device).type == "cuda" else None}
     write_json(destination / "model.json", metadata)
     image_samples = sum(isinstance(rows[index].get("physical_manipulated"), (bool, np.bool_)) and bool(rows[index].get("image")) for index in partitions["train"]) if config.auxiliary_weight else 0
     return {"output": output, "epochs": len(history), "best_validation_macro_f1": best_score, "trainable_parameters": metadata["trainable_parameters"], "image_supervised_samples": image_samples}
 
-def predict(bundle: dict, archive: dict, directory: str, split: str = "test", device: str = "cuda:0", reference_domain: str | None = None) -> list[dict]:
+def predict(bundle: dict, archive: dict, directory: str, split: str = "test", device: str = "cuda:0", reference_domain: str | None = None, explain: bool = False) -> list[dict]:
     root = relative_path(directory)
     metadata = read_json(root / "model.json")
-    if metadata.get("version") != "flawprint-neural-v1" or digest(root / "parameters.pt") != metadata.get("weights_sha256"):
+    if metadata.get("version") not in ("flawprint-neural-v1", "flawprint-neural-v2") or digest(root / "parameters.pt") != metadata.get("weights_sha256"):
         raise ValueError("The neural checkpoint version or weight hash is invalid")
+    if metadata["version"] == "flawprint-neural-v2" and metadata.get("relation_operator") != "content-conditioned-reference-v2":
+        raise ValueError("The neural checkpoint relation operator is unsupported")
     if bundle["names"].tolist() != metadata["trace_names"] or signature(archive) != metadata["encoder_signature"]:
         raise ValueError("The query encoder or physical feature schema changed")
     features, observed = embeddings.align(bundle, archive)
@@ -271,15 +273,28 @@ def predict(bundle: dict, archive: dict, directory: str, split: str = "test", de
         packet["ranks"][selected_indices], packet["graph"][selected_indices], packet["trace_observed"][selected_indices] = ranks, graph, mask
     packet, _ = standardize(packet, [], metadata["normalizers"])
     config = NeuralConfig(**metadata["config"])
+    if metadata["version"] == "flawprint-neural-v1" and config.mode == "coupled":
+        config = replace(config, mode="broadcast")
     dimensions = {name: metadata["dimensions"][name] for name in metadata["feature_order"]}
     model = ResidualAttention(dimensions, len(metadata["trace_names"]), config).to(device)
     model.load_state_dict(torch.load(root / "parameters.pt", map_location=device, weights_only=True))
     risks = logits(model, packet, list(range(len(rows))), device, config.batch_size)
+    disabled = risks
+    if explain and config.mode in BIASED:
+        model.config = replace(config, mode="unbiased")
+        disabled = logits(model, packet, list(range(len(rows))), device, config.batch_size)
+        model.config = config
     predictions = apply_calibration(scored(rows, list(range(len(rows))), risks), metadata["calibration"])
-    for row in predictions:
+    for index, row in enumerate(predictions):
         row["model_mode"] = config.mode
+        row["checkpoint_version"] = metadata["version"]
+        row["relation_operator"] = metadata.get("relation_operator", "broadcast-reference-v1")
         row["reference_domain"] = reference_domain or row["domain"]
         row["physical_reference_available"] = row["reference_domain"] in metadata["profiles"]
+        if explain:
+            row["potential_disabled_risk"] = float(disabled[index])
+            row["potential_risk_delta"] = float(risks[index] - disabled[index])
+            row["intervention_scope"] = "Fixed checkpoint and relation tokens; attention potential disabled"
     return predictions
 
 # Author: Weiliang Zhu
