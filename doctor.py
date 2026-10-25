@@ -16,7 +16,7 @@ import sys
 CORE = {"numpy": "numpy", "scipy": "scipy", "Pillow": "PIL", "scikit-learn": "sklearn", "requests": "requests", "pypdf": "pypdf"}
 TABLES = {"pandas": "pandas", "openpyxl": "openpyxl", "pyarrow": "pyarrow", "xlrd": "xlrd"}
 SEMANTIC = {"torch": "torch", "transformers": "transformers"}
-LIMITS = {"numpy": ((1, 26), (3, 0)), "scipy": ((1, 11), (2, 0)), "Pillow": ((10, 0), (13, 0)), "scikit-learn": ((1, 4), (2, 0)), "requests": ((2, 31), (3, 0)), "pypdf": ((4, 0), (7, 0)), "pandas": ((2, 2), (4, 0)), "openpyxl": ((3, 1), (4, 0)), "pyarrow": ((15, 0), (30, 0)), "xlrd": ((2, 0), (3, 0)), "torch": ((2, 2), None), "transformers": ((4, 40), (5, 0))}
+LIMITS = {"numpy": ((1, 26), (3, 0)), "scipy": ((1, 11), (2, 0)), "Pillow": ((10, 0), (13, 0)), "scikit-learn": ((1, 4), (2, 0)), "requests": ((2, 31), (3, 0)), "pypdf": ((4, 0), (7, 0)), "pandas": ((2, 2), (4, 0)), "openpyxl": ((3, 1), (4, 0)), "pyarrow": ((15, 0), (30, 0)), "xlrd": ((2, 0), (3, 0)), "torch": ((2, 2), None), "transformers": ((4, 40), (6, 0))}
 
 def compatible(name: str, version: str) -> bool:
     match = re.match(r"^(\d+)\.(\d+)", version)

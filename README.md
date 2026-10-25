@@ -1,74 +1,65 @@
 # FlawPrint: Cross-Domain Multimodal Fake News Detection via Copula Residuals of Physical Imperfection Traces
 
-**FlawPrint** detects multimodal fake news through the dependence between image and narrative traces. It removes marginal scale through rank normalization, estimates a domain copula, and measures departures from its joint structure. Local sign evidence identifies inconsistent trace relationships, while a frozen semantic detector scores the news narrative.
+**FlawPrint-CRA** couples deep multimodal representations with domain-referenced trace relationships. Frozen BERT, MAE, and CLIP encoders retain their full feature vectors. A low-dimensional copula reference supplies pairwise residuals inside attention, and a source-trained news head learns how to use the resulting interactions.
 
-**FlawPrint achieves state-of-the-art performance on Weibo, Weibo21, and FineFake.** Experiments run on a **single NVIDIA GeForce RTX 4090**, using seeds **42, 52, 3047, and 3407**.
-
----
+The deterministic FlawPrint baseline achieves **state-of-the-art performance on Weibo, Weibo21, and FineFake**. CRA is the new trainable extension; its results are reported separately. Experiment settings use a **single NVIDIA GeForce RTX 4090** and seeds **42, 52, 3047, and 3407**.
 
 ## Architecture
 
 ```text
-News image and text                         Independent domain reference pool
-        |                                                   |
-Deterministic trace extraction                 The same extraction and schema
-        |                                                   |
-20 image traces + 6 narrative traces              Rank marginals and copula
-        |                                                   |
-        +-------------- Frozen rank transformation ---------+
-                                |
-                   Copula residual and local sign evidence
-                                |
-Frozen semantic news score ---> Evidence routing and calibration
-                                |
-                    Fake-news risk and prediction set
+News text and image                              Independent domain pool
+        |                                                  |
+        +--> BERT / MAE / CLIP vectors                      |
+        |              |                                   |
+        +--> 26 traces +--> Frozen rank coordinates <--- Domain copula
+                       |               |
+                       |        Pairwise residual matrix
+                       |               |
+                       +------- Residual attention
+                                       |
+                              News logit and calibration
 ```
 
-### Key Contributions
-
-- **A relation-centered detection criterion.** FlawPrint evaluates the joint organization of traces against a domain reference, addressing changes that individual trace magnitudes cannot characterize.
-- **A domain-specific copula residual.** Frozen empirical marginals and a regularized dependence matrix define the physical score; local partial-correlation signs expose which trace relations disagree with the reference.
-- **Inference and calibration.** Physical and semantic scores are combined according to the available evidence, with probabilities and prediction sets calibrated on separate source partitions.
+- **Domain-referenced interaction.** Pairwise copula residuals adjust attention before normalization, while learned content queries select useful relationships.
+- **Separate representation and reference roles.** Rich pretrained vectors encode content; the 26 trace coordinates keep domain precision estimation compact.
+- **News-specific supervision.** News labels train the joint decision. Independently observed image-manipulation labels support an optional image-only auxiliary head.
 
 ## Project Structure
 
 ```text
 FlawPrint/
-|-- main.py                  # Preparation, profiling, inference, and evaluation.
+|-- deep.py                  # Embedding extraction, neural training, and prediction.
+|-- main.py                  # Trace extraction and deterministic controls.
 |-- convert.py               # Dataset conversion.
-|-- doctor.py                # Dependency and environment inspection.
-|-- encode.py                # Optional local CLIP alignment control.
-|-- study.py                 # Threshold, propagation, cold-start, and cost studies.
-|-- research.py              # Paired, contamination, and channel comparisons.
-|-- download.py              # Download reference papers from recorded sources.
-|-- test.py                  # Regression test runner.
-|-- engine/                  # Trace, copula, calibration, and evaluation modules.
-|-- tests/                   # Data, mathematical, leakage, and workflow checks.
-|-- configs/                 # Model settings and dataset schemas.
-|-- requirements.txt         # Core dependencies.
+|-- doctor.py                # Environment inspection.
+|-- encode.py                # CLIP similarity control.
+|-- research.py              # Paired, composition, and channel analyses.
+|-- study.py                 # Propagation, reference, and cost studies.
+|-- download.py              # Reference paper downloads.
+|-- test.py                  # Regression runner.
+|-- engine/embeddings.py     # Frozen local encoder features and cache alignment.
+|-- engine/neural.py         # Residual attention and comparison modes.
+|-- engine/learning.py       # Group cross-fitting, training, and checkpoint loading.
+|-- configs/                 # Training, profiling, conversion, and dataset settings.
+|-- tests/                   # Data, mathematics, leakage, and workflow checks.
+|-- requirements.txt
 |-- requirements-optional.txt
-|-- tables.txt               # Optional spreadsheet and Parquet readers.
+|-- tables.txt
 |-- README.md
 ```
 
 ## Requirements
 
-| Component | Version / setting |
+| Component | Setting |
 |---|---|
-| Python | 3.10 or newer |
-| NumPy | >=1.26, <3 |
-| SciPy | >=1.11, <2 |
-| Pillow | >=10, <13 |
-| scikit-learn | >=1.4, <2 |
-| Requests | >=2.31, <3 |
-| pypdf | >=4, <7 |
-| Optional semantic inference | PyTorch >=2.2; Transformers >=4.40, <5 |
+| Python | >=3.10 |
+| NumPy / SciPy | >=1.26, <3 / >=1.11, <2 |
+| Pillow / scikit-learn | >=10, <13 / >=1.4, <2 |
+| Deep learning | PyTorch >=2.2; Transformers >=4.40, <6 |
 | GPU | Single NVIDIA GeForce RTX 4090 |
-| Experiment seeds | **42, 52, 3047, 3407** |
+| Seeds | 42, 52, 3047, 3407 |
 
-Trace extraction and copula profiling run on CPU. Optional semantic inference supports CUDA.
-
-### Installation
+Install the PyTorch build for your CUDA environment, then install the dependencies:
 
 ```bash
 git clone https://github.com/wlz05/FlawPrint.git
@@ -76,66 +67,48 @@ cd FlawPrint
 python -m venv .venv
 ```
 
-Activate the environment on your platform:
-
 ```powershell
 .venv/Scripts/Activate.ps1
 ```
 
 ```bash
 source .venv/bin/activate
-```
-
-Install and inspect the core environment:
-
-```bash
-python -m pip install -r ./requirements.txt
-python -B doctor.py --output ./outputs/environment.json --freeze ./outputs/versions.txt
-```
-
-For Excel, Parquet, and legacy spreadsheet input:
-
-```bash
-python -m pip install -r ./tables.txt
-python -B doctor.py --tables
-```
-
-For optional local CLIP inference, install the PyTorch build appropriate for your CUDA environment and then the optional requirements:
-
-```bash
 python -m pip install -r ./requirements-optional.txt
-python -B doctor.py --semantic
-```
-
-## Quick Start
-
-### 1. Verify the installation
-
-```bash
-python -B main.py --help
+python -B doctor.py --semantic --tables --output ./outputs/environment.json --freeze ./outputs/versions.txt
 python -B test.py
 ```
 
-### 2. Run a synthetic example
+Use the activation command for your shell. The deterministic pipeline requires only `requirements.txt`; `tables.txt` adds Excel and Parquet readers. Trace profiling runs on CPU; deep extraction and training use `cuda:0` by default.
 
-```bash
-python -B main.py fixture --seed 42 --per-split 24 --output ./data/fixture.npz
-python -B main.py benchmark ./data/fixture.npz --config ./configs/quick.json --bootstrap 25 --ablations --output ./outputs/smoke
+## Datasets
+
+| Dataset | Domains | Partitions |
+|---|---|---|
+| [Weibo](https://doi.org/10.1145/3123266.3123454) | 9 | Released train, validation, and test identities |
+| [Weibo21](https://github.com/kennqiang/MDFEND-Weibo21) | 9 | Released train, validation, and test identities |
+| [FineFake](https://github.com/Accuser907/FineFake) | 7 | Fixed 60% / 20% / 20%, split seed 3407 |
+
+Dataset partitions remain fixed across experiment seeds. Source validation and calibration identities are separate. Domain-reference pools are independent of evaluation samples. Keep events, original images, and duplicate content disjoint; validate the actual release before running. Settings and paths are recorded in [configs/experiment.json](configs/experiment.json).
+
+## Prepare Data
+
+Run commands from the repository root. All image, model, and output paths are relative to that directory. Canonical labels are **0 = real, 1 = fake**.
+
+```json
+{"id":"news001","image":"./data/images/news001.jpg","text":"Example news text.","domain":"politics","group":"event001","split":"test","label":1}
 ```
 
-### 3. Prepare data
+| Field | Meaning |
+|---|---|
+| `id` | Unique stable string shared by all feature caches |
+| `image` / `text` | Relative image path or empty string; original news text |
+| `domain` / `group` | Domain and event or duplicate-group identity |
+| `split` | `train`, `validation`, `calibration`, `profile`, or `test` |
+| `label` | News-veracity label; absent from target profile rows |
+| `physical_manipulated` | Optional independently observed Boolean image attribute |
+| `content_sha256` | Image-byte fingerprint populated by extraction |
 
-Store Weibo in `./data`, Weibo21 in `./weibo21`, and FineFake in `./FineFake`. For canonical input:
-
-```bash
-python -B main.py prepare ./data/raw.jsonl --labels fake-one --output ./data/manifest.jsonl
-python -B main.py validate ./data/manifest.jsonl --benchmark --check-images --output ./outputs/preflight.json
-python -B main.py extract ./data/manifest.jsonl --workers 1 --output ./data/features.npz
-```
-
-Use the supplied train, validation, and test partitions and retain their sample identities. Each evaluated domain has an independent reference pool.
-
-For dataset-specific columns and label conversion:
+Do not infer `physical_manipulated` from news labels. Missing attributes remain unknown. See [configs/schema.json](configs/schema.json), [configs/conversion.json](configs/conversion.json), and [configs/labels.json](configs/labels.json).
 
 ```bash
 python -B convert.py ./data/train_origin.csv --dataset WEIBO --mapping ./configs/weibo.json --split train --output ./data/weibo_train.jsonl
@@ -143,210 +116,127 @@ python -B convert.py ./weibo21/train_datasets.xlsx --dataset Weibo21 --mapping .
 python -B convert.py ./FineFake/train.csv --dataset FineFake --mapping ./configs/finefake.json --split train --output ./FineFake/train.jsonl
 ```
 
-Dataset names are converted to lowercase before selection: `WEIBO`, `Weibo21`, and `FineFake` select `weibo`, `weibo21`, and `finefake`. The dataset configurations map labels to 0 = real and 1 = fake. Use the same commands with `--split validation` and `--split test` for the corresponding source tables. JSONL, NDJSON, JSON, CSV, TSV, Excel, and Parquet are supported; Excel and Parquet use the table dependencies.
+Repeat conversion for the other partitions with their matching `--split`. Dataset selection normalizes names to lowercase. JSONL, NDJSON, JSON, CSV, TSV, Excel, and Parquet are supported. Merge the converted rows into one manifest while preserving IDs and split roles, then validate and extract:
 
-### 4. Supply frozen semantic predictions
+```bash
+python -B main.py prepare ./data/raw.jsonl --labels fake-one --output ./data/manifest.jsonl
+python -B main.py validate ./data/manifest.jsonl --benchmark --check-images --output ./outputs/preflight.json
+python -B main.py extract ./data/manifest.jsonl --workers 1 --output ./data/features.npz
+```
 
-Provide one finite logit per sample, with higher values indicating fake news:
+For source domains, training groups supply the physical reference through cross-fitting. Held-out target domains use independent unlabeled `profile` rows. A domain cannot supply both source training rows and target-profile rows in the same neural run.
+
+## Pretrained Encoders
+
+Place complete Hugging Face checkpoints, tokenizer assets, and processor files in `./models/bert`, `./models/mae`, and `./models/clip`. Extraction reads local files only. For Chinese input, compatible checkpoint families include [BERT-base-Chinese](https://huggingface.co/google-bert/bert-base-chinese), [ViT-MAE-base](https://huggingface.co/facebook/vit-mae-base), and [Chinese-CLIP](https://huggingface.co/OFA-Sys/chinese-clip-vit-base-patch16). Use language-matched BERT and CLIP checkpoints for other languages, and keep their exact files fixed within a comparison.
+
+`deep.py` retains the BERT and MAE class-token vectors and both projected CLIP vectors. MAE uses all patches in fixed order. CLIP text is truncated to its checkpoint's supported context. The archive records encoder hashes, availability masks, identities, image checksums, and preprocessing provenance.
+
+```bash
+python -B deep.py extract ./data/manifest.jsonl --bert ./models/bert --mae ./models/mae --clip ./models/clip --batch-size 64 --max-length 197 --device cuda:0 --output ./data/deep.npz
+```
+
+Add `--forensic ./models/forensic` for a separately trained, Hugging Face-compatible forensic CLIP image encoder. This interface reads pooled image features; raw external checkpoints require conversion to the supported model format. Every compared mode must use the same encoder set. After changing image bytes through editing, JPEG compression, or resizing, regenerate both physical and deep features.
+
+## Train and Predict
+
+The pretrained encoders are frozen. Trainable projections, residual attention, and the news head use source news labels. Source event/image groups define cross-fitting folds; source training alone fits feature standardizers. Validation selects the checkpoint and fits probability calibration; a separate calibration partition fits prediction sets. Target labels do not enter fitting.
+
+```bash
+python -B deep.py train ./data/features.npz ./data/deep.npz --dataset Weibo21 --config ./configs/neural.json --profile-config ./configs/default.json --seed 42 --mode coupled --device cuda:0 --output ./models/neural42
+python -B deep.py predict ./data/features.npz ./data/deep.npz --model ./models/neural42 --split test --device cuda:0 --output ./outputs/neural42/predictions.jsonl
+```
+
+Run the other experiment seeds with separate model directories:
+
+```bash
+python -B deep.py train ./data/features.npz ./data/deep.npz --dataset Weibo21 --seed 52 --mode coupled --output ./models/neural52
+python -B deep.py train ./data/features.npz ./data/deep.npz --dataset Weibo21 --seed 3047 --mode coupled --output ./models/neural3047
+python -B deep.py train ./data/features.npz ./data/deep.npz --dataset Weibo21 --seed 3407 --mode coupled --output ./models/neural3407
+```
+
+Predict each checkpoint and report mean and sample standard deviation across the four seeds. The model directory stores `parameters.pt`, `model.json`, `profiles/`, and CLI `provenance.json`. Predictions include calibrated news output, method mode, and reference availability. Labeled predictions also produce a `.report.json` metric file. Loading checks encoder/schema/weight/reference hashes and rejects identities or known lineage used for training, validation, or calibration.
+
+## Baselines and Ablations
+
+| Neural mode | Trace input | Readout |
+|---|---|---|
+| `deep` | None | Deep multimodal attention |
+| `independent` | Rank coordinates, zero relation matrix | Ordinary attention |
+| `unbiased` | Rank and residual contributions | Ordinary attention |
+| `coupled` | Rank and residual contributions | Residual-biased attention |
+| `concat` | The same rank and residual tokens | Flattened projections and MLP |
+
+Use `--mode` with a fresh model directory to run each control. The `coupled` versus `unbiased` comparison isolates the attention potential. All controls retain the same feature caches, source supervision, split identities, and training budget; report their actual parameter counts. If image attributes exist, keep the auxiliary-loss setting identical across controls.
+
+Related complete news models include [DAPT](https://doi.org/10.1145/3746027.3755192), [DAMMFND](https://github.com/luweihai/DAMMFND), [MMDFND](https://github.com/yutchina/MMDFND), and [TERN](https://www.mdpi.com/2076-3417/16/13/6759). [ReAlign](https://openaccess.thecvf.com/content/CVPR2026/papers/Huang_ReAlign_Generalizable_Image_Forgery_Detection_via_Reasoning-Aligned_Representation_CVPR_2026_paper.pdf) provides a learned image-forensics comparison. [Falsdo](https://www.ijcai.org/proceedings/2026/275) motivates artifact-matched Real/Control/Fake evaluation.
+
+## Implementation Details
+
+| Setting | Value |
+|---|---|
+| GPU / seeds | Single RTX 4090 / 42, 52, 3047, 3407 |
+| Maximum epochs / batch size | 50 / 64 |
+| Optimizer / learning rate / weight decay | AdamW / 0.0001 / 0.00005 |
+| Source selection / patience | Validation macro F1 / 5 epochs |
+| Maximum text length | 197, limited by each encoder's context |
+| Projected width / heads / layers | 128 / 4 / 2 |
+| Dropout / gradient norm limit | 0.1 / 1.0 |
+| Residual-potential bound | 2.0 |
+| Source-reference group folds | 2 |
+| Optional image-loss weight | 0.1 |
+| Trace image longest / minimum side | 768 / 32 pixels |
+| Trace schema / local grid | 20 image + 6 narrative / 4 x 4 |
+| Global / local shrinkage | 0.1 / 0.35 |
+| Minimum reference samples | 20 |
+| Deterministic sign bootstrap | 100 repetitions |
+
+The inverse correlation is estimated only in retained trace coordinates. The neural path uses the global pairwise matrix; local sign penalties belong to the deterministic control. Missing streams are masked. Missing or insufficient references produce zero relation potential and preserve deep inference.
+
+Report Accuracy and classwise Precision, Recall, and F1 alongside macro F1 and ROC-AUC, as used in [DAMMFND](https://ojs.aaai.org/index.php/AAAI/article/view/32036) and [MMDFND](https://github.com/yutchina/MMDFND). Report source-calibrated probability metrics and prediction-set coverage separately. Image-authenticity auxiliary metrics use independent image labels.
+
+## Deterministic Controls
+
+The original trace/copula scoring and external semantic fusion remain available. Verify the core pipeline with a synthetic fixture:
+
+```bash
+python -B main.py fixture --seed 42 --per-split 24 --output ./data/fixture.npz
+python -B main.py benchmark ./data/fixture.npz --config ./configs/quick.json --bootstrap 25 --ablations --output ./outputs/smoke
+```
+
+Provide frozen news logits increasing toward fake news, join by exact identity, and benchmark:
 
 ```json
 {"id":"news001","logit":1.25}
 ```
 
-Join scores by exact sample identity before extracting the feature bundle:
-
 ```bash
 python -B main.py join ./data/manifest.jsonl ./data/semantic.jsonl --score-key logit --output ./data/semantic_manifest.jsonl
 python -B main.py extract ./data/semantic_manifest.jsonl --output ./data/semantic_features.npz
-```
-
-Use `--real-positive` for scores that increase toward real news. External models are trained on the source partitions and frozen before target inference.
-
-### 5. Run the four-seed benchmark
-
-```bash
 python -B main.py benchmark ./data/semantic_features.npz --dataset Weibo21 --config ./configs/seed42.json --ablations --output ./outputs/seed42
-python -B main.py benchmark ./data/semantic_features.npz --dataset Weibo21 --config ./configs/seed52.json --ablations --output ./outputs/seed52
-python -B main.py benchmark ./data/semantic_features.npz --dataset Weibo21 --config ./configs/seed3047.json --ablations --output ./outputs/seed3047
-python -B main.py benchmark ./data/semantic_features.npz --dataset Weibo21 --config ./configs/seed3407.json --ablations --output ./outputs/seed3407
 ```
 
-The four configurations differ only in `seed` and use the same data partitions. When retraining the semantic backbone across seeds, join and extract each run's predictions separately, then pass the matching feature bundle to the benchmark.
-
-Each output directory contains:
-
-| File / directory | Content |
-|---|---|
-| `report.json` | Metrics, configuration, profile quality, and skipped methods |
-| `summary.csv` | AUC, macro F1, accuracy, calibration, domain metrics, and timing |
-| `predictions/` | Per-sample predictions for each method |
-| `profiles/` | Frozen domain profiles |
-| `calibration.json` | Probability and prediction-set calibration states |
-| `provenance.json` | Source, input, environment, schema, and configuration fingerprints |
-
-Report mean and sample standard deviation across the four seeds. Use the full seed configurations for experiments; `quick.json` uses fewer bootstrap repetitions and a smaller reference pool.
-
-## Datasets
-
-| Dataset | Domains | Data partitions |
-|---|---|---|
-| [Weibo](https://doi.org/10.1145/3123266.3123454) | 9 | The released train, validation, and test partitions |
-| [Weibo21](https://github.com/kennqiang/MDFEND-Weibo21) | 9 | The released train, validation, and test partitions |
-| [FineFake](https://github.com/Accuser907/FineFake) | 7 | 60% / 20% / 20%, stratified by label with split seed 3407 |
-
-Dataset partitions remain fixed across the four experiment seeds. FineFake is stratified by label using split seed 3407. Dataset paths and training settings are recorded in [configs/experiment.json](configs/experiment.json).
-
-## Experimental Setup
-
-We implement FlawPrint on a single NVIDIA GeForce RTX 4090. The semantic backbone is trained for 50 epochs with a batch size of 64, a learning rate of 0.0001, and a maximum text length of 197. Early stopping uses a patience of 5 epochs. We run each experiment with seeds 42, 52, 3047, and 3407 and report the mean and sample standard deviation.
-
-| Setting | Value |
-|---|---|
-| GPU | Single NVIDIA GeForce RTX 4090 |
-| Seeds | 42, 52, 3047, 3407 |
-| Training epochs | 50 |
-| Batch size | 64 |
-| Learning rate | 0.0001 |
-| Maximum text length | 197 |
-| Early stopping patience | 5 epochs |
-| Weight decay | 0.00005 |
-| Text embedding dimension | 768 |
-| FineFake partition seed | 3407 |
-
-We report accuracy and classwise precision, recall, and F1-score, following the evaluation used in [DAMMFND](https://ojs.aaai.org/index.php/AAAI/article/view/32036) and [MMDFND](https://github.com/yutchina/MMDFND). The evaluation output also includes macro F1 and ROC-AUC.
-
-## Dataset Format & Split Provenance
-
-The canonical label direction is **0 = real, 1 = fake**. Paths are relative to the repository working directory, including image paths stored inside a manifest. Run all commands from the repository root.
-
-```json
-{"id":"news001","image":"./data/images/news001.jpg","text":"Example news text.","domain":"politics","platform":"weibo","group":"event001","split":"test","label":1}
-```
-
-| Field | Description |
-|---|---|
-| `id` | Unique, stable string; shared by tables and external scores |
-| `image` | Relative local image path, or an empty string for text-only input |
-| `text` | News text |
-| `domain` | Dataset-defined domain; consistent across partitions |
-| `platform` | Acquisition or platform identity when available |
-| `group` | Event or duplicate group used for disjointness checks |
-| `split` | `train`, `validation`, `calibration`, `profile`, or `test` |
-| `label` | Binary news-veracity label; absent from target profile rows |
-| `semantic_logit` | Optional finite score increasing toward fake news |
-
-See [configs/schema.json](configs/schema.json) for the row schema and [configs/conversion.json](configs/conversion.json) for column mappings. Adapt the example in [configs/labels.json](configs/labels.json) to your dataset's class definitions.
-
-The source training set fits the comparison heads; validation and calibration sets fit probabilities and prediction sets, respectively. The unlabeled target pool estimates the domain reference. Test labels are used for evaluation. Keep events and duplicate images disjoint across these partitions.
-
-The semantic channel scores news narratives; the physical channel measures trace consistency. Stratified evaluation records news veracity and physical manipulation separately.
-
-## Baselines
-
-The built-in benchmark includes the following runnable controls under the same supplied splits:
-
-| Identifier | Comparison role |
-|---|---|
-| `trace_logistic` | Supervised linear classifier on trace magnitudes |
-| `marginal_nb` | Independent univariate trace likelihoods |
-| `single_trace` | One trace selected using source validation |
-| `text_tfidf` | TF-IDF text classification |
-| `gaussian_novelty` | Full Gaussian novelty in trace space |
-| `semantic_external` | The frozen external semantic detector |
-| `trace_rbf` | Nonlinear RBF control on all traces |
-| `image_rbf` | Nonlinear RBF control on image traces |
-| `trace_rbf_fusion` | All-trace RBF evidence with the same semantic scores |
-| `image_rbf_fusion` | Image RBF evidence with the same semantic scores |
-
-FlawPrint variants include `copula_only`, `sign_only`, `physical_full`, and `flawprint_fusion`. The fused variant runs when complete external semantic scores are supplied. `--ablations` additionally evaluates trace families, sign priors, sign weights, and source-profile transfer. Methods with unavailable required inputs are recorded in `skipped`.
-
-Related methods are [DAPT](https://doi.org/10.1145/3746027.3755192), [DAMMFND](https://github.com/luweihai/DAMMFND), [MMDFND](https://github.com/yutchina/MMDFND), and [ADOSE](https://ojs.aaai.org/index.php/AAAI/article/view/39125). `research.py channels` compares semantic, physical, and image-forensics scores. Run `python -B research.py channels --help` for its input format.
-
-## Implementation Details
-
-| Setting | Default |
-|---|---|
-| Resized image longest side | 768 pixels |
-| Minimum image side | 32 pixels |
-| Local image grid | 4 x 4 |
-| Global trace schema | 20 image + 6 narrative traces |
-| Global / local shrinkage | 0.1 / 0.35 |
-| Reference bootstrap repetitions | 100 |
-| Minimum reference samples | 20 |
-| Minimum observed feature fraction | 0.8 |
-| Sign tolerance / weight | 0.03 / 1.0 |
-| Profile separation diagnostic `kappa` | 2.0 |
-| Optional selector fake-probability threshold | 0.05 |
-| Probability / prediction-set calibration | Separate validation / calibration partitions |
-| Benchmark bootstrap repetitions | 200 |
-| Benchmark prediction-set `alpha` | 0.1 |
-| Default random seed | 42 |
-| Full experiment seeds | 42, 52, 3047, 3407 |
-| GPU | Single RTX 4090 |
-
-Original image dimensions, EXIF, and JPEG quantization metadata are read before resizing. Missing and constant columns are handled explicitly, and the retained feature order is stored in each profile. The domain reference stores empirical marginals, a regularized copula correlation matrix, local sign weights, fitting identities, and diagnostics.
-
-Domain profiles estimate trace dependence from the reference pool. The source-trained selector filters reference samples using frozen confidence scores. `research.py filtering` measures its behavior as pool contamination changes.
-
-## Inference & Calibration
-
-Fit an independent target profile and inspect its quality:
+Repeat with `seed52.json`, `seed3047.json`, and `seed3407.json` and their matching outputs. Built-in controls include TraceLR, MarginalNB, SingleTrace, CharTFIDF, GaussianNovelty, FrozenSemantic, TraceRBF, ImageRBF, and both RBF fusion variants. Deterministic FlawPrint variants are `copula_only`, `sign_only`, `physical_full`, and `flawprint_fusion`.
 
 ```bash
 python -B main.py profile ./data/semantic_features.npz --domain politics --split profile --config ./configs/seed42.json --output ./models/politics.json
-python -B main.py predict ./data/semantic_features.npz --profile ./models/politics.json --domain politics --split test --fusion --explain --output ./outputs/predictions.jsonl
-python -B main.py evaluate ./outputs/predictions.jsonl --seed 42 --output ./outputs/evaluation.json
+python -B main.py predict ./data/semantic_features.npz --profile ./models/politics.json --domain politics --split test --fusion --explain --output ./outputs/deterministic.jsonl
+python -B main.py evaluate ./outputs/deterministic.jsonl --seed 42 --output ./outputs/evaluation.json
 ```
 
-`predict` exports raw scores; `--calibration` applies a saved calibration state. `copula_score` and `physical_evidence` increase toward the reference; `physical_risk`, `semantic_logit`, and `fusion_risk` increase toward fake news. Integration uses the larger available risk after the configured semantic threshold shift.
+`copula_score` and `physical_evidence` increase toward reference support. `physical_risk`, `semantic_logit`, and `fusion_risk` increase toward fake news. Deterministic fusion takes the larger available risk; CRA uses its trained joint head. `main.py deploy` and `main.py calibrate` provide deterministic routing and separate source calibration.
 
-For deployment routing:
+## Additional Analysis
 
-```bash
-python -B main.py deploy ./data/semantic_features.npz --profile ./models/politics.json --domain politics --split test --explain --output ./outputs/deployment/predictions.jsonl --report ./outputs/deployment/report.json
-```
-
-`deploy` selects physical, semantic, fused, or abstaining output and reports coverage over all input samples. For route-specific calibration, run `deploy` on the source validation and calibration sets with their corresponding profiles, collect the predictions into separate files, and fit:
+`research.py channels` compares frozen semantic, physical, and forensic risks. `encode.py` supplies a local CLIP negative-similarity control. Neither command trains CRA.
 
 ```bash
-python -B main.py calibrate --validation ./outputs/source_validation.jsonl --calibration ./outputs/source_calibration.jsonl --routed --output ./models/routes.json
-python -B main.py deploy ./data/semantic_features.npz --profile ./models/politics.json --domain politics --calibration ./models/routes.json --output ./outputs/calibrated/predictions.jsonl --report ./outputs/calibrated/report.json
-```
-
-## Arguments
-
-| Entry point | Main arguments |
-|---|---|
-| `main.py extract` | `--max-side`, `--tile-grid`, `--min-side`, `--workers` |
-| `main.py profile` | `--domain`, `--split`, `--config`, `--genuine-validation` |
-| `main.py profile` selection | `--selector-predictions`, `--selector-metadata`, `--selector-threshold` |
-| `main.py benchmark` | `--dataset`, `--config`, `--alpha`, `--bootstrap`, `--ablations`, `--output` |
-| `main.py predict` | `--profile`, `--domain`, `--split`, `--fusion`, `--calibration` |
-| `main.py deploy` | `--min-observed`, `--min-image-features`, `--gate-alpha`, `--calibration` |
-| `main.py evaluate` | `--score-key`, `--group-key`, `--bootstrap`, `--seed` |
-| `convert.py` | `--dataset`, `--mapping`, `--label-map`, `--split-map`, `--images` |
-| `research.py` | `compare`, `strata`, `mixture`, `mechanism`, `orientation`, `quotient`, `filtering`, `channels` |
-| `study.py` | `cold-start`, `thresholds`, `propagation`, `latency` |
-
-Each entry point and subcommand provides `--help` with the complete argument list.
-
-## Optional Models & Analysis
-
-`encode.py` loads a local CLIP directory without downloading model files during inference:
-
-```bash
-python -B encode.py ./data/split.jsonl --model ./models/clip --device cuda:0 --batch-size 64 --output ./data/clip_predictions.jsonl
-```
-
-CLIP outputs negative text-image similarity. The semantic news-veracity channel takes predictions from a frozen news detector.
-
-Additional analyses:
-
-```bash
+python -B deep.py --help
+python -B research.py channels --help
+python -B research.py filtering --help
+python -B study.py propagation --help
 python -B main.py theory --seed 42 --output ./outputs/theory.json
 python -B main.py invariance --seed 42 --output ./outputs/invariance.json
-python -B research.py compare ./outputs/seed42/predictions/semantic_external.jsonl ./outputs/seed42/predictions/flawprint_fusion.jsonl --scope real --dataset yourdataset --seed 42 --output ./outputs/comparison.json
-python -B download.py --sources ./configs/sources.json --output ./references
 ```
 
-`download.py` retrieves the reference papers listed in `configs/sources.json`.
+The regression suite covers local transformer extraction, checkpoint reload, missing inputs, reference overlap, target-label isolation, residual reconstruction, gradient flow, and all five neural modes. Synthetic fixtures and randomly initialized small local encoders verify implementation behavior; real-data benchmark results are recorded separately.

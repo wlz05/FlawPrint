@@ -60,5 +60,26 @@
     "real_recall",
     "real_f1",
     "macro_f1"
-  ]
+  ],
+  "neural_extension": {
+    "name": "FlawPrint-CRA",
+    "entry_point": "deep.py",
+    "config": "./configs/neural.json",
+    "frozen_encoders": [
+      "bert",
+      "mae",
+      "clip"
+    ],
+    "optional_encoder": "forensic",
+    "modes": [
+      "coupled",
+      "unbiased",
+      "independent",
+      "deep",
+      "concat"
+    ],
+    "source_reference": "group cross-fitting",
+    "target_reference": "independent unlabeled profile rows",
+    "target_labels_used_for_fitting": false
+  }
 }

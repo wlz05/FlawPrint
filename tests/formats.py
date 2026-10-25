@@ -366,7 +366,8 @@ class FormatTests(unittest.TestCase):
 
     def test_environment_rejects_unsupported_dependency_versions(self) -> None:
         self.assertFalse(compatible("numpy", "1.25.9"))
-        self.assertFalse(compatible("transformers", "5.0.0"))
+        self.assertFalse(compatible("transformers", "6.0.0"))
+        self.assertTrue(compatible("transformers", "5.15.0"))
         self.assertTrue(compatible("torch", "2.5.1+cpu"))
 
     def test_conversion_cli_rejects_input_overwrite(self) -> None:
