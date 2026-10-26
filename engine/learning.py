@@ -4,8 +4,11 @@
 from __future__ import annotations
 from dataclasses import asdict, replace
 import hashlib
+import os
+from pathlib import Path
 import platform
 import random
+import tempfile
 import numpy as np
 import torch
 from sklearn.model_selection import GroupKFold
@@ -129,8 +132,11 @@ def standardize(packet: dict, training: list[int], state: dict | None = None) ->
         center, scale = np.asarray(learned[name]["center"]), np.asarray(learned[name]["scale"])
         if center.shape != (values.shape[1],) or scale.shape != center.shape or not np.isfinite(center).all() or not np.isfinite(scale).all() or np.any(scale <= 0):
             raise ValueError("The source feature standardizer is invalid")
-        normalized = ((values - center) / scale).astype(np.float32)
+        normalized = (values.astype(np.float64) - center) / scale
         normalized[~packet["observed"][:, column]] = 0
+        if not np.isfinite(normalized).all() or np.any(np.abs(normalized) > np.finfo(np.float32).max):
+            raise ValueError("Standardized embeddings exceed the finite float32 range")
+        normalized = normalized.astype(np.float32)
         output["features"][name] = normalized
     return output, learned
 
@@ -153,12 +159,34 @@ def scored(rows: list[dict], indices: list[int], risks: np.ndarray) -> list[dict
 def signature(archive: dict) -> dict:
     return {name: {"sha256": value.get("sha256"), "frozen": value.get("frozen")} for name, value in archive["provenance"].get("encoders", {}).items()}
 
+def publish(destination: Path, parameters: dict, profiles: dict, metadata: dict) -> None:
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(dir=destination.parent, prefix=".flawprint-") as temporary:
+        stage = relative_path(os.path.relpath(temporary))
+        paths, hashes = {}, {}
+        for domain, profile in profiles.items():
+            filename = hashlib.sha256(domain.encode()).hexdigest() + ".json"
+            path = stage / "profiles" / filename
+            profile.save(path.as_posix())
+            paths[domain], hashes[domain] = "profiles/" + filename, digest(path)
+        weights = stage / "parameters.pt"
+        torch.save(parameters, weights)
+        metadata = dict(metadata, profiles=paths, profile_sha256=hashes, weights_sha256=digest(weights))
+        write_json(stage / "model.json", metadata)
+        if destination.exists():
+            if not destination.is_dir() or any(destination.iterdir()):
+                raise ValueError("The model output became occupied during training")
+            destination.rmdir()
+        # Publish the complete checkpoint without mixing separate runs.
+        stage.rename(destination)
+
 def fit(bundle: dict, archive: dict, output: str, config: NeuralConfig, profile_config: ProfileConfig, device: str = "cuda:0") -> dict:
     config.validate()
     profile_config.validate()
     destination = relative_path(output)
     if destination.exists() and (not destination.is_dir() or any(destination.iterdir())):
         raise ValueError("Choose a new or empty model output directory")
+    device = embeddings.runtime(device)
     random.seed(config.seed)
     np.random.seed(config.seed)
     torch.manual_seed(config.seed)
@@ -220,27 +248,18 @@ def fit(bundle: dict, archive: dict, output: str, config: NeuralConfig, profile_
     validation = scored(rows, partitions["validation"], logits(model, packet, partitions["validation"], device, config.batch_size))
     calibration = scored(rows, partitions["calibration"], logits(model, packet, partitions["calibration"], device, config.batch_size))
     state = calibrate_rows(validation, calibration)
-    destination.mkdir(parents=True, exist_ok=True)
-    profile_paths, profile_hashes = {}, {}
-    for domain, profile in profiles.items():
-        filename = hashlib.sha256(domain.encode()).hexdigest() + ".json"
-        path = destination / "profiles" / filename
-        profile.save(path.as_posix())
-        profile_paths[domain] = "profiles/" + filename
-        profile_hashes[domain] = digest(path)
-    weights = destination / "parameters.pt"
-    torch.save(best, weights)
     fit_rows = [rows[index] for role in ("train", "validation", "calibration") for index in partitions[role]]
-    metadata = {"version": "flawprint-neural-v2", "relation_operator": "content-conditioned-reference-v2", "config": asdict(config), "dimensions": dimensions, "feature_order": list(dimensions), "trace_names": bundle["names"].tolist(), "normalizers": normalizers, "profiles": profile_paths, "profile_sha256": profile_hashes, "encoder_signature": signature(archive), "calibration": state, "fit_identifiers": [row["id"] for row in fit_rows], "fit_history": collect(fit_rows), "weights_sha256": digest(weights), "source_sha256": source_digest(), "selection_metric": "source validation macro F1", "trainable_parameters": sum(value.numel() for value in model.parameters() if value.requires_grad), "history": history, "best_validation_macro_f1": best_score, "backbones": "Frozen local feature encoders; trainable projectors, attention and heads", "target_labels_used_for_fitting": False}
+    metadata = {"version": "flawprint-neural-v2", "relation_operator": "content-conditioned-reference-v2", "config": asdict(config), "dimensions": dimensions, "feature_order": list(dimensions), "trace_names": bundle["names"].tolist(), "normalizers": normalizers, "encoder_signature": signature(archive), "calibration": state, "fit_identifiers": [row["id"] for row in fit_rows], "fit_history": collect(fit_rows), "source_sha256": source_digest(), "selection_metric": "source validation macro F1", "trainable_parameters": sum(value.numel() for value in model.parameters() if value.requires_grad), "history": history, "best_validation_macro_f1": best_score, "backbones": "Frozen local feature encoders; trainable projectors, attention and heads", "target_labels_used_for_fitting": False}
     metadata["environment"] = {"python": platform.python_version(), "torch": str(torch.__version__), "numpy": np.__version__, "device": device, "cuda_runtime": torch.version.cuda, "gpu": torch.cuda.get_device_name(torch.device(device)) if torch.device(device).type == "cuda" else None}
     metadata["embedding_protocol"] = embeddings.protocol(archive)
-    write_json(destination / "model.json", metadata)
+    publish(destination, best, profiles, metadata)
     image_samples = sum(isinstance(rows[index].get("physical_manipulated"), (bool, np.bool_)) and bool(rows[index].get("image")) for index in partitions["train"]) if config.auxiliary_weight else 0
     return {"output": output, "epochs": len(history), "best_validation_macro_f1": best_score, "trainable_parameters": metadata["trainable_parameters"], "image_supervised_samples": image_samples}
 
 def predict(bundle: dict, archive: dict, directory: str, split: str = "test", device: str = "cuda:0", reference_domain: str | None = None, explain: bool = False) -> list[dict]:
     validate_bundle(bundle)
     embeddings.validate(archive)
+    device = embeddings.runtime(device)
     root = relative_path(directory)
     metadata = read_json(root / "model.json")
     if metadata.get("version") not in ("flawprint-neural-v1", "flawprint-neural-v2") or digest(root / "parameters.pt") != metadata.get("weights_sha256"):

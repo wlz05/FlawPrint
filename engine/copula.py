@@ -6,9 +6,10 @@ from dataclasses import dataclass
 import numpy as np
 from scipy.special import ndtri
 from scipy.linalg import cho_factor, cho_solve
+from engine.storage import real_array
 
 def matrix(values: np.ndarray, minimum_rows: int = 2) -> np.ndarray:
-    result = np.asarray(values, dtype=float)
+    result = real_array(values)
     if result.ndim != 2 or len(result) < minimum_rows or result.shape[1] < 1 or not np.isfinite(result).all():
         raise ValueError("Expected a finite nonempty feature matrix")
     return result
@@ -113,7 +114,7 @@ def rank_normal(values: np.ndarray) -> np.ndarray:
 
 def decompose(z: np.ndarray, reference: np.ndarray, names: list[str], top: int = 8) -> dict:
     reference = positive_matrix(reference, True)
-    z = np.asarray(z, dtype=float)
+    z = real_array(z)
     if z.shape != (len(reference),) or len(names) != len(z) or not np.isfinite(z).all() or not isinstance(top, int) or top < 1:
         raise ValueError("Explanation dimensions and limits must be valid")
     operator = np.eye(len(reference)) - cho_solve(cho_factor(reference, lower=True), np.eye(len(reference)))

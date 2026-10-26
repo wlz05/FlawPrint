@@ -8,7 +8,7 @@ import hashlib
 import json
 import os
 import numpy as np
-from engine.storage import relative_path
+from engine.storage import relative_path, resolved
 
 SPLITS = ("train", "validation", "calibration", "profile", "test")
 SPLIT_ALIASES = {"val": "validation", "valid": "validation", "dev": "validation", "training": "train", "testing": "test", "cal": "calibration"}
@@ -85,7 +85,7 @@ def normalize(rows: list[dict], image_root: str = ".", label_convention: str = "
             raise ValueError(f"Invalid split for sample {sample_id}")
         label = row.get("label")
         if not missing(label):
-            if isinstance(label, (bool, np.bool_)) or not np.isscalar(label):
+            if isinstance(label, (bool, np.bool_, complex, np.complexfloating)) or not np.isscalar(label):
                 raise ValueError("Labels must be scalar zero or one values, not Boolean metadata")
             if isinstance(label, str) and label.strip().casefold() in ("real", "true", "fake", "false"):
                 row["label"] = int(label.strip().casefold() in ("fake", "false"))
@@ -100,7 +100,7 @@ def normalize(rows: list[dict], image_root: str = ".", label_convention: str = "
         if row["split"] == "profile":
             row.pop("label", None)
         if not missing(row.get("semantic_logit")):
-            if isinstance(row["semantic_logit"], (bool, np.bool_)) or not np.isscalar(row["semantic_logit"]):
+            if isinstance(row["semantic_logit"], (bool, np.bool_, complex, np.complexfloating)) or not np.isscalar(row["semantic_logit"]):
                 raise ValueError("Semantic logits must be real scalar scores")
             row["semantic_logit"] = float(row["semantic_logit"])
             if not np.isfinite(row["semantic_logit"]):
@@ -155,12 +155,14 @@ def partition(rows: list[dict], target_domains: list[str], seed: int = 42, profi
 
 def audit_splits(rows: list[dict], check_files: bool = False) -> dict:
     groups, images, contents = defaultdict(set), defaultdict(set), defaultdict(set)
-    counts = defaultdict(int)
+    counts, paths = defaultdict(int), {}
     for row in rows:
         split = row["split"]
         groups[str(row.get("group", row["id"]))].add(split)
         if row.get("image"):
-            images[os.path.normcase(portable_image(row["image"]))].add(split)
+            canonical = os.path.normcase(str(resolved(portable_image(row["image"]))))
+            images[canonical].add(split)
+            paths.setdefault(canonical, portable_image(row["image"]))
         counts[f"{row['domain']}:{split}"] += 1
         if row.get("content_sha256"):
             contents[str(row["content_sha256"])].add(split)
@@ -169,7 +171,7 @@ def audit_splits(rows: list[dict], check_files: bool = False) -> dict:
             if not path.is_file():
                 raise FileNotFoundError(f"Missing image: {path.as_posix()}")
             contents[hashlib.sha256(path.read_bytes()).hexdigest()].add(split)
-    leaks = {"groups": [key for key, splits in groups.items() if len(splits) > 1], "paths": [key for key, splits in images.items() if len(splits) > 1], "content": [key for key, splits in contents.items() if len(splits) > 1]}
+    leaks = {"groups": [key for key, splits in groups.items() if len(splits) > 1], "paths": [paths[key] for key, splits in images.items() if len(splits) > 1], "content": [key for key, splits in contents.items() if len(splits) > 1]}
     if any(leaks.values()):
         raise ValueError(f"Cross-split leakage detected: {leaks}")
     return {"counts": dict(counts), "samples": len(rows), "leakage": leaks, "label_convention": "zero-real-one-fake"}

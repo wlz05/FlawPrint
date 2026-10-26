@@ -6,15 +6,25 @@ import hashlib
 import inspect
 import json
 from importlib.metadata import version
-import os
 from pathlib import Path
 import re
-import tempfile
+from zipfile import BadZipFile
+from zlib import error as CompressionError
 import numpy as np
 from engine.data import normalize
-from engine.storage import relative_path, digest, native
+from engine.storage import relative_path, digest, native, unique_object, invalid_constant, atomic_stream
 
 STREAMS = ("bert", "mae", "clip_text", "clip_image")
+
+def runtime(device: str) -> str:
+    import torch
+    selected = torch.device(device)
+    if selected.type == "cuda":
+        if not torch.cuda.is_available():
+            raise ValueError("CUDA is unavailable; install a CUDA-enabled PyTorch build or use --device cpu")
+        if selected.index is not None and selected.index >= torch.cuda.device_count():
+            raise ValueError("The requested CUDA device index is unavailable")
+    return str(selected)
 
 def context(requested: int, *limits: int | None) -> int:
     if isinstance(requested, bool) or not isinstance(requested, int) or requested < 2:
@@ -95,26 +105,26 @@ def save(path: str, archive: dict) -> None:
     target.parent.mkdir(parents=True, exist_ok=True)
     arrays = {"feature_" + name: values.astype(np.float32) for name, values in archive["features"].items()}
     metadata = {"version": "flawprint-embeddings-v1", "streams": list(archive["features"]), "rows": archive["rows"], "provenance": archive["provenance"]}
-    temporary = None
-    try:
-        with tempfile.NamedTemporaryFile(mode="wb", dir=target.parent, prefix=".flawprint-", suffix=".tmp", delete=False) as stream:
-            temporary = Path(stream.name)
-            np.savez_compressed(stream, **arrays, observed=archive["observed"], metadata=np.asarray(json.dumps(native(metadata), ensure_ascii=True, allow_nan=False)))
-            stream.flush()
-            os.fsync(stream.fileno())
-        # Replace the cache only after its complete contents reach disk.
-        os.replace(temporary, target)
-    finally:
-        if temporary is not None and temporary.exists():
-            temporary.unlink()
+    with atomic_stream(target, binary=True) as stream:
+        np.savez_compressed(stream, **arrays, observed=archive["observed"], metadata=np.asarray(json.dumps(native(metadata), ensure_ascii=True, allow_nan=False)))
 
 def load(path: str) -> dict:
-    with np.load(relative_path(path), allow_pickle=False) as stream:
-        metadata = json.loads(str(stream["metadata"].item()))
-        if metadata.get("version") != "flawprint-embeddings-v1":
-            raise ValueError("Unsupported embedding archive version")
-        archive = {"features": {name: stream["feature_" + name].copy() for name in metadata["streams"]}, "observed": stream["observed"].copy(), "rows": metadata["rows"], "provenance": metadata["provenance"]}
-    validate(archive)
+    try:
+        with relative_path(path).open("rb") as source, np.load(source, allow_pickle=False) as stream:
+            serialized = stream["metadata"].item()
+            if isinstance(serialized, bytes):
+                serialized = serialized.decode("utf-8")
+            if not isinstance(serialized, str):
+                raise ValueError("Embedding metadata must contain a JSON string")
+            metadata = json.loads(serialized, object_pairs_hook=unique_object, parse_constant=invalid_constant)
+            if not isinstance(metadata, dict) or metadata.get("version") != "flawprint-embeddings-v1":
+                raise ValueError("Unsupported embedding archive version")
+            if metadata.get("streams") not in (list(STREAMS), list(STREAMS) + ["forensic"]):
+                raise ValueError("Embedding metadata requires canonical stream identities")
+            archive = {"features": {name: stream["feature_" + name].copy() for name in metadata["streams"]}, "observed": stream["observed"].copy(), "rows": metadata["rows"], "provenance": metadata["provenance"]}
+        validate(archive)
+    except (BadZipFile, CompressionError, EOFError, KeyError, TypeError, ValueError) as error:
+        raise ValueError("Invalid embedding archive: " + str(error)) from error
     return archive
 
 def align(bundle: dict, archive: dict) -> tuple[dict, np.ndarray]:
@@ -134,16 +144,19 @@ def align(bundle: dict, archive: dict) -> tuple[dict, np.ndarray]:
     return {name: values[order] for name, values in archive["features"].items()}, archive["observed"][order]
 
 def extract(rows: list[dict], directories: dict, batch_size: int = 64, device: str = "cuda:0", max_length: int = 197) -> dict:
-    import torch
-    from PIL import Image
-    from transformers import AutoModel, AutoTokenizer, AutoProcessor, AutoImageProcessor, ViTMAEModel
     if isinstance(batch_size, bool) or not isinstance(batch_size, int) or batch_size < 1:
         raise ValueError("Encoder batch size and text length must be positive")
     context(max_length)
     if set(directories) not in ({"bert", "mae", "clip"}, {"bert", "mae", "clip", "forensic"}):
         raise ValueError("Supply BERT, MAE and CLIP directories with an optional forensic CLIP")
     rows = normalize(rows)
+    if not rows:
+        raise ValueError("Embedding extraction requires nonempty input")
     before = {name: checkpoint_digest(path) for name, path in directories.items()}
+    import torch
+    from PIL import Image
+    from transformers import AutoModel, AutoTokenizer, AutoProcessor, AutoImageProcessor, ViTMAEModel
+    device = runtime(device)
     tokenizer = AutoTokenizer.from_pretrained(directories["bert"], local_files_only=True)
     bert = AutoModel.from_pretrained(directories["bert"], local_files_only=True).to(device).eval()
     mae = ViTMAEModel.from_pretrained(directories["mae"], local_files_only=True).to(device).eval()
@@ -206,8 +219,6 @@ def extract(rows: list[dict], directories: dict, batch_size: int = 64, device: s
             values[~availability[:, column]] = 0
             output[name].append(values)
         masks.append(availability)
-    if not rows:
-        raise ValueError("Embedding extraction requires nonempty input")
     if any(checkpoint_digest(directories[name]) != fingerprint for name, fingerprint in before.items()) or any(digest(path) != fingerprint for path, fingerprint in image_hashes.items()):
         raise ValueError("An encoder or image changed during extraction")
     provenance = {"encoders": {name: {"directory": directory, "sha256": before[name], "frozen": True, "model_type": models[name].config.model_type} for name, directory in directories.items()}, "device": device, "max_text_length": max_length, "mae_mask_ratio": 0.0, "image_sha256": image_hashes, "transformers_version": version("transformers"), "torch_version": str(torch.__version__)}

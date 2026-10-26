@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 from dataclasses import dataclass, asdict
+from numbers import Real
 import numpy as np
 from engine.copula import Marginals, correlation, score, separation, decompose, positive_matrix, moments
 from engine.signs import bootstrap_weights, conflicts
@@ -25,7 +26,7 @@ class ProfileConfig:
 
     def validate(self) -> None:
         settings = (self.shrinkage, self.local_shrinkage, self.min_observed, self.sign_tolerance, self.sign_weight, self.kappa)
-        if not np.isfinite(settings).all() or any(isinstance(value, bool) or not isinstance(value, (int, np.integer)) for value in (self.min_samples, self.bootstrap, self.seed)) or self.seed < 0:
+        if any(isinstance(value, bool) or not isinstance(value, Real) for value in settings) or not np.isfinite(settings).all() or any(isinstance(value, bool) or not isinstance(value, (int, np.integer)) for value in (self.min_samples, self.bootstrap, self.seed)) or self.seed < 0:
             raise ValueError("Profile settings must be finite with valid integer counts")
         if not 0 < self.min_observed <= 1 or self.min_samples < 4 or self.bootstrap < 1:
             raise ValueError("Invalid profile sample settings")

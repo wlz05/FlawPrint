@@ -8,6 +8,8 @@ import hashlib
 import json
 import os
 import tempfile
+from zipfile import BadZipFile
+from zlib import error as CompressionError
 from contextlib import contextmanager
 from os.path import abspath
 from pathlib import Path, PureWindowsPath
@@ -28,12 +30,13 @@ def same_path(first: str | Path, second: str | Path) -> bool:
     return left == right or left.exists() and right.exists() and os.path.samefile(left, right)
 
 @contextmanager
-def atomic_stream(path: str | Path, encoding: str = "utf-8", newline: str = "\n"):
+def atomic_stream(path: str | Path, encoding: str = "utf-8", newline: str = "\n", binary: bool = False):
     target = relative_path(path)
     target.parent.mkdir(parents=True, exist_ok=True)
     temporary = None
     try:
-        with tempfile.NamedTemporaryFile(mode="w", encoding=encoding, newline=newline, dir=target.parent, prefix=".flawprint-", suffix=".tmp", delete=False) as stream:
+        options = {"mode": "wb"} if binary else {"mode": "w", "encoding": encoding, "newline": newline}
+        with tempfile.NamedTemporaryFile(dir=target.parent, prefix=".flawprint-", suffix=".tmp", delete=False, **options) as stream:
             temporary = Path(stream.name)
             yield stream
             stream.flush()
@@ -49,6 +52,12 @@ def digest(path: str | Path) -> str:
         for block in iter(lambda: stream.read(1048576), b""):
             checksum.update(block)
     return checksum.hexdigest()
+
+def real_array(value: Any) -> np.ndarray:
+    original = np.asarray(value)
+    if np.iscomplexobj(original) or original.dtype.kind == "O" and any(isinstance(item, (complex, np.complexfloating)) for item in original.flat):
+        raise ValueError("Numeric arrays must contain real values")
+    return np.asarray(value, dtype=float)
 
 def native(value: Any) -> Any:
     if isinstance(value, np.ndarray):
@@ -190,14 +199,22 @@ def save_bundle(path: str | Path, values: np.ndarray, observed: np.ndarray, patc
     validate_bundle({"values": values, "observed": observed, "patches": patches, "rows": rows, "names": np.asarray(names)})
     target = relative_path(path)
     target.parent.mkdir(parents=True, exist_ok=True)
-    with target.open("wb") as stream:
+    with atomic_stream(target, binary=True) as stream:
         np.savez_compressed(stream, values=values, observed=observed, patches=patches, metadata=np.asarray(json.dumps(native(rows), ensure_ascii=True)), names=np.asarray(names))
 
 def load_bundle(path: str | Path) -> dict:
-    with np.load(relative_path(path), allow_pickle=False) as archive:
-        result = {key: archive[key].copy() for key in ("values", "observed", "patches", "names")}
-        result["rows"] = json.loads(str(archive["metadata"].item()))
-    validate_bundle(result)
+    try:
+        with relative_path(path).open("rb") as source, np.load(source, allow_pickle=False) as archive:
+            result = {key: archive[key].copy() for key in ("values", "observed", "patches", "names")}
+            serialized = archive["metadata"].item()
+            if isinstance(serialized, bytes):
+                serialized = serialized.decode("utf-8")
+            if not isinstance(serialized, str):
+                raise ValueError("Physical feature metadata must contain a JSON string")
+            result["rows"] = json.loads(serialized, object_pairs_hook=unique_object, parse_constant=invalid_constant)
+        validate_bundle(result)
+    except (BadZipFile, CompressionError, EOFError, KeyError, TypeError, ValueError) as error:
+        raise ValueError("Invalid physical feature archive: " + str(error)) from error
     return result
 
 def validate_bundle(bundle: dict) -> None:

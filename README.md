@@ -88,7 +88,7 @@ python -B doctor.py --semantic --tables --output ./outputs/environment.json --fr
 python -B test.py
 ```
 
-Use the activation command for your shell. The deterministic pipeline requires only `requirements.txt`; `tables.txt` adds Excel and Parquet readers. Trace profiling runs on CPU; deep extraction and training use `cuda:0` by default.
+Use the activation command for your shell. The deterministic pipeline requires only `requirements.txt`; `tables.txt` adds Excel and Parquet readers. Trace profiling runs on CPU; deep extraction and training use `cuda:0` by default. Unavailable CUDA devices fail before training with an explicit message; use `--device cpu` for CPU execution.
 
 ## Datasets
 
@@ -146,7 +146,7 @@ Place complete Hugging Face checkpoints, tokenizer assets, and processor files i
 python -B deep.py extract ./data/manifest.jsonl --bert ./models/bert --mae ./models/mae --clip ./models/clip --batch-size 64 --max-length 197 --device cuda:0 --output ./data/deep.npz
 ```
 
-Add `--forensic ./models/forensic` for a separately trained, Hugging Face-compatible forensic CLIP image encoder. This interface reads pooled image features; raw external checkpoints require conversion to the supported model format. Every compared mode must use the same encoder set. After changing image bytes through editing, JPEG compression, or resizing, regenerate both physical and deep features.
+Add `--forensic ./models/forensic` for a separately trained, Hugging Face-compatible forensic CLIP image encoder. This interface reads pooled image features; raw external checkpoints require conversion to the supported model format. Every compared mode must use the same encoder set. After changing image bytes through editing, JPEG compression, or resizing, regenerate both physical and deep features. Preflight and both extractors reject a stale `content_sha256`. Split auditing resolves image-path aliases before comparing file identities.
 
 ## Train and Predict
 
@@ -165,7 +165,7 @@ python -B deep.py train ./data/features.npz ./data/deep.npz --dataset Weibo21 --
 python -B deep.py train ./data/features.npz ./data/deep.npz --dataset Weibo21 --seed 3407 --mode coupled --output ./models/neural3407
 ```
 
-Predict each checkpoint and report mean and sample standard deviation across the four seeds. The model directory stores `parameters.pt`, `model.json`, `profiles/`, and CLI `provenance.json`. Predictions include calibrated news output, method mode, and reference availability. Labeled predictions also produce a `.report.json` metric file. Loading checks encoder/schema/weight/reference hashes and rejects identities or known lineage used for training, validation, or calibration. New checkpoints also store the feature-extraction protocol and reject query caches with changed truncation or readout settings. `embedding_protocol_verified` reports whether the stored protocol is complete. Older checkpoints remain loadable and report this field as false when that record is absent.
+Predict each checkpoint and report mean and sample standard deviation across the four seeds. The model directory stores `parameters.pt`, `model.json`, `profiles/`, and CLI `provenance.json`. Weights, references, and model metadata are written in a sibling staging directory and published together. Interrupted writes remove that staging directory. Publication rejects a destination occupied by another run; an existing empty directory is supported. Predictions include calibrated news output, method mode, and reference availability. Labeled predictions also produce a `.report.json` metric file. Loading checks encoder/schema/weight/reference hashes and rejects identities or known lineage used for training, validation, or calibration. New checkpoints also store the feature-extraction protocol and reject query caches with changed truncation or readout settings. `embedding_protocol_verified` reports whether the stored protocol is complete. Older checkpoints remain loadable and report this field as false when that record is absent.
 
 ## Baselines and Ablations
 
@@ -248,6 +248,12 @@ python -B main.py evaluate ./outputs/deterministic.jsonl --seed 42 --output ./ou
 ```
 
 `copula_score` and `physical_evidence` increase toward reference support. `physical_risk`, `semantic_logit`, and `fusion_risk` increase toward fake news. Deterministic fusion takes the larger available risk; CRA uses its trained joint head. `main.py deploy` and `main.py calibrate` provide deterministic routing and separate source calibration.
+
+## Input and Artifact Checks
+
+Physical and deep NPZ caches use atomic replacement. Their loaders reject malformed archives and duplicate JSON metadata keys, accept UTF-8 metadata strings or bytes, and close input files on failure. Diagnostic scores and Boolean fields retain their types through CSV, TSV, and JSONL conversion.
+
+News labels require explicit numeric classes. Boolean labels and complex-valued numeric inputs are rejected. Source standardization checks float32 representability before inference, with missing streams kept at zero. Profile and calibration settings distinguish numeric parameters from Boolean metadata.
 
 ## Additional Analysis
 

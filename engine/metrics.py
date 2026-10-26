@@ -7,9 +7,10 @@ import numpy as np
 from sklearn.metrics import roc_auc_score, average_precision_score, f1_score, precision_score, recall_score, balanced_accuracy_score
 from engine.conformal import validate_labels
 from engine.results import prediction_rows, score_rows
+from engine.storage import real_array
 
 def valid_probabilities(values: np.ndarray, labels: np.ndarray) -> np.ndarray:
-    result = np.asarray(values, dtype=float)
+    result = real_array(values)
     if result.shape != labels.shape or not np.isfinite(result).all() or np.any((result < 0) | (result > 1)):
         raise ValueError("Invalid evaluation probabilities")
     return result
@@ -28,7 +29,7 @@ def calibration_error(labels: np.ndarray, probabilities: np.ndarray, bins: int =
     return float(result)
 
 def binary(labels: np.ndarray, scores: np.ndarray, probabilities: np.ndarray | None = None, predictions: np.ndarray | None = None) -> dict:
-    labels, scores = validate_labels(labels), np.asarray(scores, dtype=float)
+    labels, scores = validate_labels(labels), real_array(scores)
     if scores.shape != labels.shape or not np.isfinite(scores).all():
         raise ValueError("Invalid evaluation labels or scores")
     predictions = (scores >= 0).astype(int) if predictions is None else validate_labels(predictions)

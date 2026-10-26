@@ -4,28 +4,30 @@
 from __future__ import annotations
 from dataclasses import dataclass
 import math
+from numbers import Real
 import numpy as np
 from scipy.special import expit
 from scipy.optimize import minimize
 from engine.results import prediction_rows, score_rows
 from engine.lineage import collect, disjoint, ensure_disjoint, scope
+from engine.storage import real_array
 
 def validate_labels(labels: np.ndarray) -> np.ndarray:
-    original = np.asarray(labels)
-    if original.dtype.kind == "b" or original.dtype.kind == "O" and any(isinstance(value, (bool, np.bool_)) for value in original.flat):
+    original = np.asarray(labels, dtype=object)
+    if any(isinstance(value, (bool, np.bool_)) for value in original.flat):
         raise ValueError("Binary numeric labels cannot be Boolean metadata")
-    labels = np.asarray(labels, dtype=float)
+    labels = real_array(original)
     if labels.ndim != 1 or not len(labels) or not np.isfinite(labels).all() or np.any((labels != 0) & (labels != 1)):
         raise ValueError("Expected binary labels")
     return labels.astype(int)
 
 def fuse(physical_risk: np.ndarray, semantic_logits: np.ndarray | None = None, semantic_threshold: float = 0.0) -> np.ndarray:
-    physical = np.asarray(physical_risk, dtype=float)
-    if physical.ndim != 1 or not np.isfinite(physical).all() or not np.isfinite(semantic_threshold):
+    physical = real_array(physical_risk)
+    if physical.ndim != 1 or not np.isfinite(physical).all() or isinstance(semantic_threshold, bool) or not isinstance(semantic_threshold, Real) or not math.isfinite(semantic_threshold):
         raise ValueError("Fusion requires finite one-dimensional scores and a finite threshold")
     if semantic_logits is None:
         return physical
-    semantic = np.asarray(semantic_logits, dtype=float)
+    semantic = real_array(semantic_logits)
     if semantic.shape != physical.shape or not np.isfinite(semantic).all():
         raise ValueError("Fusion score shapes must match")
     return np.maximum(physical, semantic - semantic_threshold)
@@ -37,13 +39,13 @@ class Platt:
     calibrated: bool = False
 
     def __post_init__(self) -> None:
-        if not np.isfinite((self.slope, self.intercept)).all() or self.slope < 0 or not isinstance(self.calibrated, bool):
+        if any(isinstance(value, bool) or not isinstance(value, Real) or not math.isfinite(value) for value in (self.slope, self.intercept)) or self.slope < 0 or not isinstance(self.calibrated, bool):
             raise ValueError("Probability calibration parameters must be finite and orientation preserving")
 
     @classmethod
     def fit(cls, scores: np.ndarray, labels: np.ndarray) -> Platt:
         labels = validate_labels(labels)
-        scores = np.asarray(scores, dtype=float)
+        scores = real_array(scores)
         if scores.shape != labels.shape or not np.isfinite(scores).all() or len(np.unique(labels)) < 2:
             raise ValueError("Calibration requires finite scores and both classes")
         def objective(parameters: np.ndarray) -> tuple[float, np.ndarray]:
@@ -58,7 +60,7 @@ class Platt:
         return cls(float(fitted.x[0]), float(fitted.x[1]), True)
 
     def probability(self, scores: np.ndarray) -> np.ndarray:
-        scores = np.asarray(scores, dtype=float)
+        scores = real_array(scores)
         if scores.ndim != 1 or not np.isfinite(scores).all():
             raise ValueError("Probability prediction requires finite one-dimensional scores")
         return expit(self.slope * scores + self.intercept)
@@ -72,17 +74,17 @@ class SplitConformal:
     exchangeability_scope: str = "Coverage requires exchangeable labeled calibration and test examples"
 
     def __post_init__(self) -> None:
-        if not 0 < self.alpha < 1 or not 0 <= self.quantile <= 1 or isinstance(self.sample_count, bool) or not isinstance(self.sample_count, (int, np.integer)) or self.sample_count < 1:
+        if any(isinstance(value, bool) or not isinstance(value, Real) or not math.isfinite(value) for value in (self.alpha, self.quantile)) or not 0 < self.alpha < 1 or not 0 <= self.quantile <= 1 or isinstance(self.sample_count, bool) or not isinstance(self.sample_count, (int, np.integer)) or self.sample_count < 1:
             raise ValueError("Invalid split conformal state")
         if not isinstance(self.identifiers, list) or len(self.identifiers) not in (0, self.sample_count) or any(not isinstance(identifier, str) or not identifier.strip() for identifier in self.identifiers) or len(set(self.identifiers)) != len(self.identifiers):
             raise ValueError("Conformal identifiers must be unique and match the sample count")
 
     @classmethod
     def fit(cls, probabilities: np.ndarray, labels: np.ndarray, alpha: float = 0.1, identifiers: list[str] | None = None) -> SplitConformal:
-        if not 0 < alpha < 1:
+        if isinstance(alpha, bool) or not isinstance(alpha, Real) or not math.isfinite(alpha) or not 0 < alpha < 1:
             raise ValueError("Alpha must be between zero and one")
         labels = validate_labels(labels)
-        probabilities = np.asarray(probabilities, dtype=float)
+        probabilities = real_array(probabilities)
         if probabilities.shape != labels.shape or not np.isfinite(probabilities).all() or np.any((probabilities < 0) | (probabilities > 1)):
             raise ValueError("Invalid calibrated probabilities")
         scores = np.where(labels == 1, 1 - probabilities, probabilities)
@@ -92,7 +94,7 @@ class SplitConformal:
         return cls(alpha, quantile, len(scores), list(identifiers or []))
 
     def prediction_sets(self, probabilities: np.ndarray) -> list[list[int]]:
-        probabilities = np.asarray(probabilities, dtype=float)
+        probabilities = real_array(probabilities)
         if probabilities.ndim != 1 or not np.isfinite(probabilities).all() or np.any((probabilities < 0) | (probabilities > 1)):
             raise ValueError("Prediction sets require finite probabilities in the unit interval")
         return [[label for label, nonconformity in ((0, probability), (1, 1 - probability)) if nonconformity <= self.quantile] for probability in probabilities]

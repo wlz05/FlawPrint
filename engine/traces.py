@@ -108,6 +108,8 @@ def extract_one(row: dict, config: TraceConfig) -> tuple[np.ndarray, np.ndarray,
         return values, observed, patches, dict(row, has_image=False, physical_input_status="missing_image", trace_version="flawprint-traces-v1")
     path = relative_path(row["image"])
     content_hash = digest(path)
+    if row.get("content_sha256") and row["content_sha256"] != content_hash:
+        raise ValueError("The manifest image checksum is stale")
     with Image.open(path) as image:
         if getattr(image, "n_frames", 1) > 1:
             raise ValueError("Animated or multipage inputs require an explicit still-image conversion")

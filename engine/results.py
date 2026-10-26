@@ -7,12 +7,12 @@ import math
 import numpy as np
 from engine.data import boolean, identifier, missing, portable_image, SPLITS, SPLIT_ALIASES
 
-NUMBERS = ("label", "prediction", "probability", "fusion_risk", "physical_risk", "physical_evidence", "copula_risk", "copula_score", "semantic_logit", "sign_score", "sign_conflict_ratio", "observed_fraction")
-BOOLEANS = ("abstain", "probability_calibrated", "profile_overlap", "physical_available", "has_image", "patch_signs_valid_after_attack", "physical_manipulated", "narrative_false")
+NUMBERS = ("label", "prediction", "probability", "fusion_risk", "physical_risk", "physical_evidence", "copula_risk", "copula_score", "semantic_logit", "sign_score", "sign_conflict_ratio", "observed_fraction", "potential_disabled_risk", "potential_risk_delta")
+BOOLEANS = ("abstain", "probability_calibrated", "profile_overlap", "physical_available", "has_image", "patch_signs_valid_after_attack", "physical_manipulated", "narrative_false", "physical_reference_available", "embedding_protocol_verified")
 STRUCTURES = {"prediction_set": list, "physical_gate_reasons": list, "physical_power_screen": dict, "routing_policy": dict, "copula_explanation": dict, "sign_explanation": list}
 
 def numeric(value: object, key: str) -> float:
-    if isinstance(value, (bool, np.bool_)) or not np.isscalar(value):
+    if isinstance(value, (bool, np.bool_, complex, np.complexfloating)) or not np.isscalar(value):
         raise ValueError("Numeric prediction fields require real scalar values: " + key)
     try:
         result = float(value)

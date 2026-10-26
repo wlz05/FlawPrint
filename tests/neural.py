@@ -5,6 +5,7 @@ from __future__ import annotations
 import copy
 from dataclasses import asdict, replace
 import os
+import json
 from pathlib import Path
 import subprocess
 import sys
@@ -21,7 +22,7 @@ from engine.synthetic import fixture
 try:
     import torch
     from engine.neural import NeuralConfig, ResidualAttention, potential, scramble
-    from engine.learning import prepare, relation, fit, predict
+    from engine.learning import prepare, relation, fit, predict, standardize
 except ImportError:
     torch = None
 
@@ -87,6 +88,54 @@ class NeuralTests(unittest.TestCase):
         self.assertFalse(list(self.root.glob(".flawprint-*.tmp")))
         embeddings.validate(embeddings.load(path.as_posix()))
 
+    def test_invalid_npz_archives_fail_with_an_explicit_format_error(self) -> None:
+        valid = self.root / "valid.npz"
+        embeddings.save(valid.as_posix(), self.archive)
+        for damage in ("truncated", "array", "duplicate", "metadata", "missing"):
+            with self.subTest(damage=damage):
+                path = self.root / (damage + ".npz")
+                if damage == "truncated":
+                    path.write_bytes(valid.read_bytes()[:40])
+                elif damage == "array":
+                    with path.open("wb") as stream:
+                        np.save(stream, np.zeros((2, 2)))
+                else:
+                    metadata = '{"version":"bad","version":"flawprint-embeddings-v1"}' if damage == "duplicate" else "[]"
+                    if damage == "missing":
+                        metadata = json.dumps({"version": "flawprint-embeddings-v1", "streams": list(embeddings.STREAMS)})
+                    np.savez_compressed(path, metadata=np.asarray(metadata))
+                original = path.read_bytes()
+                with self.assertRaisesRegex(ValueError, "Invalid embedding archive"):
+                    embeddings.load(path.as_posix())
+                self.assertEqual(path.read_bytes(), original)
+
+    def test_utf8_byte_metadata_loads_with_the_recorded_stream_order(self) -> None:
+        path = self.root / "encoded.npz"
+        embeddings.save(path.as_posix(), self.archive)
+        with np.load(path, allow_pickle=False) as archive:
+            arrays = {name: archive[name].copy() for name in archive.files}
+        arrays["metadata"] = np.asarray(arrays["metadata"].item().encode("utf-8"))
+        np.savez_compressed(path, **arrays)
+        restored = embeddings.load(path.as_posix())
+        self.assertEqual(list(restored["features"]), list(embeddings.STREAMS))
+        np.testing.assert_array_equal(restored["features"]["bert"], self.archive["features"]["bert"])
+
+    def test_empty_extraction_fails_before_optional_encoder_imports(self) -> None:
+        with patch.dict(sys.modules, {"transformers": None}):
+            with self.assertRaisesRegex(ValueError, "nonempty"):
+                embeddings.extract([], {name: "./missing" for name in ("bert", "mae", "clip")}, device="cpu")
+
+    def test_cuda_errors_precede_training_and_explain_the_device_choice(self) -> None:
+        output = self.root / "cuda"
+        with patch("torch.cuda.is_available", return_value=False), patch("engine.learning.prepare", side_effect=AssertionError("Reference fitting must not start")):
+            with self.assertRaisesRegex(ValueError, "CUDA is unavailable"):
+                fit(self.bundle, self.archive, output.as_posix(), self.config, self.profile, "cuda:0")
+        self.assertFalse(output.exists())
+        with patch("torch.cuda.is_available", return_value=True), patch("torch.cuda.device_count", return_value=1):
+            with self.assertRaisesRegex(ValueError, "device index"):
+                embeddings.runtime("cuda:1")
+        self.assertEqual(embeddings.runtime("cpu"), "cpu")
+
     def test_malformed_cache_metadata_and_float_overflow_are_rejected(self) -> None:
         for damage in ("identifier", "context", "ratio", "readout", "overflow", "container"):
             with self.subTest(damage=damage):
@@ -115,6 +164,17 @@ class NeuralTests(unittest.TestCase):
                         replace(self.config, **{name: value}).validate()
         with self.assertRaises(ValueError):
             replace(self.config, seed=2 ** 32).validate()
+
+    def test_standardization_rejects_observed_overflow_and_ignores_missing_streams(self) -> None:
+        values = np.array([[0.], [0.], [3e38]], dtype=np.float32)
+        packet = {"features": {"bert": values}, "observed": np.ones((3, 1), dtype=bool)}
+        with self.assertRaisesRegex(ValueError, "float32 range"):
+            standardize(packet, [0, 1])
+        packet["features"]["bert"] = np.array([[3e38], [3e38], [0.]], dtype=np.float32)
+        packet["observed"][2, 0] = False
+        result, state = standardize(packet, [0, 1])
+        self.assertTrue(np.isfinite(result["features"]["bert"]).all())
+        self.assertEqual(result["features"]["bert"][2, 0], 0)
 
     def test_checkpoint_rejects_changed_feature_protocol_and_loads_legacy_metadata(self) -> None:
         archive = copy.deepcopy(self.archive)
@@ -286,6 +346,48 @@ class NeuralTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "hash"):
             predict(self.bundle, self.archive, directory, device="cpu")
 
+    def test_interrupted_checkpoint_write_preserves_the_destination(self) -> None:
+        def interrupted(parameters, path):
+            Path(path).write_bytes(b"partial checkpoint")
+            raise OSError("Interrupted checkpoint write")
+
+        for preexisting in (False, True):
+            with self.subTest(preexisting=preexisting):
+                output = self.root / ("empty" if preexisting else "new")
+                if preexisting:
+                    output.mkdir()
+                with patch("engine.learning.torch.save", side_effect=interrupted):
+                    with self.assertRaisesRegex(OSError, "Interrupted checkpoint"):
+                        fit(self.bundle, self.archive, output.as_posix(), replace(self.config, epochs=1), self.profile, "cpu")
+                self.assertEqual(output.exists(), preexisting)
+                self.assertFalse(output.exists() and list(output.iterdir()))
+                self.assertFalse(list(self.root.glob(".flawprint-*")))
+
+    def test_checkpoint_publication_rejects_a_competing_output_owner(self) -> None:
+        output = self.root / "contended"
+        save = torch.save
+
+        def competing(parameters, path):
+            save(parameters, path)
+            output.mkdir(exist_ok=True)
+            (output / "owner.txt").write_text("Another run", encoding="utf-8")
+
+        with patch("engine.learning.torch.save", side_effect=competing):
+            with self.assertRaisesRegex(ValueError, "became occupied"):
+                fit(self.bundle, self.archive, output.as_posix(), replace(self.config, epochs=1), self.profile, "cpu")
+        self.assertEqual([path.name for path in output.iterdir()], ["owner.txt"])
+        self.assertEqual((output / "owner.txt").read_text(encoding="utf-8"), "Another run")
+        self.assertFalse(list(self.root.glob(".flawprint-*")))
+
+    def test_complete_checkpoint_can_replace_an_empty_output_directory(self) -> None:
+        output = self.root / "prepared"
+        output.mkdir()
+        fit(self.bundle, self.archive, output.as_posix(), replace(self.config, epochs=1), self.profile, "cpu")
+        metadata = read_json(output / "model.json")
+        self.assertTrue(metadata["weights_sha256"] and metadata["profiles"])
+        self.assertTrue(predict(self.bundle, self.archive, output.as_posix(), device="cpu"))
+        self.assertFalse(list(self.root.glob(".flawprint-*")))
+
     def test_unavailable_physical_references_preserve_deep_predictions(self) -> None:
         directory = (self.root / "deepfallback").as_posix()
         fit(self.bundle, self.archive, directory, replace(self.config, epochs=1), replace(self.profile, min_samples=1000), "cpu")
@@ -360,7 +462,6 @@ class NeuralTests(unittest.TestCase):
             from transformers import BertConfig, BertModel, BertTokenizer, ViTMAEConfig, ViTMAEModel, ViTImageProcessor, CLIPConfig, CLIPModel, CLIPTokenizer, CLIPProcessor, CLIPImageProcessor
         except ImportError:
             self.skipTest("Optional Transformers image encoders are unavailable")
-        import json
         import inspect
         directories = {name: self.root / name for name in ("bert", "mae", "clip")}
         for path in directories.values():

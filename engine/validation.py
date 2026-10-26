@@ -92,6 +92,8 @@ def preflight(records: list[dict], check_images: bool = False, benchmark: bool =
                         raise ValueError("Resized image cannot support the tile grid")
                     cache[path.as_posix()] = {"path": path.as_posix(), "width": width, "height": height, "format": image_format, "sha256": digest(path)}
                 information = cache[path.as_posix()]
+                if row.get("content_sha256") and row["content_sha256"] != information["sha256"]:
+                    raise ValueError("The manifest image checksum is stale")
                 hashes[information["sha256"]].add(row["split"])
                 image_report.append(dict(information, id=row["id"]))
             except (OSError, ValueError, Image.DecompressionBombError) as error:
