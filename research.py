@@ -14,6 +14,7 @@ from engine.provenance import source_digest
 from engine.results import prediction_rows
 from engine.storage import digest, load_bundle, read_json, read_rows, relative_path, same_path, subset, write_json
 from doctor import environment
+from engine.package import configuration, is_builtin
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Evaluate paired increments, evidence roles, profile sensitivity, and copula mechanisms.")
@@ -37,7 +38,7 @@ def main() -> None:
     sensitivity.add_argument("pool")
     sensitivity.add_argument("features")
     sensitivity.add_argument("--domain", required=True)
-    sensitivity.add_argument("--config", default="./configs/default.json")
+    sensitivity.add_argument("--config", default="builtin:default")
     sensitivity.add_argument("--fractions", type=float, nargs="+", default=[0, 0.1, 0.25, 0.5, 0.75, 1])
     sensitivity.add_argument("--size", type=int, default=40)
     sensitivity.add_argument("--repeats", type=int, default=5)
@@ -65,7 +66,7 @@ def main() -> None:
     selection.add_argument("--selector-metadata", required=True)
     selection.add_argument("--selector-threshold", type=float, default=0.05)
     selection.add_argument("--domain", required=True)
-    selection.add_argument("--config", default="./configs/default.json")
+    selection.add_argument("--config", default="builtin:default")
     selection.add_argument("--fractions", type=float, nargs="+", default=[0, 0.25, 0.5, 0.75, 0.9, 1])
     selection.add_argument("--size", type=int, default=40)
     selection.add_argument("--repeats", type=int, default=5)
@@ -86,7 +87,7 @@ def main() -> None:
         command.add_argument("--seed", type=int, default=42)
     args = parser.parse_args()
     try:
-        inputs = [getattr(args, field) for field in ("reference", "candidate", "annotations", "pool", "features", "config", "matrices", "selector_predictions", "selector_metadata", "semantic", "physical", "deep", "provenance") if hasattr(args, field)]
+        inputs = [getattr(args, field) for field in ("reference", "candidate", "annotations", "pool", "features", "config", "matrices", "selector_predictions", "selector_metadata", "semantic", "physical", "deep", "provenance") if hasattr(args, field) and not (field == "config" and is_builtin(getattr(args, field)))]
         if any(same_path(path, args.output) for path in inputs):
             raise ValueError("Research output cannot overwrite an input")
         fingerprints = [{"path": path, "sha256": digest(path)} for path in inputs]
@@ -97,7 +98,7 @@ def main() -> None:
         elif args.command == "mixture":
             bundle, pool = load_bundle(args.features), load_bundle(args.pool)
             test = subset(bundle, indices(bundle, "test", args.domain))
-            config = ProfileConfig(**read_json(args.config))
+            config = ProfileConfig(**configuration(args.config))
             result = mixture(pool, test, args.domain, config, args.fractions, args.size, args.repeats, args.seed, args.image_only)
             result["configuration"] = asdict(config)
         elif args.command == "orientation":
@@ -108,7 +109,7 @@ def main() -> None:
         elif args.command == "filtering":
             pool, bundle = load_bundle(args.pool), load_bundle(args.features)
             test = subset(bundle, indices(bundle, "test", args.domain))
-            config = ProfileConfig(**read_json(args.config))
+            config = ProfileConfig(**configuration(args.config))
             result = filtering(pool, test, read_rows(args.selector_predictions), read_json(args.selector_metadata), args.domain, config, args.fractions, args.size, args.repeats, args.seed, args.selector_threshold)
             result["configuration"] = asdict(config)
         elif args.command == "channels":

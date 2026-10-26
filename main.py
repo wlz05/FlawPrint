@@ -27,10 +27,10 @@ from engine.synthetic import write_fixture, image_demo
 from engine.theory import verify
 from engine.invariance import verify as verify_invariance
 from engine.decision import GatePolicy, deploy, calibrate_routes, deployment_report
-from engine.package import VERSION
+from engine.package import VERSION, configuration, configuration_record, is_builtin
 
 def profile_config(path: str | None) -> ProfileConfig:
-    config = ProfileConfig(**read_json(path)) if path else ProfileConfig()
+    config = ProfileConfig(**configuration(path)) if path else ProfileConfig()
     config.validate()
     return config
 
@@ -85,7 +85,7 @@ def command_profile(args: argparse.Namespace) -> dict:
     predictions, metadata = getattr(args, "selector_predictions", None), getattr(args, "selector_metadata", None)
     if bool(predictions) != bool(metadata):
         raise ValueError("Reference selection requires both external predictions and selector metadata")
-    inputs = [args.features] + [value for value in (args.config, predictions, metadata, args.genuine_validation) if value]
+    inputs = [args.features] + [value for value in (args.config, predictions, metadata, args.genuine_validation) if value and not is_builtin(value)]
     fingerprints = [{"path": path, "sha256": digest(path)} for path in inputs]
     bundle = choose(load_bundle(args.features), args.split, args.domain)
     if predictions:
@@ -157,7 +157,7 @@ def command_benchmark(args: argparse.Namespace) -> dict:
     if getattr(args, "dataset", None):
         provenance["dataset"] = args.dataset
     if args.config:
-        provenance["configuration_file"] = {"path": args.config, "sha256": digest(args.config)}
+        provenance["configuration_file"] = configuration_record(args.config)
     write_json(provenance_path, provenance)
     return {"methods": list(result["methods"]), "skipped": result["skipped"], "output": args.output}
 
@@ -291,7 +291,7 @@ def arguments() -> argparse.Namespace:
     profile.add_argument("features")
     profile.add_argument("--domain", required=True)
     profile.add_argument("--split", choices=("train", "profile"), default="profile")
-    profile.add_argument("--config", default="./configs/default.json")
+    profile.add_argument("--config", default="builtin:default")
     profile.add_argument("--genuine-validation")
     profile.add_argument("--selector-predictions")
     profile.add_argument("--selector-metadata")
@@ -345,7 +345,7 @@ def arguments() -> argparse.Namespace:
     comparison = commands.add_parser("benchmark", help="Run controls, FlawPrint, and optional ablations")
     comparison.add_argument("features")
     comparison.add_argument("--dataset", type=str.lower, choices=("weibo", "weibo21", "finefake"))
-    comparison.add_argument("--config", default="./configs/default.json")
+    comparison.add_argument("--config", default="builtin:default")
     comparison.add_argument("--output", default="./outputs/benchmark")
     comparison.add_argument("--bootstrap", type=int, default=200)
     comparison.add_argument("--alpha", type=float, default=0.1)
@@ -447,7 +447,7 @@ def main() -> None:
                 raise ValueError("Output and report files must be distinct")
             for name in ("input", "predictions", "manifest", "features", "profile", "calibration", "validation", "genuine_validation", "selector_predictions", "selector_metadata", "config", "manuscript", "snapshot"):
                 value = getattr(args, name, None)
-                if isinstance(value, str) and any(same_path(value, target) for target in targets):
+                if isinstance(value, str) and not (name == "config" and is_builtin(value)) and any(same_path(value, target) for target in targets):
                     raise ValueError("The output path cannot overwrite an input file")
         result = args.handler(args)
     except (ValueError, OSError, KeyError, TypeError) as error:

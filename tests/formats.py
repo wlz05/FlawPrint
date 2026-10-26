@@ -145,7 +145,7 @@ class FormatTests(unittest.TestCase):
 
     def test_optional_table_dependency_failure_is_actionable(self) -> None:
         with patch.dict(sys.modules, {"pandas": None}):
-            with self.assertRaisesRegex(ValueError, "tables.txt"):
+            with self.assertRaisesRegex(ValueError, "pip install.*pandas"):
                 read_rows(self.root / "data.xlsx")
 
     def test_finefake_aliases_and_binary_labels_are_converted(self) -> None:
@@ -430,6 +430,63 @@ class FormatTests(unittest.TestCase):
         result = subprocess.run([sys.executable, "-B", "convert.py", source.as_posix(), "--mapping", mapping.as_posix(), "--output", output.as_posix()], capture_output=True, text=True)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(read_rows(output)[0]["label"], 0)
+
+    def test_builtin_presets_are_independent_of_configuration_files(self) -> None:
+        from engine.package import configuration, PRESETS
+        from main import profile_config
+        from study import load_configuration
+        with patch("engine.storage.read_json", side_effect=AssertionError("Unexpected configuration file access")):
+            for name in PRESETS:
+                self.assertIsInstance(configuration("builtin:" + name), dict)
+            self.assertEqual(profile_config("builtin:seed52").seed, 52)
+            self.assertEqual(load_configuration("builtin:default")["seed"], 42)
+            first = configuration("builtin:conversion")
+            first["columns"]["id"] = "changed"
+            self.assertEqual(configuration("builtin:conversion")["columns"]["id"], "news_id")
+
+    def test_unknown_and_external_configurations_keep_strict_errors(self) -> None:
+        from engine.package import configuration, configuration_record
+        with self.assertRaisesRegex(ValueError, "Unknown built-in"):
+            configuration("builtin:missing")
+        with self.assertRaises(FileNotFoundError):
+            configuration((self.root / "missing.json").as_posix())
+        path = self.write("config.json", '{"seed": 52}')
+        self.assertEqual(configuration(path.as_posix()), {"seed": 52})
+        self.assertEqual(configuration_record(path.as_posix())["path"], path.as_posix())
+        path.write_text('{"seed": 42, "seed": 52}', encoding="utf-8")
+        with self.assertRaisesRegex(ValueError, "unique"):
+            configuration(path.as_posix())
+        path.write_text("[]", encoding="utf-8")
+        with self.assertRaisesRegex(ValueError, "JSON object"):
+            configuration(path.as_posix())
+
+    def test_builtin_configuration_fingerprints_bind_values(self) -> None:
+        import hashlib
+        from engine.package import configuration, configuration_record
+        value = configuration("builtin:seed42")
+        expected = hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":"), allow_nan=False).encode("utf-8")).hexdigest()
+        record = configuration_record("builtin:seed42")
+        self.assertEqual(record, {"preset": "builtin:seed42", "sha256": expected})
+        self.assertNotEqual(record["sha256"], configuration_record("builtin:seed52")["sha256"])
+
+    def test_builtin_conversion_matches_the_dataset_label_direction(self) -> None:
+        from engine.package import configuration
+        record = {"id": "news", "text": "report", "domain": "science", "label": 1}
+        for name, expected in (("weibo", 1), ("weibo21", 1), ("finefake", 0)):
+            with self.subTest(dataset=name):
+                rows, _ = convert_records([record], Conversion(**configuration("builtin:" + name)))
+                self.assertEqual(rows[0]["label"], expected)
+
+    def test_public_cli_defaults_select_builtin_configurations(self) -> None:
+        from main import arguments as main_arguments
+        from deep import arguments as deep_arguments
+        with patch.object(sys, "argv", ["main.py", "benchmark", "./features.npz"]):
+            self.assertEqual(main_arguments().config, "builtin:default")
+        with patch.object(sys, "argv", ["main.py", "profile", "./features.npz", "--domain", "science"]):
+            self.assertEqual(main_arguments().config, "builtin:default")
+        with patch.object(sys, "argv", ["deep.py", "train", "./features.npz", "./deep.npz"]):
+            args = deep_arguments()
+            self.assertEqual((args.config, args.profile_config), ("builtin:neural", "builtin:default"))
 
 # Author: Weiliang Zhu
 # Email: wlzchina05@gmail.com

@@ -50,11 +50,8 @@ FlawPrint/
 |-- engine/embeddings.py     # Frozen local encoder features and cache alignment.
 |-- engine/neural.py         # Residual attention and comparison modes.
 |-- engine/learning.py       # Group cross-fitting, training, and checkpoint loading.
-|-- configs/                 # Training, profiling, conversion, and dataset settings.
+|-- engine/package.py        # Built-in experiment and dataset settings.
 |-- tests/                   # Data, mathematics, leakage, and workflow checks.
-|-- requirements.txt
-|-- requirements-optional.txt
-|-- tables.txt
 |-- README.md
 ```
 
@@ -83,12 +80,14 @@ python -m venv .venv
 
 ```bash
 source .venv/bin/activate
-python -m pip install -r ./requirements-optional.txt
+python -m pip install "numpy>=1.26,<3" "scipy>=1.11,<2" "Pillow>=10,<13" "scikit-learn>=1.4,<2" "requests>=2.31,<3" "pypdf>=4,<7"
+python -m pip install "torch>=2.2" "transformers>=4.40,<6"
+python -m pip install "pandas>=2.2,<4" "openpyxl>=3.1,<4" "pyarrow>=15,<30" "xlrd>=2,<3"
 python -B doctor.py --semantic --tables --output ./outputs/environment.json --freeze ./outputs/versions.txt
 python -B test.py
 ```
 
-Use the activation command for your shell. The deterministic pipeline requires only `requirements.txt`; `tables.txt` adds Excel and Parquet readers. Trace profiling runs on CPU; deep extraction and training use `cuda:0` by default. Unavailable CUDA devices fail before training with an explicit message; use `--device cpu` for CPU execution.
+Use the activation command for your shell. The first installation command supplies the deterministic pipeline, the second adds deep learning, and the third adds Excel and Parquet readers. Trace profiling runs on CPU; deep extraction and training use `cuda:0` by default. Unavailable CUDA devices fail before training with an explicit message; use `--device cpu` for CPU execution.
 
 ## Datasets
 
@@ -98,7 +97,7 @@ Use the activation command for your shell. The deterministic pipeline requires o
 | [Weibo21](https://github.com/kennqiang/MDFEND-Weibo21) | 9 | Released train, validation, and test identities |
 | [FineFake](https://github.com/Accuser907/FineFake) | 7 | Fixed 60% / 20% / 20%, split seed 3407 |
 
-Dataset partitions remain fixed across experiment seeds. Source validation and calibration identities are separate. Domain-reference pools are independent of evaluation samples. Keep events, original images, and duplicate content disjoint; validate the actual release before running. Settings and paths are recorded in [configs/experiment.json](configs/experiment.json).
+Dataset partitions remain fixed across experiment seeds. Source validation and calibration identities are separate. Domain-reference pools are independent of evaluation samples. Keep events, original images, and duplicate content disjoint; validate the actual release before running. The `experiment` preset in [engine/package.py](engine/package.py) records dataset paths and experiment settings.
 
 ## Prepare Data
 
@@ -118,12 +117,12 @@ Run commands from the repository root. All image, model, and output paths are re
 | `physical_manipulated` | Optional independently observed Boolean image attribute |
 | `content_sha256` | Image-byte fingerprint populated by extraction |
 
-Do not infer `physical_manipulated` from news labels. Missing attributes remain unknown. See [configs/schema.json](configs/schema.json), [configs/conversion.json](configs/conversion.json), and [configs/labels.json](configs/labels.json).
+Do not infer `physical_manipulated` from news labels. Missing attributes remain unknown. The `schema`, `conversion`, and `labels` presets in [engine/package.py](engine/package.py) define the row contract and conversion rules.
 
 ```bash
-python -B convert.py ./data/train_origin.csv --dataset WEIBO --mapping ./configs/weibo.json --split train --output ./data/weibo_train.jsonl
-python -B convert.py ./weibo21/train_datasets.xlsx --dataset Weibo21 --mapping ./configs/weibo21.json --split train --output ./weibo21/train.jsonl
-python -B convert.py ./FineFake/train.csv --dataset FineFake --mapping ./configs/finefake.json --split train --output ./FineFake/train.jsonl
+python -B convert.py ./data/train_origin.csv --dataset WEIBO --mapping builtin:weibo --split train --output ./data/weibo_train.jsonl
+python -B convert.py ./weibo21/train_datasets.xlsx --dataset Weibo21 --mapping builtin:weibo21 --split train --output ./weibo21/train.jsonl
+python -B convert.py ./FineFake/train.csv --dataset FineFake --mapping builtin:finefake --split train --output ./FineFake/train.jsonl
 ```
 
 Repeat conversion for the other partitions with their matching `--split`. Dataset selection normalizes names to lowercase. JSONL, NDJSON, JSON, CSV, TSV, Excel, and Parquet are supported. Merge the converted rows into one manifest while preserving IDs and split roles, then validate and extract:
@@ -135,6 +134,8 @@ python -B main.py extract ./data/manifest.jsonl --workers 1 --output ./data/feat
 ```
 
 For source domains, training groups supply the physical reference through cross-fitting. Held-out target domains use independent unlabeled `profile` rows. A domain cannot supply both source training rows and target-profile rows in the same neural run.
+
+Configuration defaults are built in. Use `--config builtin:default` for standard profiling, `--config builtin:quick` for the synthetic check, and `--config builtin:seed42` for the corresponding experiment seed. Neural training defaults to `builtin:neural`. Dataset conversion selects `builtin:weibo`, `builtin:weibo21`, or `builtin:finefake` through `--mapping`; the mappings declare the released label direction explicitly. A custom relative JSON path remains supported for each configuration option.
 
 ## Pretrained Encoders
 
@@ -153,7 +154,7 @@ Add `--forensic ./models/forensic` for a separately trained, Hugging Face-compat
 The pretrained encoders are frozen. Trainable projections, residual attention, and the news head use source news labels. Source event/image groups define cross-fitting folds; source training alone fits feature standardizers. Validation selects the checkpoint and fits probability calibration; a separate calibration partition fits prediction sets. Target labels do not enter fitting.
 
 ```bash
-python -B deep.py train ./data/features.npz ./data/deep.npz --dataset Weibo21 --config ./configs/neural.json --profile-config ./configs/default.json --seed 42 --mode coupled --device cuda:0 --output ./models/neural42
+python -B deep.py train ./data/features.npz ./data/deep.npz --dataset Weibo21 --config builtin:neural --profile-config builtin:default --seed 42 --mode coupled --device cuda:0 --output ./models/neural42
 python -B deep.py predict ./data/features.npz ./data/deep.npz --model ./models/neural42 --split test --device cuda:0 --output ./outputs/neural42/predictions.jsonl
 ```
 
@@ -224,7 +225,7 @@ The original trace/copula scoring and external semantic fusion remain available.
 
 ```bash
 python -B main.py fixture --seed 42 --per-split 24 --output ./data/fixture.npz
-python -B main.py benchmark ./data/fixture.npz --config ./configs/quick.json --bootstrap 25 --ablations --output ./outputs/smoke
+python -B main.py benchmark ./data/fixture.npz --config builtin:quick --bootstrap 25 --ablations --output ./outputs/smoke
 ```
 
 Provide frozen news logits increasing toward fake news, join by exact identity, and benchmark:
@@ -236,13 +237,13 @@ Provide frozen news logits increasing toward fake news, join by exact identity, 
 ```bash
 python -B main.py join ./data/manifest.jsonl ./data/semantic.jsonl --score-key logit --output ./data/semantic_manifest.jsonl
 python -B main.py extract ./data/semantic_manifest.jsonl --output ./data/semantic_features.npz
-python -B main.py benchmark ./data/semantic_features.npz --dataset Weibo21 --config ./configs/seed42.json --ablations --output ./outputs/seed42
+python -B main.py benchmark ./data/semantic_features.npz --dataset Weibo21 --config builtin:seed42 --ablations --output ./outputs/seed42
 ```
 
-Repeat with `seed52.json`, `seed3047.json`, and `seed3407.json` and their matching outputs. Built-in controls include TraceLR, MarginalNB, SingleTrace, CharTFIDF, GaussianNovelty, FrozenSemantic, TraceRBF, ImageRBF, and both RBF fusion variants. Deterministic FlawPrint variants are `copula_only`, `sign_only`, `physical_full`, and `flawprint_fusion`.
+Repeat with `builtin:seed52`, `builtin:seed3047`, and `builtin:seed3407` and their matching outputs. Built-in controls include TraceLR, MarginalNB, SingleTrace, CharTFIDF, GaussianNovelty, FrozenSemantic, TraceRBF, ImageRBF, and both RBF fusion variants. Deterministic FlawPrint variants are `copula_only`, `sign_only`, `physical_full`, and `flawprint_fusion`.
 
 ```bash
-python -B main.py profile ./data/semantic_features.npz --domain politics --split profile --config ./configs/seed42.json --output ./models/politics.json
+python -B main.py profile ./data/semantic_features.npz --domain politics --split profile --config builtin:seed42 --output ./models/politics.json
 python -B main.py predict ./data/semantic_features.npz --profile ./models/politics.json --domain politics --split test --fusion --explain --output ./outputs/deterministic.jsonl
 python -B main.py evaluate ./outputs/deterministic.jsonl --seed 42 --output ./outputs/evaluation.json
 ```

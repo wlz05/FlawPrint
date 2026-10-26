@@ -7,6 +7,7 @@ from pathlib import Path
 from engine.storage import digest, read_json, read_rows, relative_path, resolved, same_path, write_json, write_rows
 from engine.data import audit_splits, normalize
 from engine.formats import Conversion, FIELDS, convert_records
+from engine.package import configuration, is_builtin
 
 def convert_files(inputs: list[str], config: Conversion, encoding: str = "utf-8-sig", delimiter: str | None = None, records_key: str | None = None, sheet: str | int = 0, trusted_pickle: bool = False, check_files: bool = False) -> tuple[list[dict], dict]:
     paths = [relative_path(item) for item in inputs]
@@ -31,7 +32,7 @@ def arguments() -> tuple[argparse.ArgumentParser, argparse.Namespace]:
     parser = argparse.ArgumentParser(description="Convert dataset tables to an audited portable manifest.")
     parser.add_argument("input", nargs="+")
     parser.add_argument("--dataset", type=str.lower, choices=("canonical", "weibo", "finefake", "weibo21", "custom"))
-    parser.add_argument("--mapping", help="Load a Conversion configuration from relative JSON")
+    parser.add_argument("--mapping", help="Load a built-in conversion preset or relative JSON configuration")
     parser.add_argument("--trusted-pickle", action="store_true")
     parser.add_argument("--image-root")
     for field in FIELDS:
@@ -59,7 +60,7 @@ def arguments() -> tuple[argparse.ArgumentParser, argparse.Namespace]:
 def main() -> None:
     parser, args = arguments()
     try:
-        state = read_json(args.mapping) if args.mapping else {}
+        state = configuration(args.mapping) if args.mapping else {}
         if not isinstance(state, dict):
             raise ValueError("The conversion mapping must be a JSON object")
         state.setdefault("dataset", "canonical")
@@ -86,7 +87,7 @@ def main() -> None:
         config = Conversion(**state)
         output = relative_path(args.output)
         report = relative_path(args.report) if args.report else output.with_name(output.stem + ".conversion.json")
-        protected = args.input + [item for item in (args.mapping, args.label_map, args.domain_map, args.split_map) if item]
+        protected = args.input + [item for item in (args.mapping, args.label_map, args.domain_map, args.split_map) if item and not is_builtin(item)]
         if same_path(output, report) or any(same_path(item, target) for item in protected for target in (output, report)):
             raise ValueError("Input, output, and conversion report files must be distinct")
         sheet = int(args.sheet) if args.sheet.isdigit() else args.sheet

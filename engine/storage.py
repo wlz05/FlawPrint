@@ -121,7 +121,7 @@ def read_rows(path: str | Path, encoding: str = "utf-8-sig", delimiter: str | No
                 raise ValueError("Table columns must be unique and nonempty strings")
             result = frame.to_dict(orient="records")
         except ImportError as error:
-            raise ValueError("Table support requires python -m pip install -r ./tables.txt") from error
+            raise ValueError('Table support requires python -m pip install "pandas>=2.2,<4" "openpyxl>=3.1,<4" "pyarrow>=15,<30" "xlrd>=2,<3"') from error
     elif suffix in (".csv", ".tsv"):
         with target.open("r", encoding=encoding, newline="") as stream:
             chosen = delimiter or ("\t" if suffix == ".tsv" else ",")

@@ -7,6 +7,7 @@ from dataclasses import replace
 import json
 from engine.storage import relative_path, resolved, same_path, read_json, write_json, read_rows, write_rows, load_bundle, digest
 from engine.provenance import source_digest
+from engine.package import configuration, configuration_record, is_builtin
 
 def arguments() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Extract pretrained representations and train reference-coupled attention.")
@@ -22,8 +23,8 @@ def arguments() -> argparse.Namespace:
     training = commands.add_parser("train")
     training.add_argument("features")
     training.add_argument("embeddings")
-    training.add_argument("--config", default="./configs/neural.json")
-    training.add_argument("--profile-config", default="./configs/default.json")
+    training.add_argument("--config", default="builtin:neural")
+    training.add_argument("--profile-config", default="builtin:default")
     training.add_argument("--seed", type=int)
     training.add_argument("--mode", type=str.lower, choices=("coupled", "unbiased", "independent", "deep", "concat", "broadcast", "diagonal", "shuffled"))
     training.add_argument("--dataset", type=str.lower, choices=("weibo", "weibo21", "finefake"))
@@ -44,7 +45,7 @@ def main() -> None:
     args = arguments()
     try:
         from engine import embeddings
-        protected = [getattr(args, name) for name in ("manifest", "features", "embeddings", "config", "profile_config") if getattr(args, name, None)]
+        protected = [getattr(args, name) for name in ("manifest", "features", "embeddings", "config", "profile_config") if getattr(args, name, None) and not (name in ("config", "profile_config") and is_builtin(getattr(args, name)))]
         if any(same_path(args.output, path) for path in protected):
             raise ValueError("The output cannot overwrite an input")
         fingerprints = [{"path": path, "sha256": digest(path)} for path in protected]
@@ -62,15 +63,15 @@ def main() -> None:
             from engine.learning import fit
             from engine.neural import NeuralConfig
             from engine.profile import ProfileConfig
-            config = NeuralConfig(**read_json(args.config))
+            config = NeuralConfig(**configuration(args.config))
             if args.seed is not None:
                 config = replace(config, seed=args.seed)
             if args.mode is not None:
                 config = replace(config, mode=args.mode)
-            profile = replace(ProfileConfig(**read_json(args.profile_config)), seed=config.seed)
+            profile = replace(ProfileConfig(**configuration(args.profile_config)), seed=config.seed)
             result = fit(load_bundle(args.features), embeddings.load(args.embeddings), args.output, config, profile, args.device)
             changed = any(digest(item["path"]) != item["sha256"] for item in fingerprints)
-            write_json(relative_path(args.output) / "provenance.json", {"inputs": fingerprints, "source_sha256": source_digest(), "dataset": args.dataset, "inputs_changed_during_training": changed})
+            write_json(relative_path(args.output) / "provenance.json", {"inputs": fingerprints, "configurations": {"training": configuration_record(args.config), "profile": configuration_record(args.profile_config)}, "source_sha256": source_digest(), "dataset": args.dataset, "inputs_changed_during_training": changed})
             if changed:
                 raise ValueError("An input changed during training; its original hashes are preserved")
         else:
@@ -91,7 +92,7 @@ def main() -> None:
                 result["report"] = report.as_posix()
         print(json.dumps(result, indent=2, allow_nan=False))
     except ImportError as error:
-        raise SystemExit("Install optional deep dependencies with python -m pip install -r ./requirements-optional.txt") from error
+        raise SystemExit('Install optional deep dependencies with python -m pip install "torch>=2.2" "transformers>=4.40,<6"') from error
     except (ValueError, OSError, KeyError, TypeError, RuntimeError) as error:
         raise SystemExit("Error: " + str(error)) from error
 

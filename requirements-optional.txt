@@ -1,4 +1,0 @@
--r requirements.txt
--r tables.txt
-torch>=2.2
-transformers>=4.40,<6

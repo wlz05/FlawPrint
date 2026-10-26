@@ -24,6 +24,7 @@ from engine.conformal import validate_partitions
 from engine.provenance import source_digest
 from engine.storage import digest
 from doctor import environment
+from engine.package import configuration, configuration_record, is_builtin
 
 def metrics(bundle: dict, rows: list[dict], threshold: float) -> dict:
     if [row["id"] for row in bundle["rows"]] != [row["id"] for row in rows] or any(row.get("profile_overlap") for row in rows) or not np.isfinite(threshold):
@@ -154,8 +155,7 @@ def propagation(args: argparse.Namespace) -> dict:
     return {"results": results, "scope": "Paired local resize/JPEG pipeline; the same corruption is applied to profile, test, and optional source validation; source-label quantiles require transfer and compatible PIT for target error control; uncalibrated zero-threshold FPR is a diagnostic; no universal monotonicity or actual platform encoder claim"}
 
 def load_configuration(path: str) -> dict:
-    from engine.storage import read_json
-    return read_json(path)
+    return configuration(path)
 
 def latency(args: argparse.Namespace) -> dict:
     if args.repeats < 2 or args.batch_size < 1 or args.workers < 1:
@@ -226,7 +226,7 @@ def main() -> None:
     pipeline = commands.add_parser("propagation")
     pipeline.add_argument("features")
     pipeline.add_argument("--domain", required=True)
-    pipeline.add_argument("--config", default="./configs/default.json")
+    pipeline.add_argument("--config", default="builtin:default")
     pipeline.add_argument("--validation", help="Use a separate labeled source validation bundle at each generation")
     pipeline.add_argument("--generations", type=int, default=5)
     pipeline.add_argument("--resize", type=float, default=0.85)
@@ -248,7 +248,7 @@ def main() -> None:
     cost.set_defaults(handler=latency)
     args = parser.parse_args()
     result = args.handler(args)
-    result["provenance"] = {"source_sha256": source_digest(), "environment": environment(), "inputs": [{"path": getattr(args, key), "sha256": digest(getattr(args, key))} for key in ("features", "profile", "config", "validation", "target_calibration") if getattr(args, key, None)]}
+    result["provenance"] = {"source_sha256": source_digest(), "environment": environment(), "inputs": [{"path": getattr(args, key), "sha256": digest(getattr(args, key))} for key in ("features", "profile", "config", "validation", "target_calibration") if getattr(args, key, None) and not (key == "config" and is_builtin(getattr(args, key)))], **({"configuration": configuration_record(args.config)} if getattr(args, "config", None) else {})}
     write_json(relative_path(args.output) / "report.json", result)
     print(f"Saved the {args.study} study to {args.output}")
 
