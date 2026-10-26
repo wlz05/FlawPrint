@@ -233,11 +233,14 @@ def fit(bundle: dict, archive: dict, output: str, config: NeuralConfig, profile_
     fit_rows = [rows[index] for role in ("train", "validation", "calibration") for index in partitions[role]]
     metadata = {"version": "flawprint-neural-v2", "relation_operator": "content-conditioned-reference-v2", "config": asdict(config), "dimensions": dimensions, "feature_order": list(dimensions), "trace_names": bundle["names"].tolist(), "normalizers": normalizers, "profiles": profile_paths, "profile_sha256": profile_hashes, "encoder_signature": signature(archive), "calibration": state, "fit_identifiers": [row["id"] for row in fit_rows], "fit_history": collect(fit_rows), "weights_sha256": digest(weights), "source_sha256": source_digest(), "selection_metric": "source validation macro F1", "trainable_parameters": sum(value.numel() for value in model.parameters() if value.requires_grad), "history": history, "best_validation_macro_f1": best_score, "backbones": "Frozen local feature encoders; trainable projectors, attention and heads", "target_labels_used_for_fitting": False}
     metadata["environment"] = {"python": platform.python_version(), "torch": str(torch.__version__), "numpy": np.__version__, "device": device, "cuda_runtime": torch.version.cuda, "gpu": torch.cuda.get_device_name(torch.device(device)) if torch.device(device).type == "cuda" else None}
+    metadata["embedding_protocol"] = embeddings.protocol(archive)
     write_json(destination / "model.json", metadata)
     image_samples = sum(isinstance(rows[index].get("physical_manipulated"), (bool, np.bool_)) and bool(rows[index].get("image")) for index in partitions["train"]) if config.auxiliary_weight else 0
     return {"output": output, "epochs": len(history), "best_validation_macro_f1": best_score, "trainable_parameters": metadata["trainable_parameters"], "image_supervised_samples": image_samples}
 
 def predict(bundle: dict, archive: dict, directory: str, split: str = "test", device: str = "cuda:0", reference_domain: str | None = None, explain: bool = False) -> list[dict]:
+    validate_bundle(bundle)
+    embeddings.validate(archive)
     root = relative_path(directory)
     metadata = read_json(root / "model.json")
     if metadata.get("version") not in ("flawprint-neural-v1", "flawprint-neural-v2") or digest(root / "parameters.pt") != metadata.get("weights_sha256"):
@@ -246,6 +249,8 @@ def predict(bundle: dict, archive: dict, directory: str, split: str = "test", de
         raise ValueError("The neural checkpoint relation operator is unsupported")
     if bundle["names"].tolist() != metadata["trace_names"] or signature(archive) != metadata["encoder_signature"]:
         raise ValueError("The query encoder or physical feature schema changed")
+    if "embedding_protocol" in metadata and embeddings.protocol(archive) != metadata["embedding_protocol"]:
+        raise ValueError("The query embedding preprocessing protocol changed")
     features, observed = embeddings.align(bundle, archive)
     if list(features) != metadata["feature_order"] or {name: value.shape[1] for name, value in features.items()} != metadata["dimensions"]:
         raise ValueError("The query embedding dimensions or stream order changed")
@@ -289,6 +294,7 @@ def predict(bundle: dict, archive: dict, directory: str, split: str = "test", de
         row["model_mode"] = config.mode
         row["checkpoint_version"] = metadata["version"]
         row["relation_operator"] = metadata.get("relation_operator", "broadcast-reference-v1")
+        row["embedding_protocol_verified"] = bool(metadata.get("embedding_protocol", {}).get("complete"))
         row["reference_domain"] = reference_domain or row["domain"]
         row["physical_reference_available"] = row["reference_domain"] in metadata["profiles"]
         if explain:

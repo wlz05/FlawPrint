@@ -10,6 +10,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 import numpy as np
 from engine import embeddings
 from engine.copula import score
@@ -74,6 +75,64 @@ class NeuralTests(unittest.TestCase):
                 archive["observed"][0, 0] = False
             with self.assertRaises(ValueError):
                 embeddings.validate(archive)
+
+    def test_failed_cache_replacement_preserves_the_existing_archive(self) -> None:
+        path = self.root / "cache.npz"
+        embeddings.save(path.as_posix(), self.archive)
+        original = path.read_bytes()
+        with patch("engine.embeddings.np.savez_compressed", side_effect=OSError("Interrupted cache write")):
+            with self.assertRaisesRegex(OSError, "Interrupted"):
+                embeddings.save(path.as_posix(), self.archive)
+        self.assertEqual(path.read_bytes(), original)
+        self.assertFalse(list(self.root.glob(".flawprint-*.tmp")))
+        embeddings.validate(embeddings.load(path.as_posix()))
+
+    def test_malformed_cache_metadata_and_float_overflow_are_rejected(self) -> None:
+        for damage in ("identifier", "context", "ratio", "readout", "overflow", "container"):
+            with self.subTest(damage=damage):
+                archive = copy.deepcopy(self.archive)
+                if damage == "identifier":
+                    archive["rows"][0]["id"] = " "
+                elif damage == "context":
+                    archive["provenance"].update(max_text_length=8, text_context={"bert": 12, "clip": 8})
+                elif damage == "ratio":
+                    archive["provenance"]["mae_mask_ratio"] = False
+                elif damage == "readout":
+                    archive["provenance"]["readout"] = {"bert": "class_token"}
+                elif damage == "overflow":
+                    archive["features"]["bert"] = archive["features"]["bert"].astype(np.float64)
+                    archive["features"]["bert"][0, 0] = 1e300
+                else:
+                    archive["features"]["bert"] = archive["features"]["bert"].tolist()
+                with self.assertRaises(ValueError):
+                    embeddings.validate(archive)
+
+    def test_training_rejects_boolean_and_nonfinite_numeric_settings(self) -> None:
+        for name in ("dropout", "bias_limit", "learning_rate", "weight_decay", "auxiliary_weight"):
+            for value in (False, True, float("nan"), float("inf"), "0.1"):
+                with self.subTest(name=name, value=value):
+                    with self.assertRaises(ValueError):
+                        replace(self.config, **{name: value}).validate()
+        with self.assertRaises(ValueError):
+            replace(self.config, seed=2 ** 32).validate()
+
+    def test_checkpoint_rejects_changed_feature_protocol_and_loads_legacy_metadata(self) -> None:
+        archive = copy.deepcopy(self.archive)
+        archive["provenance"].update(max_text_length=197, mae_mask_ratio=0.0, text_context={"bert": 197, "clip": 77}, readout={name: "class_token" if name in ("bert", "mae") else "projected_vector" for name in embeddings.STREAMS})
+        directory = self.root / "protocol"
+        fit(self.bundle, archive, directory.as_posix(), replace(self.config, epochs=1), self.profile, "cpu")
+        before = predict(self.bundle, archive, directory.as_posix(), device="cpu")
+        self.assertTrue(all(row["embedding_protocol_verified"] for row in before))
+        changed = copy.deepcopy(archive)
+        changed["provenance"].update(max_text_length=64, text_context={"bert": 64, "clip": 64})
+        with self.assertRaisesRegex(ValueError, "preprocessing protocol"):
+            predict(self.bundle, changed, directory.as_posix(), device="cpu")
+        metadata = read_json(directory / "model.json")
+        metadata.pop("embedding_protocol")
+        write_json(directory / "model.json", metadata)
+        legacy = predict(self.bundle, archive, directory.as_posix(), device="cpu")
+        self.assertFalse(any(row["embedding_protocol_verified"] for row in legacy))
+        np.testing.assert_array_equal([row["fusion_risk"] for row in before], [row["fusion_risk"] for row in legacy])
 
     def test_relation_graph_reconstructs_the_copula_quadratic_form(self) -> None:
         training = subset(self.bundle, indices(self.bundle, "train", "source_alpha"))
@@ -313,7 +372,7 @@ class NeuralTests(unittest.TestCase):
         else:
             tokenizer = BertTokenizer(vocab_file=vocabulary.as_posix())
         tokenizer.save_pretrained(directories["bert"])
-        BertModel(BertConfig(vocab_size=8, hidden_size=16, num_hidden_layers=1, num_attention_heads=2, intermediate_size=32)).save_pretrained(directories["bert"])
+        BertModel(BertConfig(vocab_size=8, hidden_size=16, num_hidden_layers=1, num_attention_heads=2, intermediate_size=32, max_position_embeddings=8)).save_pretrained(directories["bert"])
         ViTMAEModel(ViTMAEConfig(image_size=32, patch_size=16, hidden_size=16, num_hidden_layers=1, num_attention_heads=2, intermediate_size=32)).save_pretrained(directories["mae"])
         ViTImageProcessor(size={"height": 32, "width": 32}).save_pretrained(directories["mae"])
         (directories["clip"] / "vocab.json").write_text(json.dumps({"<|startoftext|>": 0, "<|endoftext|>": 1}), encoding="utf-8")
@@ -328,7 +387,7 @@ class NeuralTests(unittest.TestCase):
         CLIPModel(config).save_pretrained(directories["clip"])
         image = self.root / "image.png"
         Image.new("RGB", (32, 32), (90, 120, 150)).save(image)
-        rows = [{"id": "image", "image": image.as_posix(), "text": "a news report"}, {"id": "text", "image": "", "text": "news"}]
+        rows = [{"id": "image", "image": image.as_posix(), "text": "a news report " * 10}, {"id": "text", "image": "", "text": "news"}]
         paths = {name: path.as_posix() for name, path in directories.items()}
         first = embeddings.extract(rows, paths, batch_size=2, device="cpu", max_length=12)
         second = embeddings.extract(rows, paths, batch_size=2, device="cpu", max_length=12)
@@ -338,6 +397,10 @@ class NeuralTests(unittest.TestCase):
         self.assertEqual(first["features"]["clip_image"].shape, (2, 8))
         self.assertFalse(first["observed"][1, 1])
         self.assertTrue(np.all(first["features"]["mae"][1] == 0))
+        self.assertEqual(first["provenance"]["text_context"], {"bert": 8, "clip": 12})
+        self.assertTrue(embeddings.protocol(first)["complete"])
+        embeddings.save((self.root / "encoded.npz").as_posix(), first)
+        self.assertEqual(embeddings.protocol(embeddings.load((self.root / "encoded.npz").as_posix())), embeddings.protocol(first))
 
 # Author: Weiliang Zhu
 # Email: wlzchina05@gmail.com

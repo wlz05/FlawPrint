@@ -4,6 +4,7 @@
 from __future__ import annotations
 from dataclasses import dataclass
 import math
+from numbers import Real
 import torch
 from torch import nn
 
@@ -66,8 +67,11 @@ class NeuralConfig:
 
     def validate(self) -> None:
         integers = (self.dimension, self.heads, self.layers, self.epochs, self.batch_size, self.patience, self.seed, self.folds)
-        if any(isinstance(value, bool) or not isinstance(value, int) for value in integers) or min(integers[:-2]) < 1 or self.seed < 0 or self.folds < 2:
+        if any(isinstance(value, bool) or not isinstance(value, int) for value in integers) or min(integers[:-2]) < 1 or not 0 <= self.seed < 2 ** 32 or self.folds < 2:
             raise ValueError("Neural sizes, epochs, folds and seed must be valid integers")
+        scalars = (self.dropout, self.bias_limit, self.learning_rate, self.weight_decay, self.auxiliary_weight)
+        if any(isinstance(value, bool) or not isinstance(value, Real) or not math.isfinite(value) for value in scalars):
+            raise ValueError("Neural numeric settings must be finite real numbers")
         if self.dimension % self.heads or not 0 <= self.dropout < 1 or not 0 < self.bias_limit <= 8:
             raise ValueError("Invalid attention dimensions, dropout or potential bound")
         if not all(math.isfinite(value) for value in (self.learning_rate, self.weight_decay, self.auxiliary_weight)) or self.learning_rate <= 0 or min(self.weight_decay, self.auxiliary_weight) < 0:

@@ -6,13 +6,29 @@ import hashlib
 import inspect
 import json
 from importlib.metadata import version
+import os
 from pathlib import Path
 import re
+import tempfile
 import numpy as np
 from engine.data import normalize
 from engine.storage import relative_path, digest, native
 
 STREAMS = ("bert", "mae", "clip_text", "clip_image")
+
+def context(requested: int, *limits: int | None) -> int:
+    if isinstance(requested, bool) or not isinstance(requested, int) or requested < 2:
+        raise ValueError("Text length must be an integer of at least two tokens")
+    available = [value for value in limits if value is not None]
+    if any(isinstance(value, bool) or not isinstance(value, int) or value < 2 for value in available):
+        raise ValueError("Encoder context limits must be positive token counts")
+    return min([requested] + available)
+
+def protocol(archive: dict) -> dict:
+    provenance = archive["provenance"]
+    keys = ("max_text_length", "mae_mask_ratio", "text_context", "readout")
+    settings = {key: provenance[key] for key in keys if key in provenance}
+    return {"version": "flawprint-feature-protocol-v1", "settings": settings, "complete": len(settings) == len(keys)}
 
 def checkpoint_digest(directory: str) -> str:
     root = relative_path(directory)
@@ -29,18 +45,24 @@ def checkpoint_digest(directory: str) -> str:
     return checksum.hexdigest()
 
 def validate(archive: dict) -> None:
+    if not isinstance(archive, dict) or not all(key in archive for key in ("rows", "features", "observed")):
+        raise ValueError("An embedding archive requires rows, features and availability")
     rows, features, observed = archive["rows"], archive["features"], archive["observed"]
+    if not isinstance(features, dict) or not isinstance(rows, list) or not isinstance(observed, np.ndarray):
+        raise ValueError("Embedding arrays and metadata have invalid container types")
     names = list(features)
     if names not in (list(STREAMS), list(STREAMS) + ["forensic"]):
         raise ValueError("Embedding streams must use the recorded canonical order")
-    if not rows or len({row["id"] for row in rows}) != len(rows):
+    if not rows or any(not isinstance(row, dict) or not isinstance(row.get("id"), str) or not row["id"].strip() for row in rows) or len({row["id"] for row in rows}) != len(rows):
         raise ValueError("Embedding identities must be unique and nonempty")
     if observed.dtype != np.bool_ or observed.shape != (len(rows), len(names)):
         raise ValueError("Embedding availability requires a Boolean sample by stream mask")
     for column, name in enumerate(names):
         values = features[name]
-        if not np.issubdtype(values.dtype, np.floating) or values.ndim != 2 or values.shape[0] != len(rows) or not 0 < values.shape[1] <= 8192 or not np.isfinite(values).all():
+        if not isinstance(values, np.ndarray) or not np.issubdtype(values.dtype, np.floating) or values.ndim != 2 or values.shape[0] != len(rows) or not 0 < values.shape[1] <= 8192 or not np.isfinite(values).all():
             raise ValueError("Embedding arrays require finite aligned feature vectors")
+        if np.any(np.abs(values) > np.finfo(np.float32).max):
+            raise ValueError("Embedding values must be representable as float32")
         if np.any(values[~observed[:, column]] != 0):
             raise ValueError("Missing embedding streams must contain zero vectors")
     if not observed.any(axis=1).all():
@@ -51,6 +73,21 @@ def validate(archive: dict) -> None:
     expected = {"bert", "mae", "clip"} | ({"forensic"} if "forensic" in names else set())
     if not isinstance(encoders, dict) or set(encoders) != expected or any(not isinstance(value, dict) or value.get("frozen") is not True or not re.fullmatch("[0-9a-f]{64}", str(value.get("sha256", ""))) for value in encoders.values()):
         raise ValueError("Record a frozen checkpoint hash for every encoder")
+    settings = protocol(archive)["settings"]
+    if "max_text_length" in settings:
+        context(settings["max_text_length"])
+    if "text_context" in settings:
+        lengths = settings["text_context"]
+        if not isinstance(lengths, dict) or set(lengths) != {"bert", "clip"}:
+            raise ValueError("Record the effective BERT and CLIP context limits")
+        for length in lengths.values():
+            context(length)
+            if "max_text_length" in settings and length > settings["max_text_length"]:
+                raise ValueError("Effective context cannot exceed requested text length")
+    if "mae_mask_ratio" in settings and (isinstance(settings["mae_mask_ratio"], bool) or not isinstance(settings["mae_mask_ratio"], (int, float)) or settings["mae_mask_ratio"] != 0):
+        raise ValueError("Cached MAE features require every visible patch")
+    if "readout" in settings and (not isinstance(settings["readout"], dict) or set(settings["readout"]) != set(names) or any(not isinstance(value, str) or not value.strip() for value in settings["readout"].values())):
+        raise ValueError("Record the vector readout for every embedding stream")
 
 def save(path: str, archive: dict) -> None:
     validate(archive)
@@ -58,8 +95,18 @@ def save(path: str, archive: dict) -> None:
     target.parent.mkdir(parents=True, exist_ok=True)
     arrays = {"feature_" + name: values.astype(np.float32) for name, values in archive["features"].items()}
     metadata = {"version": "flawprint-embeddings-v1", "streams": list(archive["features"]), "rows": archive["rows"], "provenance": archive["provenance"]}
-    with target.open("wb") as stream:
-        np.savez_compressed(stream, **arrays, observed=archive["observed"], metadata=np.asarray(json.dumps(native(metadata), ensure_ascii=True, allow_nan=False)))
+    temporary = None
+    try:
+        with tempfile.NamedTemporaryFile(mode="wb", dir=target.parent, prefix=".flawprint-", suffix=".tmp", delete=False) as stream:
+            temporary = Path(stream.name)
+            np.savez_compressed(stream, **arrays, observed=archive["observed"], metadata=np.asarray(json.dumps(native(metadata), ensure_ascii=True, allow_nan=False)))
+            stream.flush()
+            os.fsync(stream.fileno())
+        # Replace the cache only after its complete contents reach disk.
+        os.replace(temporary, target)
+    finally:
+        if temporary is not None and temporary.exists():
+            temporary.unlink()
 
 def load(path: str) -> dict:
     with np.load(relative_path(path), allow_pickle=False) as stream:
@@ -90,8 +137,9 @@ def extract(rows: list[dict], directories: dict, batch_size: int = 64, device: s
     import torch
     from PIL import Image
     from transformers import AutoModel, AutoTokenizer, AutoProcessor, AutoImageProcessor, ViTMAEModel
-    if isinstance(batch_size, bool) or batch_size < 1 or max_length < 2:
+    if isinstance(batch_size, bool) or not isinstance(batch_size, int) or batch_size < 1:
         raise ValueError("Encoder batch size and text length must be positive")
+    context(max_length)
     if set(directories) not in ({"bert", "mae", "clip"}, {"bert", "mae", "clip", "forensic"}):
         raise ValueError("Supply BERT, MAE and CLIP directories with an optional forensic CLIP")
     rows = normalize(rows)
@@ -115,6 +163,7 @@ def extract(rows: list[dict], directories: dict, batch_size: int = 64, device: s
         models["forensic"] = forensic
     for model in models.values():
         model.requires_grad_(False)
+    limits = {"bert": context(max_length, getattr(bert.config, "max_position_embeddings", None), getattr(tokenizer, "model_max_length", None)), "clip": context(max_length, clip.config.text_config.max_position_embeddings, getattr(clip_processor.tokenizer, "model_max_length", None))}
     names = list(STREAMS) + (["forensic"] if forensic is not None else [])
     output, masks, image_hashes = {name: [] for name in names}, [], {}
     for start in range(0, len(rows), batch_size):
@@ -133,15 +182,14 @@ def extract(rows: list[dict], directories: dict, batch_size: int = 64, device: s
             else:
                 images.append(Image.new("RGB", (224, 224)))
             mask.append([bool(row["text"].strip()), present, bool(row["text"].strip()), present] + ([present] if forensic is not None else []))
-        inputs = tokenizer(texts, padding=True, truncation=True, max_length=max_length, return_tensors="pt")
+        inputs = tokenizer(texts, padding=True, truncation=True, max_length=limits["bert"], return_tensors="pt")
         inputs = {key: value.to(device) for key, value in inputs.items()}
         pixels = image_processor(images=images, return_tensors="pt")["pixel_values"].to(device)
         patch_size = mae.config.patch_size
         patches = (pixels.shape[-2] // patch_size) * (pixels.shape[-1] // patch_size)
         # Keep every MAE patch in its original order.
         noise = torch.arange(patches, device=device, dtype=torch.float32).expand(len(batch), -1)
-        limit = min(max_length, clip.config.text_config.max_position_embeddings)
-        clip_inputs = clip_processor(text=texts, images=images, padding=True, truncation=True, max_length=limit, return_tensors="pt")
+        clip_inputs = clip_processor(text=texts, images=images, padding=True, truncation=True, max_length=limits["clip"], return_tensors="pt")
         accepted = inspect.signature(clip.get_text_features).parameters
         clip_text = {key: value.to(device) for key, value in clip_inputs.items() if key in accepted and key != "pixel_values"}
         with torch.inference_mode():
@@ -163,6 +211,7 @@ def extract(rows: list[dict], directories: dict, batch_size: int = 64, device: s
     if any(checkpoint_digest(directories[name]) != fingerprint for name, fingerprint in before.items()) or any(digest(path) != fingerprint for path, fingerprint in image_hashes.items()):
         raise ValueError("An encoder or image changed during extraction")
     provenance = {"encoders": {name: {"directory": directory, "sha256": before[name], "frozen": True, "model_type": models[name].config.model_type} for name, directory in directories.items()}, "device": device, "max_text_length": max_length, "mae_mask_ratio": 0.0, "image_sha256": image_hashes, "transformers_version": version("transformers"), "torch_version": str(torch.__version__)}
+    provenance.update(text_context=limits, readout={name: "class_token" if name in ("bert", "mae") else "projected_vector" for name in names})
     result = {"features": {name: np.concatenate(values) for name, values in output.items()}, "observed": np.concatenate(masks), "rows": rows, "provenance": provenance}
     validate(result)
     return result
