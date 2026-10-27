@@ -47,6 +47,10 @@ def main() -> None:
     args = arguments()
     try:
         from engine import embeddings
+        for name in ("manifest", "features", "embeddings", "output", "model", "bert", "mae", "clip", "forensic", "config", "profile_config"):
+            value = getattr(args, name, None)
+            if value is not None and not (name in ("config", "profile_config") and is_builtin(value)):
+                setattr(args, name, relative_path(value).as_posix())
         protected = [getattr(args, name) for name in ("manifest", "features", "embeddings", "config", "profile_config") if getattr(args, name, None) and not (name in ("config", "profile_config") and is_builtin(getattr(args, name)))]
         if any(same_path(args.output, path) for path in protected):
             raise ValueError("The output cannot overwrite an input")

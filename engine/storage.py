@@ -17,9 +17,17 @@ from typing import Any
 import numpy as np
 
 def relative_path(value: str | Path) -> Path:
-    path = Path(value)
-    if path.is_absolute() or PureWindowsPath(str(value)).drive or str(value).startswith(("\\", "/")):
+    if not isinstance(value, (str, os.PathLike)):
+        raise ValueError("Filesystem paths must be nonempty strings or Path objects")
+    text = os.fspath(value)
+    if not isinstance(text, str) or not text.strip() or "\0" in text:
+        raise ValueError("Filesystem paths must be nonempty strings or Path objects")
+    text = text.replace("\\", "/")
+    path = Path(text)
+    if path.is_absolute() or PureWindowsPath(text).drive or text.startswith("/"):
         raise ValueError("Use a relative filesystem path")
+    if text == "~" or text.startswith("~/") or text.casefold().startswith(("http://", "https://", "file://")):
+        raise ValueError("Use an explicit relative filesystem path")
     return path
 
 def resolved(value: str | Path) -> Path:

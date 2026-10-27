@@ -4,9 +4,10 @@
 from __future__ import annotations
 import copy
 from dataclasses import replace
-from pathlib import Path
+from pathlib import Path, PurePosixPath, PureWindowsPath
 import tempfile
 import unittest
+from unittest.mock import patch
 import numpy as np
 from PIL import Image
 from engine.storage import relative_path, save_bundle, load_bundle, subset
@@ -40,6 +41,18 @@ class WorkflowTests(unittest.TestCase):
     def test_absolute_paths_are_rejected(self) -> None:
         with self.assertRaises(ValueError):
             relative_path(Path.cwd())
+
+    def test_relative_paths_normalize_windows_separators_on_posix(self) -> None:
+        with patch("engine.storage.Path", PurePosixPath):
+            self.assertEqual(relative_path("data\\cache\\features.npz").as_posix(), "data/cache/features.npz")
+            self.assertEqual(relative_path(PureWindowsPath("data\\cache\\features.npz")).as_posix(), "data/cache/features.npz")
+            self.assertEqual(relative_path("models\\checkpoint\\profiles\\domain.json").as_posix(), "models/checkpoint/profiles/domain.json")
+
+    def test_relative_paths_reject_implicit_roots_and_remote_locations(self) -> None:
+        for value in ("", "  ", "\0", "~", "~/models", "~\\models", "https://example.test/model", "file://host/model", chr(90) + ":model", "\\\\host\\model"):
+            with self.subTest(path=value):
+                with self.assertRaises(ValueError):
+                    relative_path(value)
 
     def test_finefake_labels_are_explicitly_inverted(self) -> None:
         rows = normalize([{"id": "a", "image": "a.jpg", "label": 0}, {"id": "b", "image": "b.jpg", "label": 1}], label_convention="real-one")

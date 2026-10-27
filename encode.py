@@ -4,7 +4,7 @@
 from __future__ import annotations
 import argparse
 from PIL import Image
-from engine.storage import read_rows, write_rows, relative_path, same_path
+from engine.storage import read_rows, write_rows, relative_path, resolved, same_path, protect_outputs
 from engine.data import normalize
 
 def main() -> None:
@@ -25,6 +25,12 @@ def main() -> None:
         parser.error("The local CLIP model directory is missing")
     if same_path(args.output, args.manifest):
         parser.error("The output path cannot overwrite the manifest")
+    if resolved(args.output).is_relative_to(resolved(model_path)):
+        parser.error("Alignment output must remain outside the encoder directory")
+    try:
+        protect_outputs([args.output], [row["image"] for row in rows])
+    except ValueError as error:
+        parser.error(str(error))
     if any(not relative_path(row["image"]).is_file() for row in rows):
         parser.error("An input image is missing; run main.py validate with check-images")
     import torch

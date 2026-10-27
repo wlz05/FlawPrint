@@ -5,8 +5,10 @@ from __future__ import annotations
 from dataclasses import replace
 import copy
 import gc
+import hashlib
 import json
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
+import shutil
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -29,6 +31,7 @@ from engine.results import prediction_rows, numeric
 from engine.baselines import Baseline
 from engine.traces import NAMES, extract_one, TraceConfig
 from engine.validation import preflight
+from engine.embeddings import checkpoint_digest
 from engine.dependence import tail_report, student_score, attenuation, availability, false_discovery, platform_alignment
 from engine.robustness import corrupt
 from study import metrics as study_metrics
@@ -44,6 +47,33 @@ class IntegrityTests(unittest.TestCase):
 
     def tearDown(self) -> None:
         self.temporary.cleanup()
+
+    def test_encoder_hashes_use_host_independent_names_after_copying(self) -> None:
+        source, copied = self.root / "first encoder", self.root / "copied encoder"
+        source.mkdir()
+        names = ("README.md", "config.json", "weights.bin", "tokenizer.json", "tokenizer/special.json")
+        for name in names:
+            (source / name).parent.mkdir(parents=True, exist_ok=True)
+            (source / name).write_text(name, encoding="utf-8")
+        expected = hashlib.sha256()
+        for name in sorted(names, key=PureWindowsPath):
+            expected.update(name.encode() + b"\0" + digest(source / name).encode())
+        shutil.copytree(source, copied)
+        self.assertEqual(checkpoint_digest(source.as_posix()), expected.hexdigest())
+        self.assertEqual(checkpoint_digest(copied.as_posix()), expected.hexdigest())
+        (copied / "weights.bin").write_bytes(b"different weights")
+        self.assertNotEqual(checkpoint_digest(copied.as_posix()), expected.hexdigest())
+
+    def test_encoder_links_are_rejected_even_when_they_point_to_directories(self) -> None:
+        root = self.root / "encoder"
+        root.mkdir()
+        (root / "config.json").write_text("{}", encoding="utf-8")
+        linked = root / "linked cache"
+        linked.mkdir()
+        original = Path.is_symlink
+        with patch.object(Path, "is_symlink", lambda path: path == linked or original(path)):
+            with self.assertRaisesRegex(ValueError, "instead of linking"):
+                checkpoint_digest(root.as_posix())
 
     def profile(self, domain: str = "target_gamma") -> DomainProfile:
         split = "profile" if domain == "target_gamma" else "train"

@@ -7,6 +7,7 @@ from dataclasses import asdict, replace
 import os
 import json
 from pathlib import Path
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -773,6 +774,62 @@ class NeuralTests(unittest.TestCase):
         self.assertEqual(provenance["dataset"], "weibo21")
         self.assertFalse(provenance["inputs_changed_during_training"])
 
+    def test_cached_training_and_prediction_survive_a_workspace_move(self) -> None:
+        original, moved = self.root / "first machine", self.root / "moved experiment"
+        original.mkdir()
+        shutil.copy2("deep.py", original / "deep.py")
+        shutil.copytree("engine", original / "engine", ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
+        bundle, archive = copy.deepcopy(self.bundle), copy.deepcopy(self.archive)
+        for rows in (bundle["rows"], archive["rows"]):
+            for row in rows:
+                row["image"] = "assets/" + row["id"] + ".jpg"
+        save_bundle(original / "data" / "physical.npz", bundle["values"], bundle["observed"], bundle["patches"], bundle["rows"], bundle["names"].tolist())
+        embeddings.save((original / "data" / "vectors.npz").as_posix(), archive)
+        write_json(original / "settings" / "neural.json", asdict(replace(self.config, epochs=1)))
+        write_json(original / "settings" / "profile.json", asdict(self.profile))
+        environment = dict(os.environ, OMP_NUM_THREADS="1", MKL_NUM_THREADS="1", PYTHONDONTWRITEBYTECODE="1", HF_HUB_OFFLINE="1")
+        bootstrap = "import runpy, sys; sys.modules['transformers'] = None; runpy.run_path('deep.py', run_name='__main__')"
+        training = ["train", "data\\physical.npz", "data\\vectors.npz", "--config", "settings\\neural.json", "--profile-config", "settings\\profile.json", "--device", "cpu", "--output", "models\\checkpoint"]
+        prediction = ["predict", "data\\physical.npz", "data\\vectors.npz", "--model", "models\\checkpoint", "--device", "cpu", "--output", "outputs\\predictions.jsonl"]
+        for arguments in (training, prediction):
+            result = subprocess.run([sys.executable, "-B", "-c", bootstrap, *arguments], cwd=original, env=environment, capture_output=True, text=True, timeout=60)
+            self.assertEqual(result.returncode, 0, result.stderr)
+        before = read_rows(original / "outputs" / "predictions.jsonl")
+        provenance = read_json(original / "models" / "checkpoint" / "provenance.json")
+        self.assertTrue(all("\\" not in item["path"] for item in provenance["inputs"]))
+        self.assertTrue(all(path.resolve().is_relative_to(self.root.resolve()) for path in (original, moved)))
+        original.rename(moved)
+        self.assertFalse(original.exists())
+        retraining = training[:-1] + ["models\\retrained"]
+        result = subprocess.run([sys.executable, "-B", "-c", bootstrap, *retraining], cwd=moved, env=environment, capture_output=True, text=True, timeout=60)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        for filename in ("neural.json", "profile.json"):
+            (moved / "settings" / filename).unlink()
+        result = subprocess.run([sys.executable, "-B", "-c", bootstrap, *prediction], cwd=moved, env=environment, capture_output=True, text=True, timeout=60)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        after = read_rows(moved / "outputs" / "predictions.jsonl")
+        self.assertEqual(after, before)
+        parameters = [torch.load(moved / "models" / name / "parameters.pt", map_location="cpu", weights_only=True) for name in ("checkpoint", "retrained")]
+        for name in parameters[0]:
+            torch.testing.assert_close(parameters[0][name], parameters[1][name], rtol=0, atol=0)
+
+    def test_alignment_output_cannot_replace_encoder_files_or_source_images(self) -> None:
+        import encode
+        from PIL import Image
+        model, manifest, image = self.root / "encoder", self.root / "manifest.jsonl", self.root / "image.png"
+        model.mkdir()
+        configuration = model / "config.json"
+        configuration.write_text("{}", encoding="utf-8")
+        Image.new("RGB", (32, 32)).save(image)
+        write_rows(manifest, [{"id": "news", "image": image.as_posix(), "text": "Report."}])
+        for output in (configuration, image):
+            before = output.read_bytes()
+            arguments = ["encode.py", manifest.as_posix(), "--model", model.as_posix(), "--output", output.as_posix()]
+            with self.subTest(output=output.name), patch.object(sys, "argv", arguments), patch.dict(sys.modules, {"transformers": None}):
+                with self.assertRaises(SystemExit):
+                    encode.main()
+            self.assertEqual(output.read_bytes(), before)
+
     def test_failed_metric_validation_preserves_existing_prediction_files(self) -> None:
         import deep
         physical, vectors, output = self.root / "physical.npz", self.root / "vectors.npz", self.root / "predictions.jsonl"
@@ -902,7 +959,11 @@ class NeuralTests(unittest.TestCase):
         rows = [{"id": "image", "image": image.as_posix(), "text": "a news report " * 10}, {"id": "text", "image": "", "text": "news"}]
         paths = {name: path.as_posix() for name, path in directories.items()}
         first = embeddings.extract(rows, paths, batch_size=2, device="cpu", max_length=12)
-        second = embeddings.extract(rows, paths, batch_size=2, device="cpu", max_length=12)
+        from transformers import AutoModel
+        windows = {name: path.replace("/", "\\") for name, path in paths.items()}
+        with patch("transformers.AutoModel.from_pretrained", wraps=AutoModel.from_pretrained) as loading:
+            second = embeddings.extract(rows, windows, batch_size=2, device="cpu", max_length=12)
+        self.assertTrue(all("\\" not in call.args[0] for call in loading.call_args_list))
         for name in embeddings.STREAMS:
             np.testing.assert_allclose(first["features"][name], second["features"][name], rtol=1e-6, atol=1e-7)
         self.assertEqual(first["features"]["bert"].shape, (2, 16))

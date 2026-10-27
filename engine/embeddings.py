@@ -6,7 +6,7 @@ import hashlib
 import inspect
 import json
 from importlib.metadata import version
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 import re
 from zipfile import BadZipFile
 from zlib import error as CompressionError
@@ -44,7 +44,13 @@ def checkpoint_digest(directory: str) -> str:
     root = relative_path(directory)
     if not root.is_dir():
         raise ValueError("A local encoder directory is missing")
-    files = sorted(path for path in root.rglob("*") if path.is_file())
+    if root.is_symlink() or getattr(root, "is_junction", lambda: False)():
+        raise ValueError("Copy complete encoder files into a local directory instead of linking a cache")
+    entries = list(root.rglob("*"))
+    if any(path.is_symlink() or getattr(path, "is_junction", lambda: False)() for path in entries):
+        raise ValueError("Copy complete encoder files into a local directory instead of linking a cache")
+    # Preserve Windows checkpoint hashes across operating systems.
+    files = sorted((path for path in entries if path.is_file()), key=lambda path: (PureWindowsPath(path.relative_to(root).as_posix()), path.relative_to(root).as_posix()))
     if not files:
         raise ValueError("An encoder directory is empty")
     checksum = hashlib.sha256()
@@ -149,6 +155,7 @@ def extract(rows: list[dict], directories: dict, batch_size: int = 64, device: s
     context(max_length)
     if set(directories) not in ({"bert", "mae", "clip"}, {"bert", "mae", "clip", "forensic"}):
         raise ValueError("Supply BERT, MAE and CLIP directories with an optional forensic CLIP")
+    directories = {name: relative_path(path).as_posix() for name, path in directories.items()}
     rows = normalize(rows)
     if not rows:
         raise ValueError("Embedding extraction requires nonempty input")
