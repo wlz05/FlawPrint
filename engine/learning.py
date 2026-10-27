@@ -185,8 +185,8 @@ def checkpoint(metadata: dict) -> NeuralConfig:
         raise ValueError("The neural checkpoint version is unsupported")
     if metadata["version"] == "flawprint-neural-v2" and metadata.get("relation_operator") != "content-conditioned-reference-v2":
         raise ValueError("The neural checkpoint relation operator is unsupported")
-    mappings = ("config", "dimensions", "normalizers", "encoder_signature", "calibration", "fit_history", "profiles", "profile_sha256")
-    if any(not isinstance(metadata[name], dict) for name in mappings) or "embedding_protocol" in metadata and not isinstance(metadata["embedding_protocol"], dict):
+    mappings = ("config", "dimensions", "normalizers", "encoder_signature", "fit_history", "profiles", "profile_sha256")
+    if any(not isinstance(metadata[name], dict) for name in mappings) or metadata["calibration"] is not None and not isinstance(metadata["calibration"], dict) or "embedding_protocol" in metadata and not isinstance(metadata["embedding_protocol"], dict):
         raise ValueError("Neural checkpoint settings must contain objects")
     order, dimensions, names = (metadata[name] for name in ("feature_order", "dimensions", "trace_names"))
     if order not in (list(embeddings.STREAMS), list(embeddings.STREAMS) + ["forensic"]) or set(dimensions) != set(order) or any(isinstance(value, bool) or not isinstance(value, int) or not 0 < value <= 8192 for value in dimensions.values()):
@@ -277,13 +277,15 @@ def fit(bundle: dict, archive: dict, output: str, config: NeuralConfig, profile_
     packet, profiles = prepare(bundle, archive, profile_config, config.folds, config.mode != "deep")
     rows = bundle["rows"]
     partitions = {role: [index for index, row in enumerate(rows) if row["split"] == role] for role in ("train", "validation", "calibration")}
-    if any(not values for values in partitions.values()):
-        raise ValueError("Neural fitting requires train, validation and calibration partitions")
+    if any(not partitions[role] for role in ("train", "validation")):
+        raise ValueError("Neural fitting requires train and validation partitions")
     source_domains = {rows[index]["domain"] for index in partitions["train"]}
     if any(rows[index]["domain"] not in source_domains for role in ("validation", "calibration") for index in partitions[role]):
         raise ValueError("Neural model selection and calibration require source domains")
     labels = {}
     for role, indices in partitions.items():
+        if not indices:
+            continue
         labels[role] = validate_labels(np.asarray([rows[index].get("label") for index in indices]))
         if role != "calibration" and len(np.unique(labels[role])) != 2:
             raise ValueError("Source training and validation require both news classes")
@@ -327,14 +329,17 @@ def fit(bundle: dict, archive: dict, output: str, config: NeuralConfig, profile_
     model.load_state_dict(best)
     validation = scored(rows, partitions["validation"], logits(model, packet, partitions["validation"], device, config.batch_size))
     calibration = scored(rows, partitions["calibration"], logits(model, packet, partitions["calibration"], device, config.batch_size))
-    state = calibrate_rows(validation, calibration)
+    state = calibrate_rows(validation, calibration) if calibration else None
     fit_rows = [rows[index] for role in ("train", "validation", "calibration") for index in partitions[role]]
     metadata = {"version": "flawprint-neural-v2", "relation_operator": "content-conditioned-reference-v2", "config": asdict(config), "dimensions": dimensions, "feature_order": list(dimensions), "trace_names": bundle["names"].tolist(), "normalizers": normalizers, "encoder_signature": signature(archive), "calibration": state, "fit_identifiers": [row["id"] for row in fit_rows], "fit_history": collect(fit_rows), "source_sha256": source_digest(), "selection_metric": "source validation macro F1", "trainable_parameters": sum(value.numel() for value in model.parameters() if value.requires_grad), "history": history, "best_validation_macro_f1": best_score, "backbones": "Frozen local feature encoders; trainable projectors, attention and heads", "target_labels_used_for_fitting": False}
     metadata["environment"] = {"python": platform.python_version(), "torch": str(torch.__version__), "numpy": np.__version__, "device": device, "cuda_runtime": torch.version.cuda, "gpu": torch.cuda.get_device_name(torch.device(device)) if torch.device(device).type == "cuda" else None}
     metadata["embedding_protocol"] = embeddings.protocol(archive)
+    metadata["partition_counts"] = {role: sum(row["split"] == role for row in rows) for role in ("train", "validation", "calibration", "profile", "test")}
+    metadata["partition_policy"] = "Preserve supplied sample identities and partition roles"
+    metadata["calibration_protocol"] = "independent_source_partitions" if state is not None else "uncalibrated"
     publish(destination, best, profiles, metadata, provenance)
     image_samples = sum(isinstance(rows[index].get("physical_manipulated"), (bool, np.bool_)) and bool(rows[index].get("image")) for index in partitions["train"]) if config.auxiliary_weight else 0
-    return {"output": output, "epochs": len(history), "best_validation_macro_f1": best_score, "trainable_parameters": metadata["trainable_parameters"], "image_supervised_samples": image_samples}
+    return {"output": output, "epochs": len(history), "best_validation_macro_f1": best_score, "trainable_parameters": metadata["trainable_parameters"], "image_supervised_samples": image_samples, "calibration_samples": len(partitions["calibration"])}
 
 def predict(bundle: dict, archive: dict, directory: str, split: str = "test", device: str = "cuda:0", reference_domain: str | None = None, explain: bool = False) -> list[dict]:
     validate_bundle(bundle)

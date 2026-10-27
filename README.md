@@ -51,7 +51,7 @@ FlawPrint/
 |-- engine/neural.py         # Residual attention and comparison modes.
 |-- engine/learning.py       # Group cross-fitting, training, and checkpoint loading.
 |-- engine/package.py        # Built-in experiment and dataset settings.
-|-- tests/                   # Data, mathematics, leakage, and workflow checks.
+|-- tests/                   # Data conversion, mathematics, and workflow tests.
 |-- README.md
 ```
 
@@ -91,22 +91,22 @@ Use the activation command for your shell. The first installation command suppli
 
 ## Datasets
 
-| Dataset | Domains | Partitions |
-|---|---|---|
-| [Weibo](https://doi.org/10.1145/3123266.3123454) | 9 | Released train, validation, and test identities |
-| [Weibo21](https://github.com/kennqiang/MDFEND-Weibo21) | 9 | Released train, validation, and test identities |
-| [FineFake](https://github.com/Accuser907/FineFake) | 7 | Fixed 60% / 20% / 20%, split seed 3407 |
+| Dataset | Domains | Train / validation / test files | Partition protocol |
+|---|---|---|---|
+| [Weibo](https://doi.org/10.1145/3123266.3123454) | 9 | `./data/train_origin.csv`, `./data/val_origin.csv`, `./data/test_origin.csv` | Prepared benchmark partitions |
+| [Weibo21](https://github.com/kennqiang/MDFEND-Weibo21) | 9 | `./weibo21/train_datasets.xlsx`, `./weibo21/val_datasets.xlsx`, `./weibo21/test_datasets.xlsx` | Prepared MDFEND-Weibo21 partitions |
+| [FineFake](https://github.com/Accuser907/FineFake) | 7 | `./FineFake/train.csv`, `./FineFake/val.csv`, `./FineFake/test.csv` | Label-stratified 60% / 20% / 20%, partition seed 3407 |
 
-Dataset partitions remain fixed across experiment seeds. Preserve released holdout identities when using the official protocol. Source validation and calibration identities are separate. Domain-reference pools are independent of evaluation samples. Keep events, original images, and duplicate content disjoint; validate the actual release before running. The `experiment` preset in [engine/package.py](engine/package.py) records dataset paths and experiment settings.
+Use these existing partition files for every run. Training seeds **42, 52, 3047, and 3407** change model initialization and training order; sample identities and partition membership stay fixed. FineFake's partition seed 3407 is separate from the training seed. The [experiment preset](engine/package.py) records the paths, label conventions, partition policy, and runtime settings.
 
-The [split audit](engine/data.py) rejects cross-partition event, image-path, image-byte, and normalized-text overlap. Text fingerprints normalize Unicode NFC and whitespace. Available image files are hashed even when a manifest omits `content_sha256`; supplied hashes must match those bytes. For a custom split, connected event/image/text components are assigned together, with the same seed giving the same result after row reordering. A component crossing source and target domains stops the split. Assign paraphrases, reencoded images, and augmentations their original event or image group before splitting.
+Weibo and Weibo21 annotations use **0 = real, 1 = fake**. FineFake annotations use **0 = fake, 1 = real**; conversion maps them to the common FlawPrint convention **0 = real, 1 = fake**. The seven FineFake domain slots include `Uncategorized`.
 
 ## Prepare Data
 
 Run commands from the repository root. All image, model, and output paths are relative to that directory. Canonical labels are **0 = real, 1 = fake**.
 
 ```json
-{"id":"news001","image":"./data/images/news001.jpg","text":"Example news text.","domain":"politics","group":"event001","split":"test","label":1}
+{"id":"news001","image":"./data/images/news001.jpg","text":"Example news text.","domain":"Politics","group":"event001","split":"test","label":1}
 ```
 
 | Field | Meaning |
@@ -114,7 +114,7 @@ Run commands from the repository root. All image, model, and output paths are re
 | `id` | Unique stable string shared by all feature caches |
 | `image` / `text` | Relative image path or empty string; original news text |
 | `domain` / `group` | Domain and event or duplicate-group identity |
-| `split` | `train`, `validation`, `calibration`, `profile`, or `test` |
+| `split` | Standard `train`, `validation`, or `test`; optional `calibration` and `profile` |
 | `label` | News-veracity label; absent from target profile rows |
 | `physical_manipulated` | Optional independently observed Boolean image attribute |
 | `content_sha256` | Image-byte fingerprint populated by extraction |
@@ -127,21 +127,23 @@ python -B convert.py ./weibo21/train_datasets.xlsx --dataset Weibo21 --mapping b
 python -B convert.py ./FineFake/train.csv --dataset FineFake --mapping builtin:finefake --split train --output ./FineFake/train.jsonl
 ```
 
-Repeat [conversion](convert.py) for the other partitions with their matching `--split`. Keep source validation and calibration groups separate. Dataset selection normalizes names to lowercase. JSONL, NDJSON, JSON, CSV, TSV, Excel, and Parquet are supported. For the Weibo example, merge the converted partitions as canonical records, then validate and extract:
+Convert each existing file with its matching `--split`. Dataset selection normalizes names to lowercase. JSONL, NDJSON, JSON, CSV, TSV, Excel, and Parquet are supported. The complete Weibo conversion and cache workflow is:
 
 ```bash
-python -B convert.py ./data/weibo_train.jsonl ./data/weibo_validation.jsonl ./data/weibo_calibration.jsonl ./data/weibo_test.jsonl --dataset canonical --output ./data/manifest.jsonl
+python -B convert.py ./data/val_origin.csv --dataset weibo --mapping builtin:weibo --split validation --output ./data/weibo_validation.jsonl
+python -B convert.py ./data/test_origin.csv --dataset weibo --mapping builtin:weibo --split test --output ./data/weibo_test.jsonl
+python -B convert.py ./data/weibo_train.jsonl ./data/weibo_validation.jsonl ./data/weibo_test.jsonl --dataset canonical --output ./data/manifest.jsonl
 python -B main.py validate ./data/manifest.jsonl --benchmark --check-images --output ./outputs/preflight.json
 python -B main.py extract ./data/manifest.jsonl --workers 1 --output ./data/features.npz
 ```
 
-Use the corresponding converted paths for Weibo21 and FineFake. Canonical merging preserves the converted 0-real/1-fake labels and partition roles. IDs must remain unique across files; duplicate IDs or shared groups across partitions stop the merge. Include independent target `profile` files in the same merge for held-out-domain runs. For source domains, training groups supply the physical reference through cross-fitting. A domain cannot supply both source training rows and target-profile rows in the same neural run.
+Use the corresponding files from the dataset table for Weibo21 and FineFake. Conversion and merging retain sample IDs and the supplied partition roles. Frozen deep encoders and deterministic trace extraction produce reusable caches for those same records. Source training groups supply the domain reference through cross-fitting. Separately supplied target-reference records use the optional `profile` role.
 
 Configuration defaults are built in. Use `--config builtin:default` for standard profiling, `--config builtin:quick` for the synthetic check, and `--config builtin:seed42` for the corresponding experiment seed. Neural training defaults to `builtin:neural`. Dataset conversion selects `builtin:weibo`, `builtin:weibo21`, or `builtin:finefake` through `--mapping`; the mappings declare the released label direction explicitly. A custom relative JSON path remains supported for each configuration option.
 
 ## Pretrained Encoders
 
-Place complete Hugging Face checkpoints, tokenizer assets, and processor files in `./models/bert`, `./models/mae`, and `./models/clip`. Extraction reads local files only through Transformers' [offline loading](https://huggingface.co/docs/transformers/installation#offline-mode). For Chinese input, compatible checkpoint families include [BERT-base-Chinese](https://huggingface.co/google-bert/bert-base-chinese), [ViT-MAE-base](https://huggingface.co/facebook/vit-mae-base), and [Chinese-CLIP](https://huggingface.co/OFA-Sys/chinese-clip-vit-base-patch16). Use language-matched BERT and CLIP checkpoints for other languages, and keep their exact files fixed within a comparison.
+Place complete Hugging Face checkpoints, tokenizer assets, and processor files in `./models/bert`, `./models/mae`, and `./models/clip`. Extraction reads local files only through Transformers' [offline loading](https://huggingface.co/docs/transformers/installation#offline-mode). For Chinese input, compatible checkpoint families include [Chinese RoBERTa-wwm-ext](https://huggingface.co/hfl/chinese-roberta-wwm-ext), [ViT-MAE-base](https://huggingface.co/facebook/vit-mae-base), and [Chinese-CLIP](https://huggingface.co/OFA-Sys/chinese-clip-vit-base-patch16). Use language-matched BERT and CLIP checkpoints for other languages, and keep their exact files fixed within a comparison.
 
 `deep.py` retains the BERT and MAE class-token vectors and both projected CLIP vectors. MAE uses all patches in fixed order. BERT and CLIP text are truncated to the smaller of the requested length, tokenizer limit, and checkpoint context. The archive records the requested and effective lengths, vector readouts, encoder hashes, availability masks, identities, and image checksums. Cache replacement is atomic; failed writes preserve an existing archive.
 
@@ -149,26 +151,26 @@ Place complete Hugging Face checkpoints, tokenizer assets, and processor files i
 python -B deep.py extract ./data/manifest.jsonl --bert ./models/bert --mae ./models/mae --clip ./models/clip --batch-size 64 --max-length 197 --device cuda:0 --output ./data/deep.npz
 ```
 
-Add `--forensic ./models/forensic` for a separately trained, Hugging Face-compatible forensic CLIP image encoder. This interface reads pooled image features; raw external checkpoints require conversion to the supported model format. Every compared mode must use the same encoder set. After changing image bytes through editing, JPEG compression, or resizing, regenerate both physical and deep features. Preflight and both extractors reject a stale `content_sha256`. Split auditing resolves image-path aliases before comparing file identities.
+Add `--forensic ./models/forensic` for a separately trained, Hugging Face-compatible forensic CLIP image encoder. This interface reads pooled image features. Every compared mode uses the same encoder set and cached sample identities. Image edits, JPEG compression, or resizing are followed by extraction of both physical and deep features.
 
 ## Train and Predict
 
-The pretrained encoders are frozen. The [training pipeline](engine/learning.py) learns projections, residual attention, and the news head from source news labels. Source event/image/text components define cross-fitting folds; source training alone fits feature standardizers. Validation selects the checkpoint and fits probability calibration; a separate calibration partition fits prediction sets. Domain profiles fit one `train` or independent `profile` partition. Calibration commands check their recorded validation/calibration roles, and genuine-threshold fitting accepts validation rows only. Target test labels do not enter fitting or model selection.
+The [training pipeline](engine/learning.py) consumes the cached records with their supplied `train`, `validation`, and `test` roles. Encoders remain frozen. Each epoch shuffles training indices with the run seed and samples mini-batches of 64 records; a final smaller batch is retained. Training records fit the feature standardizers and source references, and train the projections, residual attention, and news head. After each epoch, validation Macro-F1 selects the checkpoint and controls early stopping with patience 5. The selected checkpoint is then used for the final test run.
 
 ```bash
-python -B deep.py train ./data/features.npz ./data/deep.npz --dataset Weibo21 --config builtin:neural --profile-config builtin:default --seed 42 --mode coupled --device cuda:0 --output ./models/neural42
+python -B deep.py train ./data/features.npz ./data/deep.npz --dataset weibo --config builtin:neural --profile-config builtin:default --seed 42 --mode coupled --device cuda:0 --output ./models/neural42
 python -B deep.py predict ./data/features.npz ./data/deep.npz --model ./models/neural42 --split test --device cuda:0 --output ./outputs/neural42/predictions.jsonl
 ```
 
 Run the other experiment seeds with separate model directories:
 
 ```bash
-python -B deep.py train ./data/features.npz ./data/deep.npz --dataset Weibo21 --seed 52 --mode coupled --output ./models/neural52
-python -B deep.py train ./data/features.npz ./data/deep.npz --dataset Weibo21 --seed 3047 --mode coupled --output ./models/neural3047
-python -B deep.py train ./data/features.npz ./data/deep.npz --dataset Weibo21 --seed 3407 --mode coupled --output ./models/neural3407
+python -B deep.py train ./data/features.npz ./data/deep.npz --dataset weibo --seed 52 --mode coupled --output ./models/neural52
+python -B deep.py train ./data/features.npz ./data/deep.npz --dataset weibo --seed 3047 --mode coupled --output ./models/neural3047
+python -B deep.py train ./data/features.npz ./data/deep.npz --dataset weibo --seed 3407 --mode coupled --output ./models/neural3407
 ```
 
-Predict each checkpoint and report mean and sample standard deviation across the four seeds. The model directory stores `parameters.pt`, `model.json`, `profiles/`, and CLI `provenance.json`. Weights, references, model metadata, and CLI provenance are written in a sibling staging directory and published together after input hashes are rechecked. Input changes or interrupted writes discard that staging directory. Publication rejects a destination occupied by another run; an existing empty directory is supported. Predictions include calibrated news output, method mode, and reference availability. Labeled predictions also produce a `.report.json` metric file. Loading checks encoder/schema/weight/reference hashes and rejects identities or known lineage used for training, validation, or calibration. New checkpoints also store the feature-extraction protocol and reject query caches with changed truncation or readout settings. `embedding_protocol_verified` reports whether the stored protocol is complete. Older checkpoints remain loadable and report this field as false when that record is absent.
+Use `--dataset weibo21` or `--dataset finefake` with that dataset's prepared caches for the other benchmarks. Predict each selected checkpoint on the same test identities and report mean and sample standard deviation across the four seeds. The model directory stores `parameters.pt`, `model.json`, `profiles/`, and CLI `provenance.json`. Metadata records the run seed, settings, partition counts, encoder protocol, and input hashes. Labeled test predictions produce a `.report.json` metric file. The standard three-partition workflow outputs the news-head decision and sigmoid probability. An additional supplied `calibration` partition enables probability calibration and prediction sets as a separate evaluation option.
 
 ## Baselines and Ablations
 
@@ -213,6 +215,7 @@ New checkpoints use `flawprint-neural-v2` and record the relation operator. Exis
 | GPU / seeds | Single RTX 4090 / 42, 52, 3047, 3407 |
 | Maximum epochs / batch size | 50 / 64 |
 | Optimizer / learning rate / weight decay | [AdamW](https://docs.pytorch.org/docs/stable/generated/torch.optim.AdamW.html) / 0.0001 / 0.00005 |
+| Learning-rate schedule | Constant |
 | Source selection / patience | Validation macro F1 / 5 epochs |
 | Maximum text length | 197, limited by each encoder's context |
 | Projected width / heads / layers | 128 / 4 / 2 |
@@ -248,30 +251,28 @@ Provide frozen news logits increasing toward fake news, join by exact identity, 
 ```bash
 python -B main.py join ./data/manifest.jsonl ./data/semantic.jsonl --score-key logit --output ./data/semantic_manifest.jsonl
 python -B main.py extract ./data/semantic_manifest.jsonl --output ./data/semantic_features.npz
-python -B main.py benchmark ./data/semantic_features.npz --dataset Weibo21 --config builtin:seed42 --ablations --output ./outputs/seed42
+python -B main.py benchmark ./data/semantic_features.npz --dataset weibo --config builtin:seed42 --ablations --output ./outputs/seed42
 ```
 
 Repeat with `builtin:seed52`, `builtin:seed3047`, and `builtin:seed3407` and their matching outputs. Built-in controls include TraceLR, MarginalNB, SingleTrace, CharTFIDF, GaussianNovelty, FrozenSemantic, TraceRBF, ImageRBF, and both RBF fusion variants. Deterministic FlawPrint variants are `copula_only`, `sign_only`, `physical_full`, and `flawprint_fusion`.
 
 ```bash
-python -B main.py profile ./data/semantic_features.npz --domain politics --split profile --config builtin:seed42 --output ./models/politics.json
-python -B main.py predict ./data/semantic_features.npz --profile ./models/politics.json --domain politics --split test --fusion --explain --output ./outputs/deterministic.jsonl
+python -B main.py profile ./data/semantic_features.npz --domain Politics --split train --config builtin:seed42 --output ./models/politics.json
+python -B main.py predict ./data/semantic_features.npz --profile ./models/politics.json --domain Politics --split test --fusion --explain --output ./outputs/deterministic.jsonl
 python -B main.py evaluate ./outputs/deterministic.jsonl --seed 42 --output ./outputs/evaluation.json
 ```
 
 `copula_score` and `physical_evidence` increase toward reference support. `physical_risk`, `semantic_logit`, and `fusion_risk` increase toward fake news. Deterministic fusion takes the larger available risk; CRA uses its trained joint head. `main.py deploy` and `main.py calibrate` provide deterministic routing and separate source calibration.
 
-## Input and Artifact Checks
+## Execution Flow
 
-Physical and deep NPZ caches use atomic replacement. Their loaders reject malformed archives, accept UTF-8 metadata strings or bytes, and close input files on failure. JSON manifests, configuration, cache metadata, and serialized table fields reject duplicate keys and nonfinite numbers, including exponent overflow. Malformed CSV reports the physical line number. Diagnostic scores and Boolean fields retain their types through CSV, TSV, and JSONL conversion.
-
-Conversion, extraction, and neural prediction protect referenced source images from output and report collisions, including hard-link aliases. Physical extraction also protects its derived provenance path. Samples need text or an image; conversion and preflight reject empty records, and deep extraction checks them before loading encoders. Both extractors require an explicit still-image conversion for animated or multipage inputs. Physical NPZ loading decodes UTF-8 byte feature names to the same text schema used during training.
-
-News labels require explicit numeric classes. Boolean labels and complex-valued numeric inputs are rejected. Source standardization checks float32 representability before inference, with missing streams kept at zero. Profile and calibration settings distinguish numeric parameters from Boolean metadata.
-
-Checkpoint loading validates metadata and checks parameter names, shapes, types, finite values, and the weight hash before inference. Each inference batch must return one finite risk per selected sample; diagnostics must align with the same samples. Explanation differences use higher precision to avoid float32 subtraction overflow. The prediction command validates metrics before replacing existing predictions.
-
-New profile, training, and calibration histories store text fingerprints alongside event, image, and content identities. Reidentifying a fitted news text does not bypass the recorded overlap checks. Older histories remain loadable and retain checks for the evidence they recorded; new text checks require rebuilding artifacts that lack those fingerprints.
+| Stage | Input | Operation | Output |
+|---|---|---|---|
+| Data preparation | Existing train / validation / test annotation files | Normalize schema and label direction; retain identities and roles | Canonical manifest |
+| Feature caching | Manifest and frozen local encoders | Extract deterministic traces and BERT / MAE / CLIP vectors | Physical and deep NPZ caches |
+| Training | Training cache rows | Fit source statistics and references; shuffle training mini-batches per epoch | Updated model parameters |
+| Model selection | Validation cache rows | Select maximum Macro-F1; stop after 5 epochs without improvement | Selected model |
+| Final evaluation | Test cache rows and selected model | Predict once per run seed; compute classification metrics | Per-seed predictions and metric reports |
 
 ## Additional Analysis
 
@@ -286,4 +287,4 @@ python -B main.py theory --seed 42 --output ./outputs/theory.json
 python -B main.py invariance --seed 42 --output ./outputs/invariance.json
 ```
 
-The [regression suite](tests/) runs through [test.py](test.py) and covers local transformer extraction, checkpoint reload, missing inputs, reference overlap, target-label isolation, equal-summary relation controls, bounded query-conditioned lifting, legacy reload, gradient flow, and all nine neural modes. Synthetic fixtures and randomly initialized small local encoders verify implementation behavior; real-data benchmark results are recorded separately.
+The [regression suite](tests/) runs through [test.py](test.py) and covers data conversion, cached encoders, training, checkpoint reload, inference, and the comparison modes.

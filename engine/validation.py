@@ -56,7 +56,7 @@ def preflight(records: list[dict], check_images: bool = False, benchmark: bool =
     if splits["unspecified"]:
         (errors if benchmark else warnings).append("Unspecified splits require an explicit split workflow before benchmarking")
     if benchmark:
-        for split in ("train", "validation", "calibration", "test"):
+        for split in ("train", "validation", "test"):
             members = splits[split]
             if not members:
                 errors.append(f"The benchmark requires a nonempty {split} partition")
@@ -64,6 +64,8 @@ def preflight(records: list[dict], check_images: bool = False, benchmark: bool =
                 errors.append(f"Every {split} sample requires a canonical binary label")
             if split in ("train", "validation") and {row.get("label") for row in members} != {0, 1}:
                 errors.append(f"The {split} partition requires both classes")
+        if any("label" not in row for row in splits["calibration"]):
+            errors.append("Every optional calibration sample requires a canonical binary label")
         domains = sorted({row["domain"] for row in rows})
         for domain in domains:
             training = [row for row in splits["train"] if row["domain"] == domain]
@@ -104,7 +106,7 @@ def preflight(records: list[dict], check_images: bool = False, benchmark: bool =
         leaking = [checksum for checksum, partitions in hashes.items() if len(partitions) > 1]
         if leaking:
             errors.append(f"Image bytes cross splits under {len(leaking)} content hashes")
-    return {"version": "FlawPrint preflight 1", "passed": not errors, "errors": errors, "warnings": warnings, "samples": len(rows), "counts": {key: dict(value) for key, value in sorted(counts.items())}, "missing_images": missing_images, "empty_text": empty_text, "semantic_scores": semantic, "audit": audit, "image_check_requested": check_images, "images": image_report, "benchmark_check_requested": benchmark, "minimum_profile_size": min_samples, "label_contract": "zero-real-one-fake", "path_base": "process working directory"}
+    return {"version": "FlawPrint preflight 1", "passed": not errors, "errors": errors, "warnings": warnings, "samples": len(rows), "counts": {key: dict(value) for key, value in sorted(counts.items())}, "missing_images": missing_images, "empty_text": empty_text, "semantic_scores": semantic, "audit": audit, "image_check_requested": check_images, "images": image_report, "benchmark_check_requested": benchmark, "minimum_profile_size": min_samples, "calibration_available": bool(splits["calibration"]), "label_contract": "zero-real-one-fake", "path_base": "process working directory"}
 
 # Author: Weiliang Zhu
 # Email: wlzchina05@gmail.com

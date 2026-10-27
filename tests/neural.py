@@ -52,6 +52,73 @@ class NeuralTests(unittest.TestCase):
         self.temporary.cleanup()
         torch.set_num_threads(self.threads)
 
+    def source_data(self, roles: tuple = ("train", "validation", "calibration", "test")) -> tuple[dict, dict]:
+        selected = [index for index, row in enumerate(self.bundle["rows"]) if row["domain"].startswith("source") and row["split"] in roles]
+        bundle = subset(self.bundle, selected)
+        archive = copy.deepcopy(self.archive)
+        archive["rows"] = [archive["rows"][index] for index in selected]
+        archive["features"] = {name: values[selected] for name, values in archive["features"].items()}
+        archive["observed"] = archive["observed"][selected]
+        return bundle, archive
+
+    def test_three_partition_training_preserves_roles_and_uses_uncalibrated_outputs(self) -> None:
+        bundle, archive = self.source_data(("train", "validation", "test"))
+        before = copy.deepcopy(bundle["rows"])
+        output = self.root / "official"
+        result = fit(bundle, archive, output.as_posix(), replace(self.config, epochs=1), self.profile, "cpu")
+        metadata = read_json(output / "model.json")
+        self.assertEqual(bundle["rows"], before)
+        self.assertIsNone(metadata["calibration"])
+        self.assertEqual(metadata["calibration_protocol"], "uncalibrated")
+        self.assertEqual(result["calibration_samples"], 0)
+        self.assertEqual(metadata["partition_counts"], {role: sum(row["split"] == role for row in before) for role in ("train", "validation", "calibration", "profile", "test")})
+        rows = predict(bundle, archive, output.as_posix(), device="cpu")
+        self.assertEqual([row["id"] for row in rows], [row["id"] for row in before if row["split"] == "test"])
+        for row in rows:
+            self.assertFalse(row["probability_calibrated"])
+            self.assertIsNone(row["prediction_set"])
+            self.assertFalse(row["abstain"])
+            self.assertEqual(row["prediction"], int(row["fusion_risk"] >= 0))
+
+    def test_four_training_seeds_keep_the_same_frozen_partitions(self) -> None:
+        bundle, archive = self.source_data(("train", "validation", "test"))
+        before = copy.deepcopy(bundle["rows"])
+        identities = [row["id"] for role in ("train", "validation") for row in before if row["split"] == role]
+        for seed in (42, 52, 3047, 3407):
+            with self.subTest(seed=seed):
+                output = self.root / ("seed" + str(seed))
+                fit(bundle, archive, output.as_posix(), replace(self.config, seed=seed, epochs=1), self.profile, "cpu")
+                metadata = read_json(output / "model.json")
+                self.assertEqual(metadata["config"]["seed"], seed)
+                self.assertEqual(metadata["fit_identifiers"], identities)
+                self.assertEqual(bundle["rows"], before)
+
+    def test_optional_calibration_does_not_change_the_trained_checkpoint(self) -> None:
+        plain, plain_archive = self.source_data(("train", "validation", "test"))
+        calibrated, calibrated_archive = self.source_data()
+        outputs = self.root / "plain", self.root / "calibrated"
+        for bundle, archive, output in ((plain, plain_archive, outputs[0]), (calibrated, calibrated_archive, outputs[1])):
+            fit(bundle, archive, output.as_posix(), replace(self.config, epochs=1), self.profile, "cpu")
+        first, second = [torch.load(output / "parameters.pt", map_location="cpu", weights_only=True) for output in outputs]
+        for name in first:
+            torch.testing.assert_close(first[name], second[name], rtol=0, atol=0)
+        one = predict(plain, plain_archive, outputs[0].as_posix(), device="cpu")
+        two = predict(calibrated, calibrated_archive, outputs[1].as_posix(), device="cpu")
+        np.testing.assert_array_equal([row["fusion_risk"] for row in one], [row["fusion_risk"] for row in two])
+        self.assertTrue(all(row["probability_calibrated"] and row["prediction_set"] is not None for row in two))
+
+    def test_training_still_requires_source_train_and_validation_roles(self) -> None:
+        for roles in (("train", "test"), ("validation", "test")):
+            bundle, archive = self.source_data(roles)
+            with self.subTest(roles=roles):
+                with self.assertRaisesRegex(ValueError, "requires train and validation"):
+                    fit(bundle, archive, (self.root / "missing").as_posix(), self.config, self.profile, "cpu")
+
+    def test_builtin_neural_defaults_match_the_runtime_dataclass(self) -> None:
+        from engine.package import configuration
+        self.assertEqual(configuration("builtin:neural"), asdict(NeuralConfig()))
+        self.assertEqual(configuration("builtin:experiment")["seeds"], [42, 52, 3047, 3407])
+
     def test_embedding_roundtrip_and_identity_alignment(self) -> None:
         path = self.root / "features.npz"
         embeddings.save(path.as_posix(), self.archive)

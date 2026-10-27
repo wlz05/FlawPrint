@@ -52,6 +52,16 @@ PRESETS = {
             'device': 'cuda:0'
         },
         'seeds': [42, 52, 3047, 3407],
+        'partition_policy': {
+            'mode': 'preserve_predefined',
+            'required_roles': ['train', 'validation', 'test'],
+            'optional_roles': ['calibration', 'profile'],
+            'resplit_per_seed': False,
+            'validation_use': 'Checkpoint selection and early stopping',
+            'test_use': 'Final evaluation only',
+            'calibration_use': 'Optional independent labeled source calibration',
+            'profile_use': 'Optional independent unlabeled target reference'
+        },
         'semantic_backbone': {
             'epochs': 50,
             'batch_size': 64,
@@ -66,21 +76,28 @@ PRESETS = {
                 'train': './data/train_origin.csv',
                 'validation': './data/val_origin.csv',
                 'test': './data/test_origin.csv',
-                'domains': 9
+                'domains': 9,
+                'input_labels': 'fake-one',
+                'split_source': 'Existing prepared benchmark annotations'
             },
             'weibo21': {
                 'train': './weibo21/train_datasets.xlsx',
                 'validation': './weibo21/val_datasets.xlsx',
                 'test': './weibo21/test_datasets.xlsx',
-                'domains': 9
+                'domains': 9,
+                'input_labels': 'fake-one',
+                'split_source': 'Existing prepared benchmark annotations'
             },
             'finefake': {
                 'train': './FineFake/train.csv',
                 'validation': './FineFake/val.csv',
                 'test': './FineFake/test.csv',
                 'domains': 7,
+                'input_labels': 'real-one',
+                'split_source': 'Existing label-stratified split files',
                 'split_ratio': [0.6, 0.2, 0.2],
-                'split_seed': 3407
+                'split_seed': 3407,
+                'stratify': 'label'
             }
         },
         'metrics': [
@@ -91,7 +108,8 @@ PRESETS = {
             'real_precision',
             'real_recall',
             'real_f1',
-            'macro_f1'
+            'macro_f1',
+            'auc'
         ],
         'neural_extension': {
             'name': 'FlawPrint-CRA',
@@ -160,7 +178,7 @@ PRESETS = {
         'path_base': 'Repository working directory',
         'physical_channel_device': 'cpu',
         'optional_semantic_device': 'cuda:0',
-        'split_policy': 'Reuse frozen split identities across seeds unless the experimental protocol explicitly resamples splits'
+        'split_policy': 'Reuse frozen split identities across all training seeds'
     },
     'schema': {
         '$schema': 'https://json-schema.org/draft/2020-12/schema',

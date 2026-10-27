@@ -231,6 +231,21 @@ class WorkflowTests(unittest.TestCase):
         result = binary(np.array([0, 0]), np.array([-1, 1]))
         self.assertIsNone(result["auc"])
 
+    def test_three_partition_benchmark_preserves_the_supplied_samples(self) -> None:
+        selected = [index for index, row in enumerate(self.bundle["rows"]) if row["domain"].startswith("source") and row["split"] in ("train", "validation", "test")]
+        bundle = subset(self.bundle, selected)
+        before = copy.deepcopy(bundle["rows"])
+        output = self.root / "official"
+        result = benchmark(bundle, output.as_posix(), replace(self.config, bootstrap=2), bootstraps=20)
+        self.assertEqual(bundle["rows"], before)
+        states = read_json(output / "calibration.json")
+        self.assertTrue(result["methods"])
+        for state in states.values():
+            self.assertEqual(state["version"], "flawprint-probability-v1")
+            self.assertIsNone(state["conformal"])
+        for method, metrics in result["methods"].items():
+            self.assertEqual(metrics["samples"], sum(row["split"] == "test" for row in before))
+
     def test_complete_benchmark_runs_controls_and_ablations(self) -> None:
         result = benchmark(self.bundle, (self.root / "benchmark").as_posix(), self.config, bootstraps=2, ablations=True)
         self.assertIn("flawprint_fusion", result["methods"])

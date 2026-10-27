@@ -561,6 +561,60 @@ class FormatTests(unittest.TestCase):
             first["columns"]["id"] = "changed"
             self.assertEqual(configuration("builtin:conversion")["columns"]["id"], "news_id")
 
+    def test_experiment_metadata_preserves_predefined_dataset_protocols(self) -> None:
+        from engine.package import configuration
+        settings = configuration("builtin:experiment")
+        self.assertEqual(settings["partition_policy"]["required_roles"], ["train", "validation", "test"])
+        self.assertFalse(settings["partition_policy"]["resplit_per_seed"])
+        self.assertEqual(settings["hardware"]["gpu_count"], 1)
+        self.assertEqual(settings["hardware"]["gpu"], "NVIDIA GeForce RTX 4090")
+        for name, domains, convention in (("weibo", 9, "fake-one"), ("weibo21", 9, "fake-one"), ("finefake", 7, "real-one")):
+            protocol = settings["partitions"][name]
+            self.assertEqual(protocol["domains"], domains)
+            self.assertEqual(protocol["input_labels"], convention)
+            self.assertEqual(configuration("builtin:" + name)["labels"], convention)
+            self.assertEqual(len({protocol[role] for role in ("train", "validation", "test")}), 3)
+            self.assertTrue(all(not Path(protocol[role]).is_absolute() for role in ("train", "validation", "test")))
+        finefake = settings["partitions"]["finefake"]
+        self.assertEqual(finefake["split_ratio"], [0.6, 0.2, 0.2])
+        self.assertEqual(finefake["split_seed"], 3407)
+        self.assertEqual(finefake["stratify"], "label")
+        self.assertIn("auc", settings["metrics"])
+
+    def test_preflight_accepts_three_frozen_partitions_without_calibration(self) -> None:
+        bundle = fixture(per_split=12)
+        rows = [row for row in bundle["rows"] if row["domain"].startswith("source") and row["split"] in ("train", "validation", "test")]
+        before = copy.deepcopy(rows)
+        report = preflight(rows, benchmark=True, min_samples=12)
+        self.assertTrue(report["passed"], report["errors"])
+        self.assertFalse(report["calibration_available"])
+        self.assertEqual(rows, before)
+        rows.append(dict(rows[0], id="independent", group="independent", text="Independent source calibration.", image="", split="calibration"))
+        rows[-1].pop("label")
+        self.assertFalse(preflight(rows, benchmark=True, min_samples=12)["passed"])
+
+    def test_readme_runtime_settings_match_builtin_defaults(self) -> None:
+        from engine.package import configuration
+        import deep
+        settings = configuration("builtin:experiment")["semantic_backbone"]
+        neural = configuration("builtin:neural")
+        for recorded, runtime in (("epochs", "epochs"), ("batch_size", "batch_size"), ("learning_rate", "learning_rate"), ("weight_decay", "weight_decay"), ("early_stopping_patience", "patience")):
+            self.assertEqual(settings[recorded], neural[runtime])
+        with patch.object(sys, "argv", ["deep.py", "extract", "./manifest.jsonl", "--bert", "./bert", "--mae", "./mae", "--clip", "./clip"]):
+            args = deep.arguments()
+        self.assertEqual(args.max_length, settings["max_text_length"])
+        table = {}
+        for line in Path("README.md").read_text(encoding="utf-8").splitlines():
+            if line.startswith("|"):
+                cells = [value.strip() for value in line.strip("|").split("|")]
+                if len(cells) == 2:
+                    table[cells[0]] = cells[1]
+        self.assertEqual(table["Maximum epochs / batch size"], f"{neural['epochs']} / {neural['batch_size']}")
+        self.assertEqual(table["Source selection / patience"], f"Validation macro F1 / {neural['patience']} epochs")
+        self.assertTrue(table["Maximum text length"].startswith(str(args.max_length)))
+        self.assertIn(str(neural["learning_rate"]), table["Optimizer / learning rate / weight decay"])
+        self.assertIn(f"{neural['weight_decay']:.5f}", table["Optimizer / learning rate / weight decay"])
+
     def test_unknown_and_external_configurations_keep_strict_errors(self) -> None:
         from engine.package import configuration, configuration_record
         with self.assertRaisesRegex(ValueError, "Unknown built-in"):

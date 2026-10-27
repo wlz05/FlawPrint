@@ -102,8 +102,8 @@ def benchmark(bundle: dict, output: str, config: ProfileConfig, alpha: float = 0
     validation = subset(bundle, indices(bundle, "validation"))
     calibration = subset(bundle, indices(bundle, "calibration"))
     test = subset(bundle, indices(bundle, "test"))
-    if min(len(train["rows"]), len(validation["rows"]), len(calibration["rows"]), len(test["rows"])) < 1:
-        raise ValueError("Benchmark requires train, validation, calibration, and test splits")
+    if min(len(train["rows"]), len(validation["rows"]), len(test["rows"])) < 1:
+        raise ValueError("Benchmark requires train, validation, and test splits")
     output_path = relative_path(output)
     start = time.perf_counter()
     profiles = fit_profiles(bundle, config)
@@ -113,7 +113,7 @@ def benchmark(bundle: dict, output: str, config: ProfileConfig, alpha: float = 0
         profile.save((output_path / "profiles" / f"{safe_name}.json").as_posix())
     reports, states, predictions, timing, skipped = {}, {}, {}, {}, {}
     def record(name: str, first: list[dict], second: list[dict], third: list[dict], seconds: float) -> None:
-        rows, state = probability_rows(first, second, third, alpha)
+        rows, state = probability_rows(first, second, third, alpha, conformal=bool(second))
         result = evaluate(rows)
         result["bootstrap"] = group_bootstrap(rows, repeats=bootstraps, seed=config.seed)
         if all("semantic_logit" in row and "physical_risk" in row for row in rows):
@@ -129,7 +129,7 @@ def benchmark(bundle: dict, output: str, config: ProfileConfig, alpha: float = 0
             continue
         start = time.perf_counter()
         baseline = Baseline.fit(method, train, validation, config.seed)
-        first, second, third = [named_risk(part, baseline.predict(part)) for part in (validation, calibration, test)]
+        first, second, third = [named_risk(part, baseline.predict(part)) if part["rows"] else [] for part in (validation, calibration, test)]
         record(method, first, second, third, time.perf_counter() - start)
         states[method]["method"] = method
         if baseline.fit_state is not None:
