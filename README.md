@@ -1,6 +1,6 @@
 # FlawPrint: Cross-Domain Multimodal Fake News Detection via Copula Residuals of Physical Imperfection Traces
 
-**FlawPrint-CRA** learns how domain-referenced trace relationships condition news interactions. An independent domain pool defines pairwise copula residuals. Each content query selects trace coordinates, and the residual matrix is lifted into content-dependent attention through `B = U Gbar U^T`.
+**FlawPrint-CRA** uses domain-referenced trace relationships to change the relative support between candidate evidence nodes. An independent domain pool defines pairwise copula residuals. Each content query selects trace coordinates, and the residual matrix is lifted into content-dependent attention through `B = U Gbar U^T`.
 
 The deterministic FlawPrint baseline achieves **state-of-the-art performance on Weibo, Weibo21, and FineFake**. The content-conditioned CRA results are recorded separately. Experiment settings use a **single NVIDIA GeForce RTX 4090** and seeds **42, 52, 3047, and 3407**.
 
@@ -32,7 +32,7 @@ Independent pool --> Frozen ranks and domain copula      |
 4. **Read relations through content.** Each attention head reuses its query/key scores to assign a distribution over available trace anchors. The lifted matrix `U Gbar U^T` supplies distinct content-to-content, content-to-trace, and trace-to-trace interaction conditions.
 5. **Learn the news decision.** Residual attention updates the nodes and the news head reads the class node. Source news labels train projections and interactions; separately observed manipulation labels supervise an optional image head.
 
-The core operation is the reference-conditioned relation readout in step 4. The encoder family supplies content representations. The reference defines measured support, and the current query determines which relationships enter each interaction. The mapping adds no separate gating-network parameters.
+The core operation is the reference-conditioned relation readout in step 4. At a fixed attention layer, the reference changes the preference between keys b and c by `lambda * u_a^T Gbar (u_b - u_c)`. A shared row offset cancels in softmax, so relation magnitude alone does not describe its effect on evidence selection. The encoder family supplies content representations. The reference defines measured support, and the current query determines which relationships enter each interaction. The mapping adds no separate gating-network parameters.
 
 ## Project Structure
 
@@ -177,11 +177,14 @@ Predict each checkpoint and report mean and sample standard deviation across the
 | `unbiased` | Rank and residual contributions | Ordinary attention |
 | `coupled` | Rank and residual contributions | Content-conditioned reference lifting |
 | `concat` | The same rank and residual tokens | Flattened projections and MLP |
+| `uniform` | The same rank and residual tokens | Uniform trace responsibilities within the same full readout |
 | `broadcast` | The same tokens | Shared row-summary bias; zero content-pair block |
 | `diagonal` | The same tokens | Lift only the residual diagonal |
 | `shuffled` | The same tokens | Lift a spectrum-preserving mismatch of relation identities |
 
-Use `--mode` with a fresh model directory to run each control. The `coupled` versus `unbiased` comparison isolates the attention potential. The `coupled`, `broadcast`, `diagonal`, and `shuffled` modes have identical trainable parameter counts and node inputs. They isolate content conditioning, off-diagonal relationships, and trace-relation identity. All controls retain the same feature caches, source supervision, split identities, and training budget; report their actual parameter counts. If image attributes exist, keep the auxiliary-loss setting identical across controls.
+Use `--mode` with a fresh model directory to run each control. The `coupled` versus `unbiased` comparison isolates the attention potential. The `coupled`, `uniform`, `broadcast`, `diagonal`, and `shuffled` modes have identical trainable parameter counts and node inputs. The `uniform` control changes only the content responsibility rule. The diagonal and shuffled controls isolate off-diagonal relationships and trace-relation identity; broadcast retains the earlier operator. All controls retain the same feature caches, source supervision, split identities, and training budget; report their actual parameter counts. If image attributes exist, keep the auxiliary-loss setting identical across controls.
+
+Recent studies informing the matched controls include [the frozen-component design study](https://arxiv.org/abs/2609.30402v1), [RAEGNet](https://arxiv.org/abs/2609.36902v1), and [SynthCLIC v2](https://arxiv.org/abs/2602.12381v2). Their settings separate encoder effects, evidence acquisition, and the measured decision quantity.
 
 Related complete news models include [DAPT](https://doi.org/10.1145/3746027.3755192), [DAMMFND](https://github.com/luweihai/DAMMFND), [MMDFND](https://github.com/yutchina/MMDFND), and [TERN](https://www.mdpi.com/2076-3417/16/13/6759). [ReAlign](https://openaccess.thecvf.com/content/CVPR2026/papers/Huang_ReAlign_Generalizable_Image_Forgery_Detection_via_Reasoning-Aligned_Representation_CVPR_2026_paper.pdf) provides a learned image-forensics comparison. [Falsdo](https://www.ijcai.org/proceedings/2026/275) motivates artifact-matched Real/Control/Fake evaluation.
 
@@ -191,7 +194,16 @@ Related complete news models include [DAPT](https://doi.org/10.1145/3746027.3755
 python -B deep.py predict ./data/features.npz ./data/deep.npz --model ./models/neural42 --split test --device cuda:0 --explain --output ./outputs/neural42/intervention.jsonl
 ```
 
-`--explain` holds the checkpoint and relation tokens fixed, disables the attention potential, and exports `potential_disabled_risk` and `potential_risk_delta`. It adds one forward pass and records a software intervention on raw news risk. Probabilities and prediction sets still use the original calibrated risk. These fields measure model response; they do not identify a physical cause or establish factual truth.
+`--explain` records how the saved model uses its reference while keeping the original prediction and calibration:
+
+| Field | Measurement |
+|---|---|
+| `attention_contrast_rms` | Mean layer RMS of the scaled potential after removing each row's shared offset |
+| `attention_shift_tv` | Mean layer total variation between attention with and without the potential, using the same layer inputs |
+| `potential_disabled_risk` / `potential_risk_delta` | Whole-model raw risk with the potential disabled / original minus disabled risk |
+| `uniform_readout_risk` / `query_readout_delta` | Whole-model risk with uniform content responsibilities / original minus uniform risk |
+
+Local measurements include the class node and available content queries, with all available keys; masked nodes are excluded from their denominators. A missing relation gives zero local change. The concat control has no attention measurements and exports missing values. The uniform intervention applies to coupled checkpoints and adds a second forward pass after the potential-off pass; uniform checkpoints report zero query-readout delta, and other modes export missing values for that intervention. Input nodes and weights stay fixed while hidden states update normally in each forward pass. Probabilities and prediction sets use the original calibrated risk.
 
 New checkpoints use `flawprint-neural-v2` and record the relation operator. Existing `v1` coupled checkpoints retain their original broadcast operation when loaded. Prediction output includes the effective mode and checkpoint version.
 
@@ -269,4 +281,4 @@ python -B main.py theory --seed 42 --output ./outputs/theory.json
 python -B main.py invariance --seed 42 --output ./outputs/invariance.json
 ```
 
-The regression suite covers local transformer extraction, checkpoint reload, missing inputs, reference overlap, target-label isolation, equal-summary relation controls, bounded query-conditioned lifting, legacy reload, gradient flow, and all eight neural modes. Synthetic fixtures and randomly initialized small local encoders verify implementation behavior; real-data benchmark results are recorded separately.
+The regression suite covers local transformer extraction, checkpoint reload, missing inputs, reference overlap, target-label isolation, equal-summary relation controls, bounded query-conditioned lifting, legacy reload, gradient flow, and all nine neural modes. Synthetic fixtures and randomly initialized small local encoders verify implementation behavior; real-data benchmark results are recorded separately.

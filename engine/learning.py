@@ -145,12 +145,19 @@ def batch(packet: dict, indices: list[int], device: str) -> dict:
     output["features"] = {name: torch.as_tensor(values[indices], device=device) for name, values in packet["features"].items()}
     return output
 
-def logits(model: ResidualAttention, packet: dict, indices: list[int], device: str, size: int) -> np.ndarray:
+def logits(model: ResidualAttention, packet: dict, indices: list[int], device: str, size: int, diagnostics: dict | None = None) -> np.ndarray:
     model.eval()
-    values = []
+    values, measurements = [], {}
     with torch.inference_mode():
         for start in range(0, len(indices), size):
-            values.append(model(**batch(packet, indices[start:start + size], device))["logit"].detach().cpu().numpy())
+            output = model(**batch(packet, indices[start:start + size], device), explain=diagnostics is not None)
+            values.append(output["logit"].detach().cpu().numpy())
+            if diagnostics is not None:
+                for name in ("attention_contrast_rms", "attention_shift_tv"):
+                    if name in output:
+                        measurements.setdefault(name, []).append(output[name].detach().cpu().numpy())
+    if diagnostics is not None:
+        diagnostics.update({name: np.concatenate(parts) for name, parts in measurements.items()})
     return np.concatenate(values) if values else np.empty(0)
 
 def scored(rows: list[dict], indices: list[int], risks: np.ndarray) -> list[dict]:
@@ -302,12 +309,20 @@ def predict(bundle: dict, archive: dict, directory: str, split: str = "test", de
     dimensions = {name: metadata["dimensions"][name] for name in metadata["feature_order"]}
     model = ResidualAttention(dimensions, len(metadata["trace_names"]), config).to(device)
     model.load_state_dict(torch.load(root / "parameters.pt", map_location=device, weights_only=True))
-    risks = logits(model, packet, list(range(len(rows))), device, config.batch_size)
-    disabled = risks
-    if explain and config.mode in BIASED:
-        model.config = replace(config, mode="unbiased")
-        disabled = logits(model, packet, list(range(len(rows))), device, config.batch_size)
-        model.config = config
+    measurements = {} if explain else None
+    risks = logits(model, packet, list(range(len(rows))), device, config.batch_size, measurements)
+    disabled, uniform = risks, risks if config.mode == "uniform" else None
+    if explain:
+        try:
+            if config.mode in BIASED:
+                model.config = replace(config, mode="unbiased")
+                disabled = logits(model, packet, list(range(len(rows))), device, config.batch_size)
+            if config.mode == "coupled":
+                # Change only the responsibility rule at the fixed checkpoint.
+                model.config = replace(config, mode="uniform")
+                uniform = logits(model, packet, list(range(len(rows))), device, config.batch_size)
+        finally:
+            model.config = config
     predictions = apply_calibration(scored(rows, list(range(len(rows))), risks), metadata["calibration"])
     for index, row in enumerate(predictions):
         row["model_mode"] = config.mode
@@ -319,7 +334,11 @@ def predict(bundle: dict, archive: dict, directory: str, split: str = "test", de
         if explain:
             row["potential_disabled_risk"] = float(disabled[index])
             row["potential_risk_delta"] = float(risks[index] - disabled[index])
-            row["intervention_scope"] = "Fixed checkpoint and relation tokens; attention potential disabled"
+            row["uniform_readout_risk"] = float(uniform[index]) if uniform is not None else None
+            row["query_readout_delta"] = float(risks[index] - uniform[index]) if uniform is not None else None
+            for name in ("attention_contrast_rms", "attention_shift_tv"):
+                row[name] = float(measurements[name][index]) if name in measurements else None
+            row["intervention_scope"] = "Fixed checkpoint and input nodes; local attention contrasts, potential-off risk, and uniform readout for coupled mode"
     return predictions
 
 # Author: Weiliang Zhu

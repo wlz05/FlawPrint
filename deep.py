@@ -26,7 +26,7 @@ def arguments() -> argparse.Namespace:
     training.add_argument("--config", default="builtin:neural")
     training.add_argument("--profile-config", default="builtin:default")
     training.add_argument("--seed", type=int)
-    training.add_argument("--mode", type=str.lower, choices=("coupled", "unbiased", "independent", "deep", "concat", "broadcast", "diagonal", "shuffled"))
+    training.add_argument("--mode", type=str.lower, choices=("coupled", "unbiased", "independent", "deep", "concat", "uniform", "broadcast", "diagonal", "shuffled"))
     training.add_argument("--dataset", type=str.lower, choices=("weibo", "weibo21", "finefake"))
     training.add_argument("--output", default="./models/neural")
     prediction = commands.add_parser("predict")
@@ -35,7 +35,7 @@ def arguments() -> argparse.Namespace:
     prediction.add_argument("--model", required=True)
     prediction.add_argument("--split", default="test")
     prediction.add_argument("--reference-domain")
-    prediction.add_argument("--explain", action="store_true", help="Export the fixed-checkpoint response to disabling the attention potential")
+    prediction.add_argument("--explain", action="store_true", help="Export attention contrasts and fixed-checkpoint potential-off and uniform-readout responses")
     prediction.add_argument("--output", default="./outputs/neural/predictions.jsonl")
     for command in (extraction, training, prediction):
         command.add_argument("--device", default="cuda:0")

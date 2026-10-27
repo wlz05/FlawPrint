@@ -8,8 +8,8 @@ from numbers import Real
 import torch
 from torch import nn
 
-MODES = ("coupled", "unbiased", "independent", "deep", "concat", "broadcast", "diagonal", "shuffled")
-BIASED = ("coupled", "broadcast", "diagonal", "shuffled")
+MODES = ("coupled", "unbiased", "independent", "deep", "concat", "uniform", "broadcast", "diagonal", "shuffled")
+BIASED = ("coupled", "uniform", "broadcast", "diagonal", "shuffled")
 
 def scramble(relation: torch.Tensor, observed: torch.Tensor) -> torch.Tensor:
     indices = torch.arange(relation.shape[-1], device=relation.device).expand(len(relation), -1).clone()
@@ -18,6 +18,15 @@ def scramble(relation: torch.Tensor, observed: torch.Tensor) -> torch.Tensor:
         indices[index, active] = active.roll(1)
     # Reassign relation identities while preserving the active spectrum.
     return relation.gather(1, indices[:, :, None].expand_as(relation)).gather(2, indices[:, None, :].expand_as(relation))
+
+def contrast(values: torch.Tensor, observed: torch.Tensor) -> torch.Tensor:
+    if values.ndim != 4 or values.shape[-2] != values.shape[-1] or observed.shape != (values.shape[0], values.shape[-1]) or observed.dtype != torch.bool:
+        raise ValueError("Attention contrasts require square head matrices and a Boolean node mask")
+    keys = observed[:, None, None, :]
+    count = observed.sum(-1)[:, None, None, None].clamp_min(1)
+    # Remove the row offset that cancels in softmax.
+    center = values.masked_fill(~keys, 0).sum(-1, keepdim=True) / count
+    return (values - center).masked_fill(~(keys & observed[:, None, :, None]), 0)
 
 def potential(logits: torch.Tensor, observed: torch.Tensor, relation: torch.Tensor, mode: str) -> torch.Tensor:
     batch, heads, length, _ = logits.shape
@@ -38,11 +47,15 @@ def potential(logits: torch.Tensor, observed: torch.Tensor, relation: torch.Tens
         relation = torch.diag_embed(relation.diagonal(dim1=-2, dim2=-1))
     elif mode == "shuffled":
         relation = scramble(relation, mask)
-    elif mode != "coupled":
+    elif mode not in ("coupled", "uniform"):
         raise ValueError("The attention potential requires a biased comparison mode")
     # Map each content query onto its available trace anchors.
     affinity = logits[:, :, :prefix, prefix:]
-    weights = torch.softmax(affinity.masked_fill(~mask[:, None, None, :], torch.finfo(logits.dtype).min), dim=-1)
+    if mode == "uniform":
+        weights = mask.to(logits.dtype) / mask.sum(-1, keepdim=True).clamp_min(1)
+        weights = weights[:, None, None, :].expand(batch, heads, prefix, -1)
+    else:
+        weights = torch.softmax(affinity.masked_fill(~mask[:, None, None, :], torch.finfo(logits.dtype).min), dim=-1)
     weights = weights * mask[:, None, None, :] * observed[:, None, :prefix, None]
     anchors = torch.eye(traces, device=logits.device, dtype=logits.dtype)[None, None] * mask[:, None, :, None]
     coordinates = torch.cat((weights, anchors.expand(batch, heads, -1, -1)), dim=2)
@@ -91,16 +104,28 @@ class ResidualBlock(nn.Module):
         self.strength = nn.Parameter(torch.tensor(-2.0))
         self.limit = config.bias_limit
 
-    def forward(self, tokens: torch.Tensor, observed: torch.Tensor, relation: torch.Tensor, mode: str) -> torch.Tensor:
+    def forward(self, tokens: torch.Tensor, observed: torch.Tensor, relation: torch.Tensor, mode: str, diagnostics: list | None = None) -> torch.Tensor:
         batch, length, dimension = tokens.shape
         qkv = self.qkv(self.norm(tokens)).reshape(batch, length, 3, self.heads, self.width).permute(2, 0, 3, 1, 4)
         query, key, value = qkv.unbind(0)
         logits = query @ key.transpose(-1, -2) / math.sqrt(self.width)
+        original, bias = logits, None
         if mode in BIASED:
             strength = self.limit * torch.sigmoid(self.strength)
             # Condition every interaction on content-selected reference relations.
-            logits = logits + strength * potential(logits, observed, relation, mode)
+            bias = strength * potential(logits, observed, relation, mode)
+            logits = logits + bias
         weights = torch.softmax(logits.masked_fill(~observed[:, None, None, :], -torch.inf), dim=-1)
+        if diagnostics is not None:
+            prefix = length - relation.shape[-1]
+            queries = observed[:, :prefix]
+            centered = contrast(bias, observed) if bias is not None else torch.zeros_like(logits)
+            pairs = (queries.sum(-1) * observed.sum(-1) * self.heads).clamp_min(1)
+            rms = (centered[:, :, :prefix].square().sum((1, 2, 3)) / pairs).sqrt()
+            plain = torch.softmax(original.masked_fill(~observed[:, None, None, :], -torch.inf), dim=-1)
+            shifts = (weights[:, :, :prefix] - plain[:, :, :prefix]).abs().sum(-1) * queries[:, None]
+            variation = shifts.sum((1, 2)) / (2 * self.heads * queries.sum(-1).clamp_min(1))
+            diagnostics.append({"attention_contrast_rms": rms, "attention_shift_tv": variation})
         mixed = (weights @ value).transpose(1, 2).reshape(batch, length, dimension)
         tokens = tokens + self.dropout(self.output(mixed))
         return (tokens + self.dropout(self.feed(tokens))) * observed[:, :, None]
@@ -129,7 +154,7 @@ class ResidualAttention(nn.Module):
         for block in self.blocks:
             block.strength.requires_grad_(config.mode in BIASED)
 
-    def forward(self, features: dict[str, torch.Tensor], observed: torch.Tensor, ranks: torch.Tensor, graph: torch.Tensor, trace_observed: torch.Tensor) -> dict:
+    def forward(self, features: dict[str, torch.Tensor], observed: torch.Tensor, ranks: torch.Tensor, graph: torch.Tensor, trace_observed: torch.Tensor, explain: bool = False) -> dict:
         deep = torch.stack([self.projectors[name](features[name]) for name in self.names], dim=1)
         graph = graph * trace_observed[:, :, None] * trace_observed[:, None, :]
         if self.config.mode == "independent":
@@ -152,9 +177,13 @@ class ResidualAttention(nn.Module):
         batch = ranks.shape[0]
         tokens = torch.cat((torch.zeros_like(deep[:, :1]), deep, trace_tokens), dim=1) + self.identities
         available = torch.cat((torch.ones((batch, 1), dtype=torch.bool, device=ranks.device), observed, trace_observed), dim=1)
+        diagnostics = [] if explain else None
         for block in self.blocks:
-            tokens = block(tokens, available, base, self.config.mode)
-        return {"logit": self.classifier(tokens[:, 0]).squeeze(-1), "image_logit": image_logit}
+            tokens = block(tokens, available, base, self.config.mode, diagnostics)
+        result = {"logit": self.classifier(tokens[:, 0]).squeeze(-1), "image_logit": image_logit}
+        if diagnostics:
+            result.update({name: torch.stack([item[name] for item in diagnostics], dim=1).mean(1) for name in diagnostics[0]})
+        return result
 
 # Author: Weiliang Zhu
 # Email: wlzchina05@gmail.com

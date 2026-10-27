@@ -21,7 +21,7 @@ from engine.storage import subset, write_rows, read_rows, read_json, save_bundle
 from engine.synthetic import fixture
 try:
     import torch
-    from engine.neural import NeuralConfig, ResidualAttention, potential, scramble
+    from engine.neural import NeuralConfig, ResidualAttention, ResidualBlock, potential, scramble, contrast
     from engine.learning import prepare, relation, fit, predict, standardize
 except ImportError:
     torch = None
@@ -287,6 +287,8 @@ class NeuralTests(unittest.TestCase):
         broadcast = potential(logits, observed, graph, "broadcast")
         self.assertGreater(float((lifted[0, :, :2, :2] - lifted[1, :, :2, :2]).abs().max()), 0.1)
         torch.testing.assert_close(broadcast[0, :, :2], broadcast[1, :, :2])
+        uniform = potential(logits, observed, graph, "uniform")
+        torch.testing.assert_close(uniform[0, :, :2], uniform[1, :, :2])
 
     def test_relation_mismatch_preserves_active_spectrum_and_parameter_budget(self) -> None:
         torch.manual_seed(3047)
@@ -299,7 +301,7 @@ class NeuralTests(unittest.TestCase):
         torch.testing.assert_close(relation.norm(dim=(-2, -1)), permuted.norm(dim=(-2, -1)))
         self.assertFalse(torch.allclose(relation[0], permuted[0]))
         budgets = []
-        for mode in ("coupled", "broadcast", "diagonal", "shuffled"):
+        for mode in ("coupled", "uniform", "broadcast", "diagonal", "shuffled"):
             model = ResidualAttention({name: 4 for name in embeddings.STREAMS}, 4, replace(self.config, mode=mode))
             budgets.append(sum(value.numel() for value in model.parameters() if value.requires_grad))
         self.assertEqual(len(set(budgets)), 1)
@@ -331,6 +333,14 @@ class NeuralTests(unittest.TestCase):
         self.assertEqual(len(predictions), len(indices(self.bundle, "test")))
         self.assertTrue(all(np.isfinite(row["fusion_risk"]) for row in predictions))
         self.assertTrue(all(np.isfinite(row["potential_risk_delta"]) for row in predictions))
+        plain = predict(self.bundle, self.archive, directory, device="cpu")
+        np.testing.assert_array_equal([row["fusion_risk"] for row in predictions], [row["fusion_risk"] for row in plain])
+        np.testing.assert_array_equal([row["probability"] for row in predictions], [row["probability"] for row in plain])
+        for row in predictions:
+            self.assertTrue(np.isfinite(row["uniform_readout_risk"]))
+            self.assertAlmostEqual(row["query_readout_delta"], row["fusion_risk"] - row["uniform_readout_risk"])
+            self.assertGreaterEqual(row["attention_contrast_rms"], 0)
+            self.assertTrue(0 <= row["attention_shift_tv"] <= 1)
         self.assertTrue(all(row["checkpoint_version"] == "flawprint-neural-v2" for row in predictions))
         self.assertEqual(read_json(Path(directory) / "model.json")["feature_order"], list(embeddings.STREAMS))
         history = read_json(Path(directory) / "model.json")["history"]
@@ -420,18 +430,26 @@ class NeuralTests(unittest.TestCase):
         prediction = subprocess.run([sys.executable, "-B", "deep.py", "predict", physical.as_posix(), vectors.as_posix(), "--model", model.as_posix(), "--device", "cpu", "--explain", "--output", output.as_posix()], capture_output=True, text=True, env=environment, timeout=60)
         self.assertEqual(prediction.returncode, 0, prediction.stderr)
         self.assertEqual(read_json(output.with_name("predictions.report.json"))["samples"], len(indices(self.bundle, "test")))
-        self.assertTrue(all("potential_risk_delta" in row for row in read_rows(output)))
+        self.assertTrue(all("potential_risk_delta" in row and "query_readout_delta" in row and "attention_shift_tv" in row for row in read_rows(output)))
         provenance = read_json(model / "provenance.json")
         self.assertEqual(provenance["dataset"], "weibo21")
         self.assertFalse(provenance["inputs_changed_during_training"])
 
     def test_all_neural_controls_have_finite_predictions(self) -> None:
-        for mode in ("unbiased", "independent", "deep", "concat", "broadcast", "diagonal", "shuffled"):
+        for mode in ("unbiased", "independent", "deep", "concat", "uniform", "broadcast", "diagonal", "shuffled"):
             with self.subTest(mode=mode):
                 directory = (self.root / mode).as_posix()
                 fit(self.bundle, self.archive, directory, replace(self.config, mode=mode, epochs=1), self.profile, "cpu")
-                rows = predict(self.bundle, self.archive, directory, device="cpu")
+                rows = predict(self.bundle, self.archive, directory, device="cpu", explain=True)
                 self.assertTrue(rows and all(np.isfinite(row["fusion_risk"]) for row in rows))
+                if mode == "concat":
+                    self.assertTrue(all(row["attention_contrast_rms"] is None and row["attention_shift_tv"] is None for row in rows))
+                elif mode in ("unbiased", "independent", "deep"):
+                    self.assertTrue(all(row["attention_contrast_rms"] == 0 and row["attention_shift_tv"] == 0 for row in rows))
+                if mode == "uniform":
+                    self.assertTrue(all(row["query_readout_delta"] == 0 for row in rows))
+                else:
+                    self.assertTrue(all(row["uniform_readout_risk"] is None for row in rows))
                 if mode == "deep":
                     self.assertFalse(read_json(Path(directory) / "model.json")["profiles"])
 
@@ -502,6 +520,93 @@ class NeuralTests(unittest.TestCase):
         self.assertTrue(embeddings.protocol(first)["complete"])
         embeddings.save((self.root / "encoded.npz").as_posix(), first)
         self.assertEqual(embeddings.protocol(embeddings.load((self.root / "encoded.npz").as_posix())), embeddings.protocol(first))
+
+    def test_row_constant_bias_is_invisible_to_masked_attention(self) -> None:
+        torch.manual_seed(42)
+        values = torch.randn(3, 2, 6, 6, dtype=torch.float64)
+        observed = torch.tensor([[True, True, True, True, True, True], [True, False, True, False, True, False], [False, False, False, False, False, False]])
+        offsets = torch.randn(3, 2, 6, 1, dtype=torch.float64)
+        centered = contrast(values, observed)
+        torch.testing.assert_close(centered, contrast(values + offsets, observed))
+        self.assertTrue(torch.all(centered[2] == 0))
+        self.assertTrue(torch.all(centered[1, :, ~observed[1]] == 0))
+        torch.testing.assert_close(centered.sum(-1), torch.zeros_like(centered.sum(-1)), atol=1e-14, rtol=0)
+        first = values[:2].masked_fill(~observed[:2, None, None, :], -torch.inf)
+        second = (values + offsets)[:2].masked_fill(~observed[:2, None, None, :], -torch.inf)
+        torch.testing.assert_close(first.softmax(-1), second.softmax(-1))
+        with self.assertRaises(ValueError):
+            contrast(values, observed.float())
+
+    def test_query_contrast_equals_the_fixed_layer_log_odds_change(self) -> None:
+        torch.manual_seed(52)
+        values = torch.randn(1, 2, 7, 7, dtype=torch.float64)
+        graph = torch.randn(1, 4, 4, dtype=torch.float64)
+        graph = (graph + graph.transpose(-1, -2)) / 4
+        observed = torch.ones(1, 7, dtype=torch.bool)
+        observed[:, -1] = False
+        graph[:, -1], graph[:, :, -1] = 0, 0
+        bias = potential(values, observed, graph, "coupled")
+        responsibility = values[:, :, :3, 3:].masked_fill(~observed[:, None, None, 3:], -torch.inf).softmax(-1)
+        expected = torch.einsum("bhi,bij,bhj->bh", responsibility[:, :, 0], graph, responsibility[:, :, 1] - responsibility[:, :, 2])
+        torch.testing.assert_close(bias[:, :, 0, 1] - bias[:, :, 0, 2], expected)
+        base = values.masked_fill(~observed[:, None, None, :], -torch.inf).log_softmax(-1)
+        shifted = (values + 0.7 * bias).masked_fill(~observed[:, None, None, :], -torch.inf).log_softmax(-1)
+        measured = shifted[:, :, 0, 1] - shifted[:, :, 0, 2] - base[:, :, 0, 1] + base[:, :, 0, 2]
+        torch.testing.assert_close(measured, 0.7 * expected)
+
+    def test_uniform_readout_ignores_queries_and_respects_missing_anchors(self) -> None:
+        torch.manual_seed(3047)
+        graph = torch.randn(2, 4, 4)
+        observed = torch.tensor([[True, False, True, True, False, True, False], [True, True, True, False, False, False, False]])
+        first = potential(torch.randn(2, 2, 7, 7), observed, graph, "uniform")
+        second = potential(torch.randn(2, 2, 7, 7) * 20, observed, graph, "uniform")
+        torch.testing.assert_close(first, second, rtol=0, atol=0)
+        self.assertTrue(torch.isfinite(first).all())
+        self.assertTrue(torch.all(first[1] == 0))
+        self.assertTrue(torch.all(first[0, :, 1] == 0))
+        self.assertTrue(torch.all(first[0, :, :, 4] == 0))
+        damaged = graph.clone()
+        damaged[0, 1], damaged[0, :, 1] = 1000, 1000
+        damaged[0, 3], damaged[0, :, 3] = -1000, -1000
+        torch.testing.assert_close(first, potential(torch.randn(2, 2, 7, 7), observed, damaged, "uniform"))
+
+    def test_uniform_and_coupled_agree_when_content_has_no_anchor_preference(self) -> None:
+        graph = torch.tensor([[[0.2, -0.1, 0.3], [-0.1, 0.0, 0.2], [0.3, 0.2, -0.2]]])
+        observed = torch.ones(1, 6, dtype=torch.bool)
+        values = torch.zeros(1, 2, 6, 6)
+        torch.testing.assert_close(potential(values, observed, graph, "coupled"), potential(values, observed, graph, "uniform"))
+        observed[:, 4:] = False
+        values = torch.randn(1, 2, 6, 6)
+        torch.testing.assert_close(potential(values, observed, graph, "coupled"), potential(values, observed, graph, "uniform"))
+
+    def test_nonzero_relation_can_have_zero_effective_attention_contrast(self) -> None:
+        torch.manual_seed(3407)
+        block = ResidualBlock(self.config).eval()
+        tokens = torch.randn(2, 7, self.config.dimension)
+        observed = torch.ones(2, 7, dtype=torch.bool)
+        graph = torch.full((2, 4, 4), 0.1)
+        diagnostics = []
+        coupled = block(tokens, observed, graph, "coupled", diagnostics)
+        plain = block(tokens, observed, graph, "unbiased")
+        self.assertGreater(float(graph.norm()), 0)
+        torch.testing.assert_close(coupled, plain, atol=1e-6, rtol=1e-6)
+        self.assertLess(float(diagnostics[0]["attention_contrast_rms"].max().detach()), 1e-6)
+        self.assertLess(float(diagnostics[0]["attention_shift_tv"].max().detach()), 1e-6)
+
+    def test_opt_in_attention_diagnostics_leave_the_prediction_unchanged(self) -> None:
+        torch.manual_seed(42)
+        model = ResidualAttention({name: 4 for name in embeddings.STREAMS}, 3, self.config).eval()
+        features = {name: torch.randn(2, 4) for name in embeddings.STREAMS}
+        observed = torch.ones(2, 4, dtype=torch.bool)
+        ranks, graph = torch.randn(2, 3), torch.randn(2, 3, 3)
+        mask = torch.tensor([[True, True, True], [False, False, False]])
+        ordinary = model(features, observed, ranks, graph, mask)
+        measured = model(features, observed, ranks, graph, mask, explain=True)
+        torch.testing.assert_close(ordinary["logit"], measured["logit"], rtol=0, atol=0)
+        self.assertTrue(torch.all(measured["attention_contrast_rms"] >= 0))
+        self.assertTrue(torch.all((measured["attention_shift_tv"] >= 0) & (measured["attention_shift_tv"] <= 1)))
+        self.assertEqual(float(measured["attention_contrast_rms"][1].detach()), 0)
+        self.assertEqual(float(measured["attention_shift_tv"][1].detach()), 0)
 
 # Author: Weiliang Zhu
 # Email: wlzchina05@gmail.com

@@ -462,7 +462,7 @@ class IntegrityTests(unittest.TestCase):
         self.assertFalse(recorded)
 
     def test_neural_diagnostics_keep_boolean_and_numeric_types_in_csv(self) -> None:
-        rows = [{"id": "sample", "domain": "a", "physical_reference_available": False, "embedding_protocol_verified": False, "potential_disabled_risk": -0.5, "potential_risk_delta": 0.25}]
+        rows = [{"id": "sample", "domain": "a", "physical_reference_available": False, "embedding_protocol_verified": False, "potential_disabled_risk": -0.5, "potential_risk_delta": 0.25, "uniform_readout_risk": -0.4, "query_readout_delta": 0.15, "attention_contrast_rms": 0.2, "attention_shift_tv": 0.05}]
         for suffix in ("csv", "tsv", "jsonl"):
             path = self.root / ("diagnostics." + suffix)
             write_rows(path, rows)
@@ -471,9 +471,12 @@ class IntegrityTests(unittest.TestCase):
             self.assertIs(restored["embedding_protocol_verified"], False)
             self.assertEqual(restored["potential_disabled_risk"], -0.5)
             self.assertEqual(restored["potential_risk_delta"], 0.25)
+            for key in ("uniform_readout_risk", "query_readout_delta", "attention_contrast_rms", "attention_shift_tv"):
+                self.assertIsInstance(restored[key], float)
+                self.assertEqual(restored[key], rows[0][key])
 
     def test_prediction_diagnostics_reject_nonfinite_and_boolean_scores(self) -> None:
-        for key in ("potential_disabled_risk", "potential_risk_delta"):
+        for key in ("potential_disabled_risk", "potential_risk_delta", "uniform_readout_risk", "query_readout_delta", "attention_contrast_rms", "attention_shift_tv"):
             for value in (float("inf"), True):
                 with self.assertRaises(ValueError):
                     prediction_rows([{"id": "a", key: value}])
@@ -508,6 +511,14 @@ class IntegrityTests(unittest.TestCase):
         row["content_sha256"] = digest(path)
         self.assertTrue(preflight([row], check_images=True)["passed"])
         self.assertEqual(extract_one(row, TraceConfig())[3]["content_sha256"], row["content_sha256"])
+
+    def test_attention_measurement_exports_enforce_their_ranges(self) -> None:
+        for key, value in (("attention_shift_tv", -0.1), ("attention_shift_tv", 1.1), ("attention_contrast_rms", -0.1)):
+            with self.assertRaises(ValueError):
+                prediction_rows([{"id": "sample", key: value}])
+        row = prediction_rows([{"id": "sample", "attention_shift_tv": None, "attention_contrast_rms": 0}])[0]
+        self.assertIsNone(row["attention_shift_tv"])
+        self.assertEqual(row["attention_contrast_rms"], 0)
 
 if __name__ == "__main__":
     unittest.main()

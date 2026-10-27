@@ -99,7 +99,7 @@ PRESETS = {
             'config': 'builtin:neural',
             'frozen_encoders': ['bert', 'mae', 'clip'],
             'optional_encoder': 'forensic',
-            'modes': ['coupled', 'unbiased', 'independent', 'deep', 'concat', 'broadcast', 'diagonal', 'shuffled'],
+            'modes': ['coupled', 'unbiased', 'independent', 'deep', 'concat', 'uniform', 'broadcast', 'diagonal', 'shuffled'],
             'source_reference': 'group cross-fitting',
             'target_reference': 'independent unlabeled profile rows',
             'target_labels_used_for_fitting': False,
