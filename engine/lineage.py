@@ -3,22 +3,52 @@
 
 from __future__ import annotations
 import os
-from engine.data import identifier, missing, portable_image
+import re
+from engine.data import identifier, missing, portable_image, text_fingerprint
 from engine.storage import resolved
 
-FIELDS = ("group", "image", "content_sha256")
+FIELDS = ("group", "image", "content_sha256", "text_sha256")
+
+def evidence(row: dict, field: str) -> object:
+    value = row.get(field)
+    if field != "text_sha256":
+        return value
+    fingerprint = text_fingerprint(row.get("text"))
+    if not missing(value):
+        if not isinstance(value, str) or re.fullmatch("[0-9a-f]{64}", value) is None or fingerprint is not None and value != fingerprint:
+            raise ValueError("Stored text fingerprints must match the news text")
+        return value
+    return fingerprint
 
 def identity(field: str, value: object) -> str | None:
     if missing(value):
         return None
     return os.path.normcase(str(resolved(portable_image(value)))) if field == "image" else identifier(value)
 
+def components(rows: list[dict]) -> list[int]:
+    parents, seen = list(range(len(rows))), {}
+    def find(index: int) -> int:
+        while parents[index] != index:
+            parents[index] = parents[parents[index]]
+            index = parents[index]
+        return index
+    for index, row in enumerate(rows):
+        for field in FIELDS:
+            value = identity(field, evidence(row, field))
+            if value is not None:
+                key = field, value
+                if key in seen:
+                    parents[find(index)] = find(seen[key])
+                seen[key] = index
+    # Keep transitive event, image, and text identities in one component.
+    return [find(index) for index in range(len(rows))]
+
 def collect(*partitions: list[dict]) -> dict:
     output = {field: {} for field in FIELDS}
     for rows in partitions:
         for row in rows:
             for field in FIELDS:
-                value = row.get(field)
+                value = evidence(row, field)
                 key = identity(field, value)
                 if key is not None:
                     output[field].setdefault(key, portable_image(value) if field == "image" else identifier(value))
@@ -27,19 +57,21 @@ def collect(*partitions: list[dict]) -> dict:
 def validate(history: dict | None) -> None:
     if history is None:
         return
-    if not isinstance(history, dict) or set(history) != set(FIELDS):
+    if not isinstance(history, dict) or set(history) not in (set(FIELDS), set(FIELDS) - {"text_sha256"}):
         raise ValueError("Evidence history requires groups, images, and content identifiers")
     for field, values in history.items():
         if not isinstance(values, list) or any(not isinstance(value, str) or missing(value) or value != value.strip() for value in values):
             raise ValueError("Evidence history values must be nonempty strings")
+        if field == "text_sha256" and any(re.fullmatch("[0-9a-f]{64}", value) is None for value in values):
+            raise ValueError("Evidence history text fingerprints must be SHA256 strings")
         keys = [identity(field, value) for value in values]
         if len(set(keys)) != len(keys):
             raise ValueError("Evidence history contains duplicate identities")
 
 def overlaps(rows: list[dict], history: dict | None) -> list[bool]:
     validate(history)
-    stored = {field: {identity(field, value) for value in history[field]} if history is not None else set() for field in FIELDS}
-    return [any(identity(field, row.get(field)) in stored[field] for field in FIELDS) for row in rows]
+    stored = {field: {identity(field, value) for value in history.get(field, [])} if history is not None else set() for field in FIELDS}
+    return [any(identity(field, evidence(row, field)) in stored[field] for field in FIELDS) for row in rows]
 
 def ensure_disjoint(rows: list[dict], history: dict | None) -> None:
     if any(overlaps(rows, history)):
@@ -49,7 +81,7 @@ def merge(*histories: dict | None) -> dict:
     partitions = []
     for history in histories:
         validate(history)
-        partitions.append([{field: value} for field in FIELDS for value in (history[field] if history is not None else [])])
+        partitions.append([{field: value} for field in FIELDS for value in (history.get(field, []) if history is not None else [])])
     return collect(*partitions)
 
 def disjoint(*histories: dict | None) -> None:
@@ -57,7 +89,7 @@ def disjoint(*histories: dict | None) -> None:
     for history in histories:
         validate(history)
         if history is not None:
-            ensure_disjoint([{field: value} for field in FIELDS for value in history[field]], previous)
+            ensure_disjoint([{field: value} for field in FIELDS for value in history.get(field, [])], previous)
         previous = merge(previous, history)
 
 def scope(history: dict | None, complete: bool = True) -> str:

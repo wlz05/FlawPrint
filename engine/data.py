@@ -7,8 +7,9 @@ from pathlib import Path
 import hashlib
 import json
 import os
+import unicodedata
 import numpy as np
-from engine.storage import relative_path, resolved
+from engine.storage import relative_path, resolved, digest
 
 SPLITS = ("train", "validation", "calibration", "profile", "test")
 SPLIT_ALIASES = {"val": "validation", "valid": "validation", "dev": "validation", "training": "train", "testing": "test", "cal": "calibration"}
@@ -19,6 +20,30 @@ def missing(value: object) -> bool:
     if isinstance(value, (float, np.floating)):
         return bool(np.isnan(value))
     return isinstance(value, str) and value.strip().casefold() in ("", "none", "null", "nan", "<na>")
+
+def text_fingerprint(value: object) -> str | None:
+    if value is None or type(value).__name__ in ("NAType", "NaTType") or isinstance(value, (float, np.floating)) and np.isnan(value):
+        return None
+    text = unicodedata.normalize("NFC", " ".join(str(value).split()))
+    return hashlib.sha256(text.encode("utf-8")).hexdigest() if text else None
+
+def image_fingerprints(rows: list[dict], required: bool = False) -> dict[str, str]:
+    fingerprints = {}
+    for row in rows:
+        image = portable_image(row.get("image", ""))
+        if not image:
+            continue
+        path = relative_path(image)
+        canonical = os.path.normcase(str(resolved(path)))
+        if canonical not in fingerprints:
+            if not path.is_file():
+                if required:
+                    raise FileNotFoundError("Missing image: " + image)
+                continue
+            fingerprints[canonical] = digest(path)
+        if row.get("content_sha256") and row["content_sha256"] != fingerprints[canonical]:
+            raise ValueError("The manifest image checksum is stale")
+    return fingerprints
 
 def identifier(value: object) -> str:
     if missing(value):
@@ -116,17 +141,27 @@ def normalize(rows: list[dict], image_root: str = ".", label_convention: str = "
     return output
 
 def partition(rows: list[dict], target_domains: list[str], seed: int = 42, profile_fraction: float = 0.35) -> list[dict]:
+    from engine.lineage import components
+    if isinstance(seed, bool) or not isinstance(seed, int) or not 0 <= seed < 2 ** 32:
+        raise ValueError("The split seed must be an unsigned integer")
     if not 0 < profile_fraction < 1:
         raise ValueError("Profile fraction must be between zero and one")
     targets = set(target_domains)
     available = {row["domain"] for row in rows}
     if not targets or not targets < available:
         raise ValueError("Select existing target domains and retain a source domain")
-    grouped = defaultdict(list)
+    rows = [dict(row) for row in rows]
+    fingerprints = image_fingerprints(rows)
     for row in rows:
-        grouped[str(row["group"])].append(dict(row))
+        if row.get("image"):
+            key = os.path.normcase(str(resolved(portable_image(row["image"]))))
+            if key in fingerprints:
+                row["content_sha256"] = fingerprints[key]
+    grouped = defaultdict(list)
+    for group, row in zip(components(rows), rows):
+        grouped[group].append(dict(row))
     assignments = {"source": [], "target": []}
-    for group, members in sorted(grouped.items()):
+    for group, members in sorted(grouped.items(), key=lambda item: min(str(row["id"]) for row in item[1])):
         sides = {row["domain"] in targets for row in members}
         if len(sides) != 1:
             raise ValueError("A duplicate group crosses source and target domains")
@@ -151,27 +186,30 @@ def partition(rows: list[dict], target_domains: list[str], seed: int = 42, profi
                 if split == "profile":
                     row.pop("label", None)
                 result.append(row)
-    return sorted(result, key=lambda row: row["id"])
+    result = sorted(result, key=lambda row: row["id"])
+    audit_splits(result)
+    return result
 
 def audit_splits(rows: list[dict], check_files: bool = False) -> dict:
-    groups, images, contents = defaultdict(set), defaultdict(set), defaultdict(set)
+    fingerprints = image_fingerprints(rows, check_files)
+    groups, images, contents, texts = (defaultdict(set) for _ in range(4))
     counts, paths = defaultdict(int), {}
     for row in rows:
         split = row["split"]
         groups[str(row.get("group", row["id"]))].add(split)
+        text_hash = text_fingerprint(row.get("text"))
+        if text_hash is not None:
+            texts[text_hash].add(split)
         if row.get("image"):
             canonical = os.path.normcase(str(resolved(portable_image(row["image"]))))
             images[canonical].add(split)
             paths.setdefault(canonical, portable_image(row["image"]))
+            if canonical in fingerprints:
+                contents[fingerprints[canonical]].add(split)
         counts[f"{row['domain']}:{split}"] += 1
         if row.get("content_sha256"):
             contents[str(row["content_sha256"])].add(split)
-        if check_files and row.get("image"):
-            path = relative_path(row["image"])
-            if not path.is_file():
-                raise FileNotFoundError(f"Missing image: {path.as_posix()}")
-            contents[hashlib.sha256(path.read_bytes()).hexdigest()].add(split)
-    leaks = {"groups": [key for key, splits in groups.items() if len(splits) > 1], "paths": [paths[key] for key, splits in images.items() if len(splits) > 1], "content": [key for key, splits in contents.items() if len(splits) > 1]}
+    leaks = {"groups": [key for key, splits in groups.items() if len(splits) > 1], "paths": [paths[key] for key, splits in images.items() if len(splits) > 1], "content": [key for key, splits in contents.items() if len(splits) > 1], "text": [key for key, splits in texts.items() if len(splits) > 1]}
     if any(leaks.values()):
         raise ValueError(f"Cross-split leakage detected: {leaks}")
     return {"counts": dict(counts), "samples": len(rows), "leakage": leaks, "label_convention": "zero-real-one-fake"}

@@ -29,6 +29,7 @@ def fixture(seed: int = 42, per_split: int = 24) -> dict:
                 tile_reference = reference if label == 0 else np.eye(dimension)
                 patches.append(np.exp(rng.multivariate_normal(np.zeros(dimension), tile_reference, 16) / 3) + shift)
                 row = {"id": identifier, "image": f"./synthetic/{identifier}.png", "text": "A verified report with context." if label == 0 else "An invented report with unsupported claims!", "domain": domain, "platform": "synthetic", "split": split, "group": identifier, "semantic_logit": float((2 * label - 1) * 0.6 + rng.normal(0, 1))}
+                row["text"] += " Sample " + identifier + "."
                 if split != "profile":
                     row["label"] = label
                 rows.append(row)

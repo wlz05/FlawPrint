@@ -97,7 +97,9 @@ Use the activation command for your shell. The first installation command suppli
 | [Weibo21](https://github.com/kennqiang/MDFEND-Weibo21) | 9 | Released train, validation, and test identities |
 | [FineFake](https://github.com/Accuser907/FineFake) | 7 | Fixed 60% / 20% / 20%, split seed 3407 |
 
-Dataset partitions remain fixed across experiment seeds. Source validation and calibration identities are separate. Domain-reference pools are independent of evaluation samples. Keep events, original images, and duplicate content disjoint; validate the actual release before running. The `experiment` preset in [engine/package.py](engine/package.py) records dataset paths and experiment settings.
+Dataset partitions remain fixed across experiment seeds. Preserve released holdout identities when using the official protocol. Source validation and calibration identities are separate. Domain-reference pools are independent of evaluation samples. Keep events, original images, and duplicate content disjoint; validate the actual release before running. The `experiment` preset in [engine/package.py](engine/package.py) records dataset paths and experiment settings.
+
+The [split audit](engine/data.py) rejects cross-partition event, image-path, image-byte, and normalized-text overlap. Text fingerprints normalize Unicode NFC and whitespace. Available image files are hashed even when a manifest omits `content_sha256`; supplied hashes must match those bytes. For a custom split, connected event/image/text components are assigned together, with the same seed giving the same result after row reordering. A component crossing source and target domains stops the split. Assign paraphrases, reencoded images, and augmentations their original event or image group before splitting.
 
 ## Prepare Data
 
@@ -151,7 +153,7 @@ Add `--forensic ./models/forensic` for a separately trained, Hugging Face-compat
 
 ## Train and Predict
 
-The pretrained encoders are frozen. The [training pipeline](engine/learning.py) learns projections, residual attention, and the news head from source news labels. Source event/image groups define cross-fitting folds; source training alone fits feature standardizers. Validation selects the checkpoint and fits probability calibration; a separate calibration partition fits prediction sets. Target labels do not enter fitting.
+The pretrained encoders are frozen. The [training pipeline](engine/learning.py) learns projections, residual attention, and the news head from source news labels. Source event/image/text components define cross-fitting folds; source training alone fits feature standardizers. Validation selects the checkpoint and fits probability calibration; a separate calibration partition fits prediction sets. Domain profiles fit one `train` or independent `profile` partition. Calibration commands check their recorded validation/calibration roles, and genuine-threshold fitting accepts validation rows only. Target test labels do not enter fitting or model selection.
 
 ```bash
 python -B deep.py train ./data/features.npz ./data/deep.npz --dataset Weibo21 --config builtin:neural --profile-config builtin:default --seed 42 --mode coupled --device cuda:0 --output ./models/neural42
@@ -268,6 +270,8 @@ Conversion, extraction, and neural prediction protect referenced source images f
 News labels require explicit numeric classes. Boolean labels and complex-valued numeric inputs are rejected. Source standardization checks float32 representability before inference, with missing streams kept at zero. Profile and calibration settings distinguish numeric parameters from Boolean metadata.
 
 Checkpoint loading validates metadata and checks parameter names, shapes, types, finite values, and the weight hash before inference. Each inference batch must return one finite risk per selected sample; diagnostics must align with the same samples. Explanation differences use higher precision to avoid float32 subtraction overflow. The prediction command validates metrics before replacing existing predictions.
+
+New profile, training, and calibration histories store text fingerprints alongside event, image, and content identities. Reidentifying a fitted news text does not bypass the recorded overlap checks. Older histories remain loadable and retain checks for the evidence they recorded; new text checks require rebuilding artifacts that lack those fingerprints.
 
 ## Additional Analysis
 

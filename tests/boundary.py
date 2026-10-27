@@ -24,6 +24,7 @@ from engine.results import prediction_rows
 from engine.storage import read_json, write_json, read_rows, write_rows, same_path, subset
 from engine.stream import adapt, pool
 from engine.synthetic import fixture
+from engine.lineage import collect, merge, disjoint, ensure_disjoint
 
 class BoundaryTests(unittest.TestCase):
 
@@ -193,6 +194,32 @@ class BoundaryTests(unittest.TestCase):
         query["rows"][0].update(id="new", group="new-event", image="./new.jpg", split="test")
         self.assertTrue(DomainProfile.load(path.as_posix()).predict(query)[0]["profile_overlap"])
 
+    def test_text_history_blocks_reidentified_queries_after_profile_reload(self) -> None:
+        profile, data = self.profile()
+        path = self.root / "text.json"
+        profile.save(path.as_posix())
+        query = subset(data, [0])
+        query["rows"][0].update(id="new", group="new-event", image="./new.jpg", split="test")
+        query["rows"][0]["text"] = "  \n ".join(query["rows"][0]["text"].split())
+        restored = DomainProfile.load(path.as_posix())
+        self.assertTrue(restored.predict(query)[0]["profile_overlap"])
+        with self.assertRaises(ValueError):
+            deploy(query, restored, GatePolicy())
+
+    def test_text_history_merge_retains_legacy_records_and_new_fingerprints(self) -> None:
+        current = collect([{"id": "a", "group": "first", "text": "An independent report."}])
+        legacy = {field: values for field, values in current.items() if field != "text_sha256"}
+        incoming = [{"id": "b", "group": "second", "text": "An  independent\nreport."}]
+        ensure_disjoint(incoming, legacy)
+        combined = merge(legacy, current)
+        with self.assertRaises(ValueError):
+            ensure_disjoint(incoming, combined)
+        with self.assertRaises(ValueError):
+            disjoint(current, collect(incoming))
+        self.assertTrue(all(len(value) == 64 for value in current["text_sha256"]))
+        with self.assertRaises(ValueError):
+            collect([{"text": "An independent report.", "text_sha256": "a" * 64}])
+
     def test_legacy_profile_reports_limited_history_scope(self) -> None:
         profile, data = self.profile()
         state = profile.document()
@@ -217,7 +244,7 @@ class BoundaryTests(unittest.TestCase):
     def test_short_streaming_update_records_new_history(self) -> None:
         profile, data = self.profile()
         query = subset(data, [0])
-        query["rows"][0].update(id="new", group="new-event", image="./new.jpg", domain="new-domain", split="profile")
+        query["rows"][0].update(id="new", group="new-event", image="./new.jpg", text="An independent streaming report.", domain="new-domain", split="profile")
         updated = adapt(profile, query, "new-domain")
         replay = copy.deepcopy(query)
         replay["rows"][0]["id"] = "other"

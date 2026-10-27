@@ -53,8 +53,9 @@ class DomainProfile:
     def fit(cls, bundle: dict, domain: str, config: ProfileConfig, columns: list[int] | None = None) -> DomainProfile:
         config.validate()
         validate_bundle(bundle)
-        if any(row.get("split") == "test" for row in prediction_rows(bundle["rows"])):
-            raise ValueError("Domain profiles must exclude test examples")
+        roles = {row.get("split") for row in prediction_rows(bundle["rows"])}
+        if len(roles) != 1 or not roles.issubset({"train", "profile"}):
+            raise ValueError("Domain profiles require one train or profile partition and exclude validation, calibration, and test data")
         values, observed = bundle["values"], bundle["observed"]
         if len(values) < config.min_samples:
             raise ValueError("Insufficient unlabeled profile samples")
@@ -127,7 +128,7 @@ class DomainProfile:
             raise ValueError("Genuine calibration requires labeled validation samples")
         labels = validate_labels(np.asarray([row["label"] for row in prediction_rows(bundle["rows"])]))
         selected = np.flatnonzero(labels == 0).tolist()
-        if len(selected) < 4 or any(row.get("split") == "test" for row in prediction_rows(bundle["rows"])):
+        if len(selected) < 4 or any(row.get("split") != "validation" for row in prediction_rows(bundle["rows"])):
             raise ValueError("Use four genuine validation samples and exclude test data")
         from engine.storage import subset
         scored = self.predict(subset(bundle, selected))

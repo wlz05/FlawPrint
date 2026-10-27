@@ -18,7 +18,7 @@ from sklearn.model_selection import GroupKFold
 from engine import embeddings
 from engine.conformal import calibrate_rows, apply_calibration, validate_labels
 from engine.data import audit_splits
-from engine.lineage import collect, ensure_disjoint, identity, FIELDS
+from engine.lineage import collect, ensure_disjoint, components
 from engine.metrics import binary
 from engine.neural import NeuralConfig, ResidualAttention, BIASED
 from engine.profile import DomainProfile, ProfileConfig
@@ -27,24 +27,7 @@ from engine.storage import relative_path, subset, read_json, write_json, validat
 from engine.traces import NAMES
 
 def groups(rows: list[dict]) -> np.ndarray:
-    parents = list(range(len(rows)))
-
-    def find(index: int) -> int:
-        while parents[index] != index:
-            parents[index] = parents[parents[index]]
-            index = parents[index]
-        return index
-
-    seen = {}
-    for index, row in enumerate(rows):
-        for field in FIELDS:
-            value = identity(field, row.get(field))
-            if value is not None:
-                key = (field, value)
-                if key in seen:
-                    parents[find(index)] = find(seen[key])
-                seen[key] = index
-    return np.asarray([find(index) for index in range(len(rows))])
+    return np.asarray(components(rows))
 
 def relation(profile: DomainProfile, bundle: dict) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     if any(profile.overlap(bundle["rows"])):

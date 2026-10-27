@@ -34,6 +34,7 @@ class EvidenceTests(unittest.TestCase):
         pool = subset(bundle, indices(bundle, "test", "target_gamma"))
         for row in pool["rows"]:
             row.update(id="pool:" + row["id"], group="pool:" + row["group"], image="./synthetic/pool/" + row["id"] + ".png", split="validation")
+            row["text"] = "Independent construction pool. " + row["text"]
         test = subset(fixture(seed=901, per_split=24), indices(bundle, "test", "target_gamma"))
         return pool, test
 
@@ -244,6 +245,8 @@ class EvidenceTests(unittest.TestCase):
 
     def test_profile_predictions_retain_scenario_and_image_leakage_metadata(self) -> None:
         pool, test = self.pool()
+        for row in pool["rows"]:
+            row["split"] = "profile"
         profile = DomainProfile.fit(pool, "target_gamma", self.config)
         test["rows"][0].update(scenario="real_photo_false_text", content_sha256="hash")
         result = profile.predict(test)[0]

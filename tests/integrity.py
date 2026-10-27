@@ -539,6 +539,36 @@ class IntegrityTests(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     apply_calibration([], damaged)
 
+    def test_calibration_requires_matching_partition_roles(self) -> None:
+        for role in ("train", "profile", "test", "calibration"):
+            validation, calibration = self.scored("v", role), self.scored("c", "calibration")
+            with self.subTest(role=role):
+                with self.assertRaisesRegex(ValueError, "roles"):
+                    calibrate_rows(validation, calibration)
+        with self.assertRaisesRegex(ValueError, "roles"):
+            calibrate_rows(self.scored("v", "validation"), self.scored("c", "validation"))
+
+    def test_calibration_cannot_reuse_text_with_new_identifiers(self) -> None:
+        validation, calibration = self.scored("v", "validation"), self.scored("c", "calibration")
+        validation[0]["text"] = "The same news report."
+        calibration[0]["text"] = "The  same news\nreport."
+        with self.assertRaisesRegex(ValueError, "overlaps"):
+            calibrate_rows(validation, calibration)
+
+    def test_reference_fitting_excludes_model_selection_and_calibration_rows(self) -> None:
+        data = subset(self.bundle, indices(self.bundle, "profile", "target_gamma"))
+        for role in ("validation", "calibration", "test", "unspecified"):
+            changed = copy.deepcopy(data)
+            for row in changed["rows"]:
+                row["split"] = role
+            with self.subTest(role=role):
+                with self.assertRaises(ValueError):
+                    DomainProfile.fit(changed, "target_gamma", self.config)
+        changed = copy.deepcopy(data)
+        changed["rows"][0]["split"] = "train"
+        with self.assertRaises(ValueError):
+            DomainProfile.fit(changed, "target_gamma", self.config)
+
     def test_profile_and_calibration_numeric_settings_reject_booleans(self) -> None:
         for name in ("shrinkage", "local_shrinkage", "min_observed", "sign_tolerance", "sign_weight", "kappa"):
             with self.subTest(name=name):

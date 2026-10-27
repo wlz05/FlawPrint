@@ -502,6 +502,27 @@ class NeuralTests(unittest.TestCase):
         for name in first_state:
             torch.testing.assert_close(first_state[name], second_state[name], rtol=0, atol=0)
 
+    def test_neural_training_rejects_text_reused_across_splits(self) -> None:
+        bundle, archive = copy.deepcopy(self.bundle), copy.deepcopy(self.archive)
+        train = next(index for index, row in enumerate(bundle["rows"]) if row["split"] == "train")
+        validation = next(index for index, row in enumerate(bundle["rows"]) if row["split"] == "validation")
+        bundle["rows"][validation]["text"] = bundle["rows"][train]["text"]
+        archive["rows"][validation]["text"] = bundle["rows"][train]["text"]
+        with self.assertRaisesRegex(ValueError, "Cross-split leakage"):
+            prepare(bundle, archive, self.profile, 2)
+
+    def test_neural_reload_rejects_training_text_under_a_test_identity(self) -> None:
+        output = self.root / "text"
+        fit(self.bundle, self.archive, output.as_posix(), replace(self.config, epochs=1), self.profile, "cpu")
+        bundle, archive = copy.deepcopy(self.bundle), copy.deepcopy(self.archive)
+        train = next(index for index, row in enumerate(bundle["rows"]) if row["split"] == "train")
+        query = next(index for index, row in enumerate(bundle["rows"]) if row["split"] == "test")
+        bundle["rows"][query]["text"] = bundle["rows"][train]["text"]
+        archive["rows"][query]["text"] = bundle["rows"][train]["text"]
+        with patch.object(ResidualAttention, "forward", side_effect=AssertionError("Inference must not start")):
+            with self.assertRaisesRegex(ValueError, "overlaps"):
+                predict(bundle, archive, output.as_posix(), device="cpu")
+
     def test_neural_fit_reload_and_encoder_provenance(self) -> None:
         directory = (self.root / "model").as_posix()
         report = fit(self.bundle, self.archive, directory, self.config, self.profile, "cpu")

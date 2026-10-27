@@ -10,7 +10,7 @@ import unittest
 import numpy as np
 from PIL import Image
 from engine.storage import relative_path, save_bundle, load_bundle, subset
-from engine.data import normalize, partition, audit_splits, join_predictions
+from engine.data import normalize, partition, audit_splits, join_predictions, text_fingerprint
 from engine.traces import NAMES, TraceConfig, extract_one
 from engine.storage import read_json
 from engine.synthetic import fixture
@@ -73,6 +73,58 @@ class WorkflowTests(unittest.TestCase):
         audit_splits(result)
         self.assertTrue(all("label" not in row for row in result if row["split"] == "profile"))
         self.assertTrue(all(row["domain"] == "target_gamma" for row in result if row["split"] == "profile"))
+
+    def test_normalized_duplicate_text_cannot_cross_partitions(self) -> None:
+        rows = normalize([{"id": "a", "group": "a", "text": "Cafe\u0301 news\nreport", "split": "train"}, {"id": "b", "group": "b", "text": "Caf\u00e9  news report", "split": "test"}])
+        self.assertEqual(text_fingerprint(rows[0]["text"]), text_fingerprint(rows[1]["text"]))
+        with self.assertRaisesRegex(ValueError, "Cross-split leakage"):
+            audit_splits(rows)
+        rows[1]["split"] = "train"
+        self.assertEqual(audit_splits(rows)["leakage"]["text"], [])
+        self.assertIsNone(text_fingerprint(" \n "))
+        for value in ("null", "none", "nan"):
+            self.assertIsNotNone(text_fingerprint(value))
+
+    def test_partition_keeps_transitive_evidence_components_together(self) -> None:
+        rows = normalize([{"id": str(index), "text": "Independent report " + str(index), "group": str(index), "domain": "source" if index < 12 else "target", "label": index % 2} for index in range(18)])
+        rows[0]["group"] = rows[1]["group"] = "bridge"
+        rows[1]["image"] = rows[2]["image"] = "./bridge.jpg"
+        rows[3]["text"] = rows[2]["text"]
+        first = partition(rows, ["target"], seed=42)
+        second = partition(rows, ["target"], seed=42)
+        self.assertEqual(first, second)
+        self.assertEqual(first, partition(rows[::-1], ["target"], seed=42))
+        lookup = {row["id"]: row["split"] for row in first}
+        self.assertEqual(len({lookup[str(index)] for index in range(4)}), 1)
+        self.assertEqual(audit_splits(first)["samples"], 18)
+        self.assertTrue(all("label" not in row for row in first if row["split"] == "profile"))
+        for seed in (True, -1, 2 ** 32, 1.5):
+            with self.assertRaises(ValueError):
+                partition(rows, ["target"], seed=seed)
+
+    def test_cross_domain_evidence_bridges_cannot_enter_holdout_splits(self) -> None:
+        original = normalize([{"id": str(index), "text": "Independent report " + str(index), "group": str(index), "domain": "source" if index < 8 else "target"} for index in range(12)])
+        for field, value in (("image", "./shared.jpg"), ("content_sha256", "shared-content"), ("text", "The same independent report.")):
+            rows = copy.deepcopy(original)
+            rows[0][field] = rows[-1][field] = value
+            with self.subTest(field=field):
+                with self.assertRaisesRegex(ValueError, "crosses source and target"):
+                    partition(rows, ["target"])
+
+    def test_available_image_bytes_are_checked_without_declared_hashes(self) -> None:
+        first, second = self.root / "first.png", self.root / "second.png"
+        Image.new("RGB", (64, 64), (30, 60, 90)).save(first)
+        second.write_bytes(first.read_bytes())
+        rows = normalize([{"id": str(index), "group": str(index), "text": "Report " + str(index), "domain": "source" if index < 8 else "target", "split": "train" if index < 8 else "test"} for index in range(12)])
+        rows[0]["image"], rows[-1]["image"] = first.as_posix(), second.as_posix()
+        with self.assertRaisesRegex(ValueError, "Cross-split leakage"):
+            audit_splits(rows)
+        with self.assertRaisesRegex(ValueError, "crosses source and target"):
+            partition(rows, ["target"])
+        rows[-1]["image"] = ""
+        rows[0]["content_sha256"] = "stale"
+        with self.assertRaisesRegex(ValueError, "checksum is stale"):
+            audit_splits(rows)
 
     def test_semantic_join_checks_identifiers_and_direction(self) -> None:
         rows = self.bundle["rows"][:2]

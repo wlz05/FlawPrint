@@ -113,8 +113,14 @@ def validate_partitions(*partitions: list[dict]) -> list[list[str]]:
     disjoint(*histories)
     return identifiers
 
+def validate_roles(validation: list[dict], calibration: list[dict]) -> None:
+    for role, rows in (("validation", validation), ("calibration", calibration)):
+        if any("split" in row and row["split"] != role for row in rows):
+            raise ValueError("Calibration input roles must match their recorded partitions: " + role)
+
 def calibrate_rows(validation: list[dict], calibration: list[dict], alpha: float = 0.1, score_key: str = "fusion_risk") -> dict:
     validation, calibration = score_rows(validation, score_key), score_rows(calibration, score_key)
+    validate_roles(validation, calibration)
     first, second = validate_partitions(validation, calibration)
     if any("label" not in row for row in validation + calibration):
         raise ValueError("Conformal calibration requires observed labels")

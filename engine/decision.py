@@ -8,7 +8,7 @@ import numpy as np
 from engine.profile import DomainProfile
 from engine.traces import NAMES
 from engine.dependence import availability
-from engine.conformal import calibrate_rows, apply_calibration, validate_partitions, validate_labels
+from engine.conformal import calibrate_rows, apply_calibration, validate_partitions, validate_labels, validate_roles
 from engine.storage import validate_bundle
 from engine.metrics import evaluate, binary
 from engine.results import prediction_rows
@@ -97,6 +97,7 @@ def calibrate_routes(validation: list[dict], calibration: list[dict], alpha: flo
     validation, calibration = prediction_rows(validation), prediction_rows(calibration)
     if not validation or not calibration:
         raise ValueError("Routed calibration requires both independent input partitions")
+    validate_roles(validation, calibration)
     validate_partitions(validation, calibration)
     if not 0 < alpha < 1 or any(row.get("split") == "test" or row.get("profile_overlap") for row in validation + calibration):
         raise ValueError("Routed calibration requires valid alpha and independent non-test samples")
