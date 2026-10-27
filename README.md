@@ -1,6 +1,6 @@
 # FlawPrint: Cross-Domain Multimodal Fake News Detection via Copula Residuals of Physical Imperfection Traces
 
-**FlawPrint-CRA** uses domain-referenced trace relationships to change the relative support between candidate evidence nodes. An independent domain pool defines pairwise copula residuals. Each content query selects trace coordinates, and the residual matrix is lifted into content-dependent attention through `B = U Gbar U^T`.
+**FlawPrint-CRA** preserves domain-referenced trace pairs until current content reads them into attention. An independent domain pool defines pairwise copula residuals. Each content query selects trace coordinates, and the residual matrix is lifted into content-dependent attention through `B = U Gbar U^T`.
 
 The deterministic FlawPrint baseline achieves **state-of-the-art performance on Weibo, Weibo21, and FineFake**. The content-conditioned CRA results are recorded separately. Experiment settings use a **single NVIDIA GeForce RTX 4090** and seeds **42, 52, 3047, and 3407**.
 
@@ -32,7 +32,7 @@ Independent pool --> Frozen ranks and domain copula      |
 4. **Read relations through content.** Each attention head reuses its query/key scores to assign a distribution over available trace anchors. The lifted matrix `U Gbar U^T` supplies distinct content-to-content, content-to-trace, and trace-to-trace interaction conditions.
 5. **Learn the news decision.** Residual attention updates the nodes and the news head reads the class node. Source news labels train projections and interactions; separately observed manipulation labels supervise an optional image head.
 
-The core operation is the reference-conditioned relation readout in step 4. At a fixed attention layer, the reference changes the preference between keys b and c by `lambda * u_a^T Gbar (u_b - u_c)`. A shared row offset cancels in softmax, so relation magnitude alone does not describe its effect on evidence selection. The encoder family supplies content representations. The reference defines measured support, and the current query determines which relationships enter each interaction. The mapping adds no separate gating-network parameters.
+The core operation in step 4 keeps pair identities available during content interaction. The domain pool defines statistical trace compatibility, and source news labels train the final decision. Query/key scores read the complete relation matrix without a separate gating network.
 
 ## Project Structure
 
@@ -170,19 +170,16 @@ Predict each checkpoint and report mean and sample standard deviation across the
 
 ## Baselines and Ablations
 
-| Neural mode | Trace input | Readout |
+| Core mode | Relation access | Readout |
 |---|---|---|
-| `deep` | None | Deep multimodal attention |
-| `independent` | Rank coordinates, zero relation matrix | Ordinary attention |
-| `unbiased` | Rank and residual contributions | Ordinary attention |
-| `coupled` | Rank and residual contributions | Content-conditioned reference lifting |
-| `concat` | The same rank and residual tokens | Flattened projections and MLP |
-| `uniform` | The same rank and residual tokens | Uniform trace responsibilities within the same full readout |
-| `broadcast` | The same tokens | Shared row-summary bias; zero content-pair block |
-| `diagonal` | The same tokens | Lift only the residual diagonal |
-| `shuffled` | The same tokens | Lift a spectrum-preserving mismatch of relation identities |
+| `deep` | No trace input | Ordinary content attention |
+| `unbiased` | Ranks, diagonal entries, and row summaries | Ordinary attention over summary tokens |
+| `uniform` | The same tokens and the complete relation matrix | Uniform responsibilities in the reference map |
+| `coupled` | Identical to uniform | Current-query responsibilities in the reference map |
 
-Use `--mode` with a fresh model directory to run each control. The `coupled` versus `unbiased` comparison isolates the attention potential. The `coupled`, `uniform`, `broadcast`, `diagonal`, and `shuffled` modes have identical trainable parameter counts and node inputs. The `uniform` control changes only the content responsibility rule. The diagonal and shuffled controls isolate off-diagonal relationships and trace-relation identity; broadcast retains the earlier operator. All controls retain the same feature caches, source supervision, split identities, and training budget; report their actual parameter counts. If image attributes exist, keep the auxiliary-loss setting identical across controls.
+The primary matched comparison is `uniform` versus `coupled`: both retain the complete graph, ordinary content attention, input nodes, and trainable parameter count. Only responsibilities in the reference map change. The `unbiased` comparison also changes access from relation summaries to the complete pair matrix.
+
+Additional controls are `independent` (ranks only), `concat` (MLP over summary tokens), `broadcast` (the earlier row-summary operator), `diagonal` (diagonal-only potential), and `shuffled` (permuted relation identities). Use a fresh model directory for each mode and retain the same encoder caches, source supervision, split identities, and training budget. Keep auxiliary image supervision identical and report actual parameter counts.
 
 Recent studies informing the matched controls include [the frozen-component design study](https://arxiv.org/abs/2609.30402v1), [RAEGNet](https://arxiv.org/abs/2609.36902v1), and [SynthCLIC v2](https://arxiv.org/abs/2602.12381v2). Their settings separate encoder effects, evidence acquisition, and the measured decision quantity.
 
