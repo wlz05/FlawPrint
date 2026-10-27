@@ -13,7 +13,7 @@ from unittest.mock import patch
 import warnings
 import numpy as np
 from PIL import Image
-from engine.storage import validate_bundle, save_bundle, load_bundle, subset, write_json, write_rows, read_rows, digest
+from engine.storage import validate_bundle, save_bundle, load_bundle, subset, write_json, write_rows, read_rows, digest, protect_outputs
 from engine.synthetic import fixture
 from engine.experiment import indices
 from engine.profile import DomainProfile, ProfileConfig
@@ -90,6 +90,31 @@ class IntegrityTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "finite"):
             load_bundle(path)
         self.assertEqual(path.read_bytes(), original)
+
+    def test_physical_cache_decodes_utf8_byte_feature_names(self) -> None:
+        path = self.root / "bytes.npz"
+        arrays = {key: self.bundle[key] for key in ("values", "observed", "patches")}
+        arrays.update(names=self.bundle["names"].astype("S"), metadata=np.asarray(json.dumps(self.bundle["rows"])))
+        np.savez_compressed(path, **arrays)
+        restored = load_bundle(path)
+        self.assertEqual(restored["names"].dtype.kind, "U")
+        np.testing.assert_array_equal(restored["names"], self.bundle["names"])
+        arrays["names"][0] = b"\xff"
+        np.savez_compressed(path, **arrays)
+        with self.assertRaisesRegex(ValueError, "Invalid physical feature archive"):
+            load_bundle(path)
+
+    def test_output_protection_recognizes_hardlinked_source_images(self) -> None:
+        import os
+        source, output = self.root / "source.png", self.root / "alias.npz"
+        source.write_bytes(b"original")
+        try:
+            os.link(source, output)
+        except OSError as error:
+            self.skipTest("Hard links are unavailable: " + str(error))
+        with self.assertRaisesRegex(ValueError, "overwrite"):
+            protect_outputs([output], [source])
+        self.assertEqual(source.read_bytes(), b"original")
 
     def test_subset_does_not_mutate_parent_metadata(self) -> None:
         selected = subset(self.bundle, [0])

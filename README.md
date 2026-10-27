@@ -32,7 +32,7 @@ Independent pool --> Frozen ranks and domain copula      |
 4. **Read relations through content.** Each attention head reuses its query/key scores to assign a distribution over available trace anchors. The lifted matrix `U Gbar U^T` supplies distinct content-to-content, content-to-trace, and trace-to-trace interaction conditions.
 5. **Learn the news decision.** Residual attention updates the nodes and the news head reads the class node. Source news labels train projections and interactions; separately observed manipulation labels supervise an optional image head.
 
-The core operation in step 4 keeps pair identities available during content interaction. The domain pool defines statistical trace compatibility, and source news labels train the final decision. Query/key scores read the complete relation matrix without a separate gating network.
+The [core operation in step 4](engine/neural.py) keeps pair identities available during content interaction. The domain pool defines statistical trace compatibility, and source news labels train the final decision. Query/key scores read the complete relation matrix without a separate gating network.
 
 ## Project Structure
 
@@ -66,7 +66,7 @@ FlawPrint/
 | GPU | Single NVIDIA GeForce RTX 4090 |
 | Seeds | 42, 52, 3047, 3407 |
 
-Install the PyTorch build for your CUDA environment, then install the dependencies:
+Install the [PyTorch build](https://pytorch.org/get-started/locally/) for your CUDA environment, then install the dependencies:
 
 ```bash
 git clone https://github.com/wlz05/FlawPrint.git
@@ -125,21 +125,21 @@ python -B convert.py ./weibo21/train_datasets.xlsx --dataset Weibo21 --mapping b
 python -B convert.py ./FineFake/train.csv --dataset FineFake --mapping builtin:finefake --split train --output ./FineFake/train.jsonl
 ```
 
-Repeat conversion for the other partitions with their matching `--split`. Dataset selection normalizes names to lowercase. JSONL, NDJSON, JSON, CSV, TSV, Excel, and Parquet are supported. Merge the converted rows into one manifest while preserving IDs and split roles, then validate and extract:
+Repeat [conversion](convert.py) for the other partitions with their matching `--split`. Keep source validation and calibration groups separate. Dataset selection normalizes names to lowercase. JSONL, NDJSON, JSON, CSV, TSV, Excel, and Parquet are supported. For the Weibo example, merge the converted partitions as canonical records, then validate and extract:
 
 ```bash
-python -B main.py prepare ./data/raw.jsonl --labels fake-one --output ./data/manifest.jsonl
+python -B convert.py ./data/weibo_train.jsonl ./data/weibo_validation.jsonl ./data/weibo_calibration.jsonl ./data/weibo_test.jsonl --dataset canonical --output ./data/manifest.jsonl
 python -B main.py validate ./data/manifest.jsonl --benchmark --check-images --output ./outputs/preflight.json
 python -B main.py extract ./data/manifest.jsonl --workers 1 --output ./data/features.npz
 ```
 
-For source domains, training groups supply the physical reference through cross-fitting. Held-out target domains use independent unlabeled `profile` rows. A domain cannot supply both source training rows and target-profile rows in the same neural run.
+Use the corresponding converted paths for Weibo21 and FineFake. Canonical merging preserves the converted 0-real/1-fake labels and partition roles. IDs must remain unique across files; duplicate IDs or shared groups across partitions stop the merge. Include independent target `profile` files in the same merge for held-out-domain runs. For source domains, training groups supply the physical reference through cross-fitting. A domain cannot supply both source training rows and target-profile rows in the same neural run.
 
 Configuration defaults are built in. Use `--config builtin:default` for standard profiling, `--config builtin:quick` for the synthetic check, and `--config builtin:seed42` for the corresponding experiment seed. Neural training defaults to `builtin:neural`. Dataset conversion selects `builtin:weibo`, `builtin:weibo21`, or `builtin:finefake` through `--mapping`; the mappings declare the released label direction explicitly. A custom relative JSON path remains supported for each configuration option.
 
 ## Pretrained Encoders
 
-Place complete Hugging Face checkpoints, tokenizer assets, and processor files in `./models/bert`, `./models/mae`, and `./models/clip`. Extraction reads local files only. For Chinese input, compatible checkpoint families include [BERT-base-Chinese](https://huggingface.co/google-bert/bert-base-chinese), [ViT-MAE-base](https://huggingface.co/facebook/vit-mae-base), and [Chinese-CLIP](https://huggingface.co/OFA-Sys/chinese-clip-vit-base-patch16). Use language-matched BERT and CLIP checkpoints for other languages, and keep their exact files fixed within a comparison.
+Place complete Hugging Face checkpoints, tokenizer assets, and processor files in `./models/bert`, `./models/mae`, and `./models/clip`. Extraction reads local files only through Transformers' [offline loading](https://huggingface.co/docs/transformers/installation#offline-mode). For Chinese input, compatible checkpoint families include [BERT-base-Chinese](https://huggingface.co/google-bert/bert-base-chinese), [ViT-MAE-base](https://huggingface.co/facebook/vit-mae-base), and [Chinese-CLIP](https://huggingface.co/OFA-Sys/chinese-clip-vit-base-patch16). Use language-matched BERT and CLIP checkpoints for other languages, and keep their exact files fixed within a comparison.
 
 `deep.py` retains the BERT and MAE class-token vectors and both projected CLIP vectors. MAE uses all patches in fixed order. BERT and CLIP text are truncated to the smaller of the requested length, tokenizer limit, and checkpoint context. The archive records the requested and effective lengths, vector readouts, encoder hashes, availability masks, identities, and image checksums. Cache replacement is atomic; failed writes preserve an existing archive.
 
@@ -151,7 +151,7 @@ Add `--forensic ./models/forensic` for a separately trained, Hugging Face-compat
 
 ## Train and Predict
 
-The pretrained encoders are frozen. Trainable projections, residual attention, and the news head use source news labels. Source event/image groups define cross-fitting folds; source training alone fits feature standardizers. Validation selects the checkpoint and fits probability calibration; a separate calibration partition fits prediction sets. Target labels do not enter fitting.
+The pretrained encoders are frozen. The [training pipeline](engine/learning.py) learns projections, residual attention, and the news head from source news labels. Source event/image groups define cross-fitting folds; source training alone fits feature standardizers. Validation selects the checkpoint and fits probability calibration; a separate calibration partition fits prediction sets. Target labels do not enter fitting.
 
 ```bash
 python -B deep.py train ./data/features.npz ./data/deep.npz --dataset Weibo21 --config builtin:neural --profile-config builtin:default --seed 42 --mode coupled --device cuda:0 --output ./models/neural42
@@ -166,7 +166,7 @@ python -B deep.py train ./data/features.npz ./data/deep.npz --dataset Weibo21 --
 python -B deep.py train ./data/features.npz ./data/deep.npz --dataset Weibo21 --seed 3407 --mode coupled --output ./models/neural3407
 ```
 
-Predict each checkpoint and report mean and sample standard deviation across the four seeds. The model directory stores `parameters.pt`, `model.json`, `profiles/`, and CLI `provenance.json`. Weights, references, and model metadata are written in a sibling staging directory and published together. Interrupted writes remove that staging directory. Publication rejects a destination occupied by another run; an existing empty directory is supported. Predictions include calibrated news output, method mode, and reference availability. Labeled predictions also produce a `.report.json` metric file. Loading checks encoder/schema/weight/reference hashes and rejects identities or known lineage used for training, validation, or calibration. New checkpoints also store the feature-extraction protocol and reject query caches with changed truncation or readout settings. `embedding_protocol_verified` reports whether the stored protocol is complete. Older checkpoints remain loadable and report this field as false when that record is absent.
+Predict each checkpoint and report mean and sample standard deviation across the four seeds. The model directory stores `parameters.pt`, `model.json`, `profiles/`, and CLI `provenance.json`. Weights, references, model metadata, and CLI provenance are written in a sibling staging directory and published together after input hashes are rechecked. Input changes or interrupted writes discard that staging directory. Publication rejects a destination occupied by another run; an existing empty directory is supported. Predictions include calibrated news output, method mode, and reference availability. Labeled predictions also produce a `.report.json` metric file. Loading checks encoder/schema/weight/reference hashes and rejects identities or known lineage used for training, validation, or calibration. New checkpoints also store the feature-extraction protocol and reject query caches with changed truncation or readout settings. `embedding_protocol_verified` reports whether the stored protocol is complete. Older checkpoints remain loadable and report this field as false when that record is absent.
 
 ## Baselines and Ablations
 
@@ -210,7 +210,7 @@ New checkpoints use `flawprint-neural-v2` and record the relation operator. Exis
 |---|---|
 | GPU / seeds | Single RTX 4090 / 42, 52, 3047, 3407 |
 | Maximum epochs / batch size | 50 / 64 |
-| Optimizer / learning rate / weight decay | AdamW / 0.0001 / 0.00005 |
+| Optimizer / learning rate / weight decay | [AdamW](https://docs.pytorch.org/docs/stable/generated/torch.optim.AdamW.html) / 0.0001 / 0.00005 |
 | Source selection / patience | Validation macro F1 / 5 epochs |
 | Maximum text length | 197, limited by each encoder's context |
 | Projected width / heads / layers | 128 / 4 / 2 |
@@ -226,7 +226,7 @@ New checkpoints use `flawprint-neural-v2` and record the relation operator. Exis
 
 The inverse correlation is estimated only in retained trace coordinates. The neural path uses the global pairwise matrix; local sign penalties belong to the deterministic control. Missing streams are masked. Missing or insufficient references produce zero relation potential and preserve deep inference.
 
-Report Accuracy and classwise Precision, Recall, and F1 alongside macro F1 and ROC-AUC, as used in [DAMMFND](https://ojs.aaai.org/index.php/AAAI/article/view/32036) and [MMDFND](https://github.com/yutchina/MMDFND). Report source-calibrated probability metrics and prediction-set coverage separately. Image-authenticity auxiliary metrics use independent image labels.
+Report Accuracy and classwise Precision, Recall, and F1 alongside macro F1 and ROC-AUC, as used in [DAMMFND](https://ojs.aaai.org/index.php/AAAI/article/view/32036) and [MMDFND](https://github.com/yutchina/MMDFND). Classification metrics use the [scikit-learn evaluation API](https://scikit-learn.org/stable/modules/model_evaluation.html), with reporting implemented in [engine/metrics.py](engine/metrics.py). Report source-calibrated probability metrics and prediction-set coverage separately. Image-authenticity auxiliary metrics use independent image labels.
 
 ## Deterministic Controls
 
@@ -263,6 +263,8 @@ python -B main.py evaluate ./outputs/deterministic.jsonl --seed 42 --output ./ou
 
 Physical and deep NPZ caches use atomic replacement. Their loaders reject malformed archives, accept UTF-8 metadata strings or bytes, and close input files on failure. JSON manifests, configuration, cache metadata, and serialized table fields reject duplicate keys and nonfinite numbers, including exponent overflow. Malformed CSV reports the physical line number. Diagnostic scores and Boolean fields retain their types through CSV, TSV, and JSONL conversion.
 
+Conversion, extraction, and neural prediction protect referenced source images from output and report collisions, including hard-link aliases. Physical extraction also protects its derived provenance path. Samples need text or an image; conversion and preflight reject empty records, and deep extraction checks them before loading encoders. Both extractors require an explicit still-image conversion for animated or multipage inputs. Physical NPZ loading decodes UTF-8 byte feature names to the same text schema used during training.
+
 News labels require explicit numeric classes. Boolean labels and complex-valued numeric inputs are rejected. Source standardization checks float32 representability before inference, with missing streams kept at zero. Profile and calibration settings distinguish numeric parameters from Boolean metadata.
 
 Checkpoint loading validates metadata and checks parameter names, shapes, types, finite values, and the weight hash before inference. Each inference batch must return one finite risk per selected sample; diagnostics must align with the same samples. Explanation differences use higher precision to avoid float32 subtraction overflow. The prediction command validates metrics before replacing existing predictions.
@@ -280,4 +282,4 @@ python -B main.py theory --seed 42 --output ./outputs/theory.json
 python -B main.py invariance --seed 42 --output ./outputs/invariance.json
 ```
 
-The regression suite covers local transformer extraction, checkpoint reload, missing inputs, reference overlap, target-label isolation, equal-summary relation controls, bounded query-conditioned lifting, legacy reload, gradient flow, and all nine neural modes. Synthetic fixtures and randomly initialized small local encoders verify implementation behavior; real-data benchmark results are recorded separately.
+The [regression suite](tests/) runs through [test.py](test.py) and covers local transformer extraction, checkpoint reload, missing inputs, reference overlap, target-label isolation, equal-summary relation controls, bounded query-conditioned lifting, legacy reload, gradient flow, and all nine neural modes. Synthetic fixtures and randomly initialized small local encoders verify implementation behavior; real-data benchmark results are recorded separately.

@@ -6,8 +6,9 @@ import argparse
 from dataclasses import asdict
 from pathlib import Path
 import numpy as np
+from PIL.Image import DecompressionBombError
 from scipy.special import ndtr
-from engine.storage import read_json, write_json, read_rows, write_rows, write_csv, load_bundle, save_bundle, subset, relative_path, resolved, same_path
+from engine.storage import read_json, write_json, read_rows, write_rows, write_csv, load_bundle, save_bundle, subset, relative_path, resolved, same_path, protect_outputs
 from engine.data import normalize, partition, audit_splits, join_predictions
 from engine.traces import TraceConfig, NAMES, extract
 from engine.profile import ProfileConfig, DomainProfile
@@ -70,6 +71,8 @@ def command_extract(args: argparse.Namespace) -> dict:
     from engine.storage import digest
     original_hash = digest(args.input)
     rows = normalize(read_rows(args.input))
+    provenance = relative_path(args.output).with_suffix(".provenance.json")
+    protect_outputs([args.output, provenance], [args.input] + [row["image"] for row in rows if row["image"]])
     audit = audit_splits(rows, True)
     config = TraceConfig(args.max_side, args.tile_grid, args.min_side)
     values, observed, patches, metadata = extract(rows, config, args.workers)
@@ -77,7 +80,7 @@ def command_extract(args: argparse.Namespace) -> dict:
     if digest(args.input) != original_hash:
         raise ValueError("The manifest changed during extraction; rerun with a stable input")
     save_bundle(args.output, values, observed, patches, metadata, NAMES)
-    write_json(str(relative_path(args.output).with_suffix(".provenance.json")), {"version": VERSION, "manifest": {"path": args.input, "sha256": original_hash}, "features": {"path": args.output, "sha256": digest(args.output), "names": NAMES}, "trace_config": asdict(config), "workers": args.workers, "source_sha256": source_digest(), "environment": environment(), "audit": audit})
+    write_json(provenance, {"version": VERSION, "manifest": {"path": args.input, "sha256": original_hash}, "features": {"path": args.output, "sha256": digest(args.output), "names": NAMES}, "trace_config": asdict(config), "workers": args.workers, "source_sha256": source_digest(), "environment": environment(), "audit": audit})
     return {"samples": len(rows), "features": len(NAMES), "tiles": patches.shape[1], "output": args.output, "config": asdict(config), "audit": audit}
 
 def command_profile(args: argparse.Namespace) -> dict:
@@ -450,7 +453,7 @@ def main() -> None:
                 if isinstance(value, str) and not (name == "config" and is_builtin(value)) and any(same_path(value, target) for target in targets):
                     raise ValueError("The output path cannot overwrite an input file")
         result = args.handler(args)
-    except (ValueError, OSError, KeyError, TypeError) as error:
+    except (ValueError, OSError, KeyError, TypeError, DecompressionBombError) as error:
         raise SystemExit(f"Error: {error}") from error
     import json
     from engine.storage import native

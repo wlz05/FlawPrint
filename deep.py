@@ -5,7 +5,9 @@ from __future__ import annotations
 import argparse
 from dataclasses import replace
 import json
-from engine.storage import relative_path, resolved, same_path, read_json, write_json, read_rows, write_rows, load_bundle, digest
+from PIL.Image import DecompressionBombError
+from engine.storage import relative_path, resolved, same_path, read_json, write_json, read_rows, write_rows, load_bundle, digest, protect_outputs
+from engine.data import normalize
 from engine.provenance import source_digest
 from engine.package import configuration, configuration_record, is_builtin
 
@@ -53,7 +55,9 @@ def main() -> None:
             directories = {name: getattr(args, name) for name in ("bert", "mae", "clip", "forensic") if getattr(args, name, None)}
             if any(resolved(args.output).is_relative_to(resolved(path)) for path in directories.values()):
                 raise ValueError("Embedding output must remain outside encoder directories")
-            archive = embeddings.extract(read_rows(args.manifest), directories, args.batch_size, args.device, args.max_length)
+            rows = normalize(read_rows(args.manifest))
+            protect_outputs([args.output], [row["image"] for row in rows if row["image"]])
+            archive = embeddings.extract(rows, directories, args.batch_size, args.device, args.max_length)
             if any(digest(item["path"]) != item["sha256"] for item in fingerprints):
                 raise ValueError("An input changed during feature extraction")
             archive["provenance"].update(inputs=fingerprints, source_sha256=source_digest())
@@ -69,11 +73,8 @@ def main() -> None:
             if args.mode is not None:
                 config = replace(config, mode=args.mode)
             profile = replace(ProfileConfig(**configuration(args.profile_config)), seed=config.seed)
-            result = fit(load_bundle(args.features), embeddings.load(args.embeddings), args.output, config, profile, args.device)
-            changed = any(digest(item["path"]) != item["sha256"] for item in fingerprints)
-            write_json(relative_path(args.output) / "provenance.json", {"inputs": fingerprints, "configurations": {"training": configuration_record(args.config), "profile": configuration_record(args.profile_config)}, "source_sha256": source_digest(), "dataset": args.dataset, "inputs_changed_during_training": changed})
-            if changed:
-                raise ValueError("An input changed during training; its original hashes are preserved")
+            provenance = {"inputs": fingerprints, "configurations": {"training": configuration_record(args.config), "profile": configuration_record(args.profile_config)}, "source_sha256": source_digest(), "dataset": args.dataset, "inputs_changed_during_training": False}
+            result = fit(load_bundle(args.features), embeddings.load(args.embeddings), args.output, config, profile, args.device, provenance)
         else:
             from engine.learning import predict
             from engine.metrics import evaluate
@@ -85,6 +86,7 @@ def main() -> None:
             report = relative_path(args.output).with_name(relative_path(args.output).stem + ".report.json")
             if any(same_path(report, path) for path in protected) or resolved(report).is_relative_to(resolved(args.model)):
                 raise ValueError("The prediction report cannot overwrite an input or model artifact")
+            protect_outputs([args.output, report], [row["image"] for row in predictions if row.get("image")])
             # Validate report inputs before replacing existing predictions.
             metrics = evaluate(predictions) if all("label" in row for row in predictions) else None
             write_rows(args.output, predictions)
@@ -95,7 +97,7 @@ def main() -> None:
         print(json.dumps(result, indent=2, allow_nan=False))
     except ImportError as error:
         raise SystemExit('Install optional deep dependencies with python -m pip install "torch>=2.2" "transformers>=4.40,<6"') from error
-    except (ValueError, OSError, KeyError, TypeError, RuntimeError) as error:
+    except (ValueError, OSError, KeyError, TypeError, RuntimeError, DecompressionBombError) as error:
         raise SystemExit("Error: " + str(error)) from error
 
 if __name__ == "__main__":

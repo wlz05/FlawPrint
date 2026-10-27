@@ -43,6 +43,9 @@ def preflight(records: list[dict], check_images: bool = False, benchmark: bool =
         warnings.append(f"Repeated text crosses splits under {repeated_text} hashes; review event groups and dataset scope")
     missing_images = sum(not row["image"] for row in rows)
     empty_text = sum(not row["text"].strip() for row in rows)
+    empty_samples = [row["id"] for row in rows if not row["text"].strip() and not row["image"]]
+    if empty_samples:
+        errors.append(f"Samples without text or images: {', '.join(empty_samples)}")
     semantic = sum("semantic_logit" in row for row in rows)
     if missing_images:
         warnings.append(f"{missing_images} samples are text-only and cannot provide physical image evidence")

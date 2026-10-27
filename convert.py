@@ -4,7 +4,7 @@
 from __future__ import annotations
 import argparse
 from pathlib import Path
-from engine.storage import digest, read_json, read_rows, relative_path, resolved, same_path, write_json, write_rows
+from engine.storage import digest, read_json, read_rows, relative_path, resolved, same_path, write_json, write_rows, protect_outputs
 from engine.data import audit_splits, normalize
 from engine.formats import Conversion, FIELDS, convert_records
 from engine.package import configuration, is_builtin
@@ -92,6 +92,7 @@ def main() -> None:
             raise ValueError("Input, output, and conversion report files must be distinct")
         sheet = int(args.sheet) if args.sheet.isdigit() else args.sheet
         rows, result = convert_files(args.input, config, args.encoding, args.delimiter, args.records_key, sheet, args.trusted_pickle, args.check_files)
+        protect_outputs([output, report], [row["image"] for row in rows if row["image"]])
         write_rows(output, rows)
         result["output"] = {"file": output.as_posix(), "sha256": digest(output)}
         write_json(report, result)

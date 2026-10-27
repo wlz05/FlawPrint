@@ -152,6 +152,8 @@ def extract(rows: list[dict], directories: dict, batch_size: int = 64, device: s
     rows = normalize(rows)
     if not rows:
         raise ValueError("Embedding extraction requires nonempty input")
+    if any(not row["text"].strip() and not row["image"] for row in rows):
+        raise ValueError("Embedding extraction requires text or an image for every sample")
     before = {name: checkpoint_digest(path) for name, path in directories.items()}
     import torch
     from PIL import Image
@@ -191,6 +193,8 @@ def extract(rows: list[dict], directories: dict, batch_size: int = 64, device: s
                     raise ValueError("The manifest image checksum is stale")
                 row["content_sha256"] = image_hashes[path.as_posix()]
                 with Image.open(path) as image:
+                    if getattr(image, "n_frames", 1) > 1:
+                        raise ValueError("Animated or multipage inputs require an explicit still-image conversion")
                     images.append(image.convert("RGB"))
             else:
                 images.append(Image.new("RGB", (224, 224)))

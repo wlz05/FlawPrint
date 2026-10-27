@@ -29,6 +29,20 @@ def same_path(first: str | Path, second: str | Path) -> bool:
     left, right = resolved(first), resolved(second)
     return left == right or left.exists() and right.exists() and os.path.samefile(left, right)
 
+def protect_outputs(outputs: list[str | Path], inputs: list[str | Path]) -> None:
+    targets = [resolved(path) for path in outputs]
+    if any(same_path(first, second) for index, first in enumerate(outputs) for second in outputs[index + 1:]):
+        raise ValueError("Output files must be distinct")
+    existing = [path for path in targets if path.exists()]
+    seen = set()
+    for value in inputs:
+        source = resolved(value)
+        if source in seen:
+            continue
+        seen.add(source)
+        if source in targets or source.exists() and any(os.path.samefile(source, target) for target in existing):
+            raise ValueError("Output paths cannot overwrite source files")
+
 @contextmanager
 def atomic_stream(path: str | Path, encoding: str = "utf-8", newline: str = "\n", binary: bool = False):
     target = relative_path(path)
@@ -224,6 +238,8 @@ def load_bundle(path: str | Path) -> dict:
     try:
         with relative_path(path).open("rb") as source, np.load(source, allow_pickle=False) as archive:
             result = {key: archive[key].copy() for key in ("values", "observed", "patches", "names")}
+            if result["names"].dtype.kind == "S":
+                result["names"] = np.char.decode(result["names"], "utf-8")
             serialized = archive["metadata"].item()
             if isinstance(serialized, bytes):
                 serialized = serialized.decode("utf-8")

@@ -163,6 +163,8 @@ def convert_records(records: list[dict], config: Conversion, source: str = "") -
             excluded += 1
             continue
         paths = [portable_image(path, config.image_root) for path in images(value("image"), config)]
+        if not text.strip() and not any(paths):
+            raise ValueError(f"Row {number} requires text or an image")
         if len(set(paths)) != len(paths):
             raise ValueError(f"Row {number} repeats an equivalent image path")
         if len(paths) > 1 and config.image_policy == "error":

@@ -6,6 +6,7 @@ import copy
 import importlib.util
 import json
 from pathlib import Path
+from types import SimpleNamespace
 import subprocess
 import sys
 import tempfile
@@ -251,6 +252,72 @@ class FormatTests(unittest.TestCase):
         rows, _ = convert_records([{"id": "photo", "image": "photo.jpg"}], Conversion())
         self.assertEqual(rows[0]["text"], "")
         self.assertTrue(rows[0]["has_image"])
+
+    def test_conversion_and_preflight_reject_samples_without_content(self) -> None:
+        for record in ({"id": "empty", "text": "   "}, {"id": "empty", "image": None, "text": None}):
+            with self.subTest(record=record):
+                with self.assertRaisesRegex(ValueError, "text or an image"):
+                    convert_records([record], Conversion())
+                result = preflight([record])
+                self.assertFalse(result["passed"])
+                self.assertTrue(any("without text or images" in error for error in result["errors"]))
+
+    def test_physical_extraction_protects_images_and_derived_sidecars(self) -> None:
+        from main import command_extract
+        image = self.image()
+        for damage in ("image", "sidecar"):
+            with self.subTest(damage=damage):
+                manifest = self.root / ("features.provenance.json" if damage == "sidecar" else "manifest.jsonl")
+                write_rows(manifest, [{"id": "news", "text": "Report.", "image": image.as_posix(), "split": "test"}])
+                output = self.root / "features.npz" if damage == "sidecar" else image
+                before = image.read_bytes(), manifest.read_bytes()
+                args = SimpleNamespace(input=manifest.as_posix(), output=output.as_posix(), max_side=1024, tile_grid=4, min_side=32, workers=1)
+                with patch("main.extract", side_effect=AssertionError("Extraction must not start")):
+                    with self.assertRaisesRegex(ValueError, "overwrite"):
+                        command_extract(args)
+                self.assertEqual((image.read_bytes(), manifest.read_bytes()), before)
+                self.assertFalse((self.root / "features.npz").exists())
+        import main
+        manifest = self.root / "bomb.jsonl"
+        output = self.root / "safe.npz"
+        write_rows(manifest, [{"id": "news", "text": "Report.", "image": image.as_posix()}])
+        args = SimpleNamespace(input=manifest.as_posix(), output=output.as_posix(), max_side=1024, tile_grid=4, min_side=32, workers=1, handler=command_extract)
+        with patch("main.arguments", return_value=args), patch("PIL.Image.MAX_IMAGE_PIXELS", 128):
+            with self.assertRaisesRegex(SystemExit, "decompression bomb"):
+                main.main()
+        self.assertFalse(output.exists())
+
+    def test_conversion_protects_referenced_image_outputs_and_reports(self) -> None:
+        image = self.root / "asset.json"
+        Image.new("RGB", (64, 64), (20, 80, 100)).save(image, format="PNG")
+        source = self.root / "source.jsonl"
+        write_rows(source, [{"id": "news", "text": "Report.", "image": image.as_posix()}])
+        before = image.read_bytes()
+        for report in (False, True):
+            with self.subTest(report=report):
+                output = self.root / "converted.jsonl" if report else image
+                command = [sys.executable, "-B", "convert.py", source.as_posix(), "--dataset", "canonical", "--output", output.as_posix()]
+                if report:
+                    command += ["--report", image.as_posix()]
+                result = subprocess.run(command, capture_output=True, text=True)
+                self.assertEqual(result.returncode, 2, result.stderr)
+                self.assertIn("overwrite", result.stderr)
+                self.assertEqual(image.read_bytes(), before)
+                self.assertFalse((self.root / "converted.jsonl").exists())
+
+    def test_canonical_partition_merge_preserves_label_orientation_and_roles(self) -> None:
+        inputs = []
+        for role, label in (("train", 0), ("validation", 1), ("calibration", 0), ("test", 1), ("profile", None)):
+            path = self.root / (role + ".jsonl")
+            write_rows(path, [{"id": role, "text": "Report " + role, "split": role, "label": label, "domain": "target" if role == "profile" else "source"}])
+            inputs.append(path.as_posix())
+        output = self.root / "manifest.jsonl"
+        result = subprocess.run([sys.executable, "-B", "convert.py", *inputs, "--dataset", "canonical", "--output", output.as_posix()], capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        rows = read_rows(output)
+        self.assertEqual([row["split"] for row in rows], ["train", "validation", "calibration", "test", "profile"])
+        self.assertEqual([row.get("label") for row in rows], [0, 1, 0, 1, None])
+        self.assertEqual(read_json(self.root / "manifest.conversion.json")["samples"], 5)
 
     def test_duplicate_content_without_source_ids_is_rejected(self) -> None:
         with self.assertRaises(ValueError):

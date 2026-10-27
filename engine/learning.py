@@ -2,6 +2,7 @@
 # FlawPrint: Cross-Domain Multimodal Fake News Detection via Copula Residuals of Physical Imperfection Traces
 
 from __future__ import annotations
+import copy
 from dataclasses import asdict, replace
 import hashlib
 import os
@@ -245,7 +246,7 @@ def parameters(model: ResidualAttention, path: Path, checksum: str) -> None:
             raise ValueError("Neural checkpoint parameters must be finite: " + name)
     model.load_state_dict(stored)
 
-def publish(destination: Path, parameters: dict, profiles: dict, metadata: dict) -> None:
+def publish(destination: Path, parameters: dict, profiles: dict, metadata: dict, provenance: dict | None = None) -> None:
     destination.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(dir=destination.parent, prefix=".flawprint-") as temporary:
         stage = relative_path(os.path.relpath(temporary))
@@ -259,6 +260,10 @@ def publish(destination: Path, parameters: dict, profiles: dict, metadata: dict)
         torch.save(parameters, weights)
         metadata = dict(metadata, profiles=paths, profile_sha256=hashes, weights_sha256=digest(weights))
         write_json(stage / "model.json", metadata)
+        if provenance is not None:
+            write_json(stage / "provenance.json", provenance)
+            if any(digest(item["path"]) != item["sha256"] for item in provenance["inputs"]):
+                raise ValueError("An input changed during training; the checkpoint was not published")
         if destination.exists():
             if not destination.is_dir() or any(destination.iterdir()):
                 raise ValueError("The model output became occupied during training")
@@ -266,9 +271,15 @@ def publish(destination: Path, parameters: dict, profiles: dict, metadata: dict)
         # Publish the complete checkpoint without mixing separate runs.
         stage.rename(destination)
 
-def fit(bundle: dict, archive: dict, output: str, config: NeuralConfig, profile_config: ProfileConfig, device: str = "cuda:0") -> dict:
+def fit(bundle: dict, archive: dict, output: str, config: NeuralConfig, profile_config: ProfileConfig, device: str = "cuda:0", provenance: dict | None = None) -> dict:
     config.validate()
     profile_config.validate()
+    if provenance is not None:
+        if not isinstance(provenance, dict) or not isinstance(provenance.get("inputs"), list) or any(not isinstance(item, dict) or not isinstance(item.get("path"), str) or not isinstance(item.get("sha256"), str) or re.fullmatch("[0-9a-f]{64}", item["sha256"]) is None for item in provenance["inputs"]):
+            raise ValueError("Training provenance requires input paths and SHA256 strings")
+        provenance = copy.deepcopy(provenance)
+        if any(digest(item["path"]) != item["sha256"] for item in provenance["inputs"]):
+            raise ValueError("A training input changed before fitting")
     destination = relative_path(output)
     if destination.exists() and (not destination.is_dir() or any(destination.iterdir())):
         raise ValueError("Choose a new or empty model output directory")
@@ -338,7 +349,7 @@ def fit(bundle: dict, archive: dict, output: str, config: NeuralConfig, profile_
     metadata = {"version": "flawprint-neural-v2", "relation_operator": "content-conditioned-reference-v2", "config": asdict(config), "dimensions": dimensions, "feature_order": list(dimensions), "trace_names": bundle["names"].tolist(), "normalizers": normalizers, "encoder_signature": signature(archive), "calibration": state, "fit_identifiers": [row["id"] for row in fit_rows], "fit_history": collect(fit_rows), "source_sha256": source_digest(), "selection_metric": "source validation macro F1", "trainable_parameters": sum(value.numel() for value in model.parameters() if value.requires_grad), "history": history, "best_validation_macro_f1": best_score, "backbones": "Frozen local feature encoders; trainable projectors, attention and heads", "target_labels_used_for_fitting": False}
     metadata["environment"] = {"python": platform.python_version(), "torch": str(torch.__version__), "numpy": np.__version__, "device": device, "cuda_runtime": torch.version.cuda, "gpu": torch.cuda.get_device_name(torch.device(device)) if torch.device(device).type == "cuda" else None}
     metadata["embedding_protocol"] = embeddings.protocol(archive)
-    publish(destination, best, profiles, metadata)
+    publish(destination, best, profiles, metadata, provenance)
     image_samples = sum(isinstance(rows[index].get("physical_manipulated"), (bool, np.bool_)) and bool(rows[index].get("image")) for index in partitions["train"]) if config.auxiliary_weight else 0
     return {"output": output, "epochs": len(history), "best_validation_macro_f1": best_score, "trainable_parameters": metadata["trainable_parameters"], "image_supervised_samples": image_samples}
 

@@ -139,6 +139,30 @@ class NeuralTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "nonempty"):
                 embeddings.extract([], {name: "./missing" for name in ("bert", "mae", "clip")}, device="cpu")
 
+    def test_blank_samples_fail_before_loading_pretrained_encoders(self) -> None:
+        with patch.dict(sys.modules, {"transformers": None}):
+            with self.assertRaisesRegex(ValueError, "every sample"):
+                embeddings.extract([{"id": "empty", "text": "   "}], {name: "./missing" for name in ("bert", "mae", "clip")}, device="cpu")
+
+    def test_deep_extraction_protects_original_images_before_model_loading(self) -> None:
+        import deep
+        from PIL import Image
+        image = self.root / "image.png"
+        Image.new("RGB", (64, 64), (30, 80, 100)).save(image)
+        manifest = self.root / "manifest.jsonl"
+        write_rows(manifest, [{"id": "news", "text": "Report.", "image": image.as_posix()}])
+        before = image.read_bytes()
+        args = SimpleNamespace(command="extract", manifest=manifest.as_posix(), bert="./missing", mae="./missing", clip="./missing", forensic=None, batch_size=1, device="cpu", max_length=8, output=image.as_posix())
+        with patch("deep.arguments", return_value=args), patch("engine.embeddings.extract", side_effect=AssertionError("Model loading must not start")):
+            with self.assertRaisesRegex(SystemExit, "overwrite"):
+                deep.main()
+        self.assertEqual(image.read_bytes(), before)
+        args.output = (self.root / "features.npz").as_posix()
+        with patch("deep.arguments", return_value=args), patch("engine.embeddings.extract", side_effect=Image.DecompressionBombError("Image exceeds the pixel limit")):
+            with self.assertRaisesRegex(SystemExit, "pixel limit"):
+                deep.main()
+        self.assertFalse(Path(args.output).exists())
+
     def test_cuda_errors_precede_training_and_explain_the_device_choice(self) -> None:
         output = self.root / "cuda"
         with patch("torch.cuda.is_available", return_value=False), patch("engine.learning.prepare", side_effect=AssertionError("Reference fitting must not start")):
@@ -552,6 +576,71 @@ class NeuralTests(unittest.TestCase):
         self.assertTrue(predict(self.bundle, self.archive, output.as_posix(), device="cpu"))
         self.assertFalse(list(self.root.glob(".flawprint-*")))
 
+    def test_changed_training_inputs_never_publish_a_checkpoint(self) -> None:
+        source = self.root / "source.json"
+        original = torch.save
+        for preexisting in (False, True):
+            with self.subTest(preexisting=preexisting):
+                source.write_bytes(b"original")
+                provenance = {"inputs": [{"path": source.as_posix(), "sha256": digest(source)}]}
+                output = self.root / ("empty" if preexisting else "new")
+                if preexisting:
+                    output.mkdir()
+                def changing(parameters, path):
+                    original(parameters, path)
+                    source.write_bytes(b"changed")
+                with patch("engine.learning.torch.save", side_effect=changing):
+                    with self.assertRaisesRegex(ValueError, "not published"):
+                        fit(self.bundle, self.archive, output.as_posix(), replace(self.config, epochs=1), self.profile, "cpu", provenance)
+                self.assertEqual(output.exists(), preexisting)
+                self.assertFalse(output.exists() and list(output.iterdir()))
+                self.assertFalse(list(self.root.glob(".flawprint-*")))
+
+    def test_failed_provenance_write_preserves_the_empty_model_directory(self) -> None:
+        output = self.root / "empty"
+        output.mkdir()
+        source = self.root / "source.json"
+        source.write_bytes(b"original")
+        provenance = {"inputs": [{"path": source.as_posix(), "sha256": digest(source)}]}
+        original = write_json
+        def interrupted(path, value):
+            if Path(path).name == "provenance.json":
+                raise OSError("Interrupted provenance write")
+            return original(path, value)
+        with patch("engine.learning.write_json", side_effect=interrupted):
+            with self.assertRaisesRegex(OSError, "Interrupted provenance"):
+                fit(self.bundle, self.archive, output.as_posix(), replace(self.config, epochs=1), self.profile, "cpu", provenance)
+        self.assertEqual(list(output.iterdir()), [])
+        self.assertFalse(list(self.root.glob(".flawprint-*")))
+
+    def test_provenance_is_present_before_checkpoint_publication(self) -> None:
+        source = self.root / "source.json"
+        source.write_bytes(b"original")
+        provenance = {"inputs": [{"path": source.as_posix(), "sha256": digest(source)}], "dataset": "weibo"}
+        output = self.root / "complete"
+        original = Path.rename
+        def inspected(stage, target):
+            self.assertEqual(read_json(stage / "provenance.json"), provenance)
+            self.assertTrue((stage / "parameters.pt").is_file())
+            self.assertTrue((stage / "model.json").is_file())
+            return original(stage, target)
+        with patch.object(Path, "rename", inspected):
+            fit(self.bundle, self.archive, output.as_posix(), replace(self.config, epochs=1), self.profile, "cpu", provenance)
+        self.assertEqual(read_json(output / "provenance.json"), provenance)
+        self.assertTrue(predict(self.bundle, self.archive, output.as_posix(), device="cpu"))
+
+    def test_stale_or_malformed_training_provenance_fails_before_fitting(self) -> None:
+        source = self.root / "source.json"
+        source.write_bytes(b"original")
+        stale = {"inputs": [{"path": source.as_posix(), "sha256": digest(source)}]}
+        source.write_bytes(b"changed")
+        for provenance in ([], {}, {"inputs": [None]}, {"inputs": [{"path": source.as_posix(), "sha256": "invalid"}]}, stale):
+            with self.subTest(provenance=provenance):
+                with patch("engine.learning.prepare", side_effect=AssertionError("Reference fitting must not start")):
+                    with self.assertRaises(ValueError):
+                        fit(self.bundle, self.archive, (self.root / "invalid").as_posix(), self.config, self.profile, "cpu", provenance)
+        self.assertFalse((self.root / "invalid").exists())
+
     def test_unavailable_physical_references_preserve_deep_predictions(self) -> None:
         directory = (self.root / "deepfallback").as_posix()
         fit(self.bundle, self.archive, directory, replace(self.config, epochs=1), replace(self.profile, min_samples=1000), "cpu")
@@ -604,6 +693,45 @@ class NeuralTests(unittest.TestCase):
                 deep.main()
         self.assertEqual((output.read_bytes(), report.read_bytes()), before)
         self.assertFalse(list(self.root.glob(".flawprint-*.tmp")))
+
+    def test_prediction_exports_protect_images_referenced_by_the_cache(self) -> None:
+        import deep
+        from PIL import Image
+        physical, vectors = self.root / "physical.npz", self.root / "vectors.npz"
+        for path in (physical, vectors):
+            path.write_bytes(b"fixture")
+        for report in (False, True):
+            with self.subTest(report=report):
+                image = self.root / ("predictions.report.json" if report else "asset.json")
+                Image.new("RGB", (64, 64), (20, 80, 100)).save(image, format="PNG")
+                before = image.read_bytes()
+                output = self.root / "predictions.jsonl" if report else image
+                args = SimpleNamespace(command="predict", features=physical.as_posix(), embeddings=vectors.as_posix(), output=output.as_posix(), model=(self.root / "model").as_posix(), split="test", device="cpu", reference_domain=None, explain=False)
+                with patch("deep.arguments", return_value=args), patch("deep.load_bundle", return_value=self.bundle), patch("engine.embeddings.load", return_value=self.archive), patch("engine.learning.predict", return_value=[{"id": "news", "image": image.as_posix()}]):
+                    with self.assertRaisesRegex(SystemExit, "overwrite"):
+                        deep.main()
+                self.assertEqual(image.read_bytes(), before)
+
+    def test_training_cli_input_changes_do_not_leave_a_published_model(self) -> None:
+        import deep
+        physical, vectors = self.root / "physical.npz", self.root / "vectors.npz"
+        save_bundle(physical, self.bundle["values"], self.bundle["observed"], self.bundle["patches"], self.bundle["rows"], self.bundle["names"].tolist())
+        embeddings.save(vectors.as_posix(), self.archive)
+        config, profile = self.root / "config.json", self.root / "profile.json"
+        write_json(config, asdict(replace(self.config, epochs=1)))
+        write_json(profile, asdict(self.profile))
+        output = self.root / "model"
+        args = SimpleNamespace(command="train", features=physical.as_posix(), embeddings=vectors.as_posix(), config=config.as_posix(), profile_config=profile.as_posix(), output=output.as_posix(), seed=None, mode=None, dataset="weibo", device="cpu")
+        original = torch.save
+        def changed(parameters, path):
+            original(parameters, path)
+            with physical.open("ab") as stream:
+                stream.write(b"changed")
+        with patch("deep.arguments", return_value=args), patch("engine.learning.torch.save", side_effect=changed):
+            with self.assertRaisesRegex(SystemExit, "not published"):
+                deep.main()
+        self.assertFalse(output.exists())
+        self.assertFalse(list(self.root.glob(".flawprint-*")))
 
     def test_all_neural_controls_have_finite_predictions(self) -> None:
         for mode in ("unbiased", "independent", "deep", "concat", "uniform", "broadcast", "diagonal", "shuffled"):
@@ -690,6 +818,10 @@ class NeuralTests(unittest.TestCase):
         self.assertTrue(embeddings.protocol(first)["complete"])
         embeddings.save((self.root / "encoded.npz").as_posix(), first)
         self.assertEqual(embeddings.protocol(embeddings.load((self.root / "encoded.npz").as_posix())), embeddings.protocol(first))
+        animated = self.root / "animated.gif"
+        Image.new("RGB", (32, 32), (10, 20, 30)).save(animated, save_all=True, append_images=[Image.new("RGB", (32, 32), (100, 120, 140))], duration=100, loop=0)
+        with self.assertRaisesRegex(ValueError, "Animated or multipage"):
+            embeddings.extract([{"id": "animated", "image": animated.as_posix(), "text": "news"}], paths, batch_size=1, device="cpu", max_length=8)
 
     def test_row_constant_bias_is_invisible_to_masked_attention(self) -> None:
         torch.manual_seed(42)
