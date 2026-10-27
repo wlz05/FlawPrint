@@ -2,10 +2,10 @@
 # FlawPrint: Cross-Domain Multimodal Fake News Detection via Copula Residuals of Physical Imperfection Traces
 
 from __future__ import annotations
-import json
 import math
 import numpy as np
 from engine.data import boolean, identifier, missing, portable_image, SPLITS, SPLIT_ALIASES
+from engine.storage import parse_json
 
 NUMBERS = ("label", "prediction", "probability", "fusion_risk", "physical_risk", "physical_evidence", "copula_risk", "copula_score", "semantic_logit", "sign_score", "sign_conflict_ratio", "observed_fraction", "potential_disabled_risk", "potential_risk_delta", "uniform_readout_risk", "query_readout_delta", "attention_contrast_rms", "attention_shift_tv")
 BOOLEANS = ("abstain", "probability_calibrated", "profile_overlap", "physical_available", "has_image", "patch_signs_valid_after_attack", "physical_manipulated", "narrative_false", "physical_reference_available", "embedding_protocol_verified")
@@ -90,7 +90,7 @@ def prediction_rows(records: list[dict]) -> list[dict]:
             if missing(row[key]):
                 row[key] = None
                 continue
-            value = json.loads(row[key]) if isinstance(row[key], str) else row[key]
+            value = parse_json(row[key]) if isinstance(row[key], str) else row[key]
             if not isinstance(value, kind):
                 raise ValueError(f"Invalid prediction structure: {key}")
             if key == "prediction_set" and (any(isinstance(label, bool) or label not in (0, 1) for label in value) or len(set(value)) != len(value)):

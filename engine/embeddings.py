@@ -12,7 +12,7 @@ from zipfile import BadZipFile
 from zlib import error as CompressionError
 import numpy as np
 from engine.data import normalize
-from engine.storage import relative_path, digest, native, unique_object, invalid_constant, atomic_stream
+from engine.storage import relative_path, digest, native, parse_json, atomic_stream
 
 STREAMS = ("bert", "mae", "clip_text", "clip_image")
 
@@ -116,7 +116,7 @@ def load(path: str) -> dict:
                 serialized = serialized.decode("utf-8")
             if not isinstance(serialized, str):
                 raise ValueError("Embedding metadata must contain a JSON string")
-            metadata = json.loads(serialized, object_pairs_hook=unique_object, parse_constant=invalid_constant)
+            metadata = parse_json(serialized)
             if not isinstance(metadata, dict) or metadata.get("version") != "flawprint-embeddings-v1":
                 raise ValueError("Unsupported embedding archive version")
             if metadata.get("streams") not in (list(STREAMS), list(STREAMS) + ["forensic"]):

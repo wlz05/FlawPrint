@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import replace
 import copy
 import gc
+import json
 from pathlib import Path
 import tempfile
 import unittest
@@ -79,6 +80,16 @@ class IntegrityTests(unittest.TestCase):
             np.savez_compressed(stream, values=np.ones((2, 2)), observed=np.ones((2, 2), dtype=bool), patches=np.ones((2, 4, 3)), names=np.asarray(["a", "b"]), metadata=np.asarray('[{"id":"a","domain":"x"},{"id":"b","domain":"x"}]'))
         with self.assertRaises(ValueError):
             load_bundle(path)
+
+    def test_physical_metadata_rejects_overflow_in_unknown_fields(self) -> None:
+        path = self.root / "overflow.npz"
+        serialized = json.dumps(self.bundle["rows"])
+        serialized = '[{"extra":1e999,' + serialized[2:]
+        np.savez_compressed(path, values=self.bundle["values"], observed=self.bundle["observed"], patches=self.bundle["patches"], names=self.bundle["names"], metadata=np.asarray(serialized))
+        original = path.read_bytes()
+        with self.assertRaisesRegex(ValueError, "finite"):
+            load_bundle(path)
+        self.assertEqual(path.read_bytes(), original)
 
     def test_subset_does_not_mutate_parent_metadata(self) -> None:
         selected = subset(self.bundle, [0])
@@ -480,6 +491,28 @@ class IntegrityTests(unittest.TestCase):
             for value in (float("inf"), True):
                 with self.assertRaises(ValueError):
                     prediction_rows([{"id": "a", key: value}])
+
+    def test_csv_prediction_structures_use_strict_json(self) -> None:
+        invalid = ('{"x":NaN}', '{"x":Infinity}', '{"x":1e999}', '{"x":1,"x":2}')
+        for suffix in ("csv", "tsv"):
+            for key in ("physical_power_screen", "routing_policy", "copula_explanation"):
+                for content in invalid:
+                    with self.subTest(suffix=suffix, key=key, content=content):
+                        path = self.root / ("structures." + suffix)
+                        write_rows(path, [{"id": "sample", key: content}])
+                        with self.assertRaises(ValueError):
+                            prediction_rows(read_rows(path))
+
+    def test_calibration_rejects_malformed_identifier_and_score_metadata(self) -> None:
+        validation = [{"id": "v" + str(index), "label": index % 2, "fusion_risk": 2 * (index % 2) - 1} for index in range(4)]
+        calibration = [{"id": "c" + str(index), "label": index % 2, "fusion_risk": 2 * (index % 2) - 1} for index in range(4)]
+        state = calibrate_rows(validation, calibration)
+        for key, value in (("validation_identifiers", [["v0"]]), ("validation_identifiers", [True]), ("score_key", []), ("score_key", "")):
+            damaged = copy.deepcopy(state)
+            damaged[key] = value
+            with self.subTest(key=key, value=value):
+                with self.assertRaises(ValueError):
+                    apply_calibration([], damaged)
 
     def test_profile_and_calibration_numeric_settings_reject_booleans(self) -> None:
         for name in ("shrinkage", "local_shrinkage", "min_observed", "sign_tolerance", "sign_weight", "kappa"):

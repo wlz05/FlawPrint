@@ -261,9 +261,11 @@ python -B main.py evaluate ./outputs/deterministic.jsonl --seed 42 --output ./ou
 
 ## Input and Artifact Checks
 
-Physical and deep NPZ caches use atomic replacement. Their loaders reject malformed archives and duplicate JSON metadata keys, accept UTF-8 metadata strings or bytes, and close input files on failure. Diagnostic scores and Boolean fields retain their types through CSV, TSV, and JSONL conversion.
+Physical and deep NPZ caches use atomic replacement. Their loaders reject malformed archives, accept UTF-8 metadata strings or bytes, and close input files on failure. JSON manifests, configuration, cache metadata, and serialized table fields reject duplicate keys and nonfinite numbers, including exponent overflow. Malformed CSV reports the physical line number. Diagnostic scores and Boolean fields retain their types through CSV, TSV, and JSONL conversion.
 
 News labels require explicit numeric classes. Boolean labels and complex-valued numeric inputs are rejected. Source standardization checks float32 representability before inference, with missing streams kept at zero. Profile and calibration settings distinguish numeric parameters from Boolean metadata.
+
+Checkpoint loading validates metadata and checks parameter names, shapes, types, finite values, and the weight hash before inference. Each inference batch must return one finite risk per selected sample; diagnostics must align with the same samples. Explanation differences use higher precision to avoid float32 subtraction overflow. The prediction command validates metrics before replacing existing predictions.
 
 ## Additional Analysis
 

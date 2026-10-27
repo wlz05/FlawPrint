@@ -85,9 +85,22 @@ def unique_object(pairs: list[tuple[str, Any]]) -> dict:
 def invalid_constant(value: str) -> None:
     raise ValueError("JSON values must be finite; use null for missing cells")
 
+def finite_float(value: str) -> float:
+    # Reject exponent overflow before constructing numeric arrays.
+    number = float(value)
+    if not np.isfinite(number):
+        invalid_constant(value)
+    return number
+
+def parse_json(content: str) -> Any:
+    try:
+        return json.loads(content, object_pairs_hook=unique_object, parse_constant=invalid_constant, parse_float=finite_float)
+    except RecursionError as error:
+        raise ValueError("JSON nesting exceeds the supported depth") from error
+
 def read_json(path: str | Path) -> Any:
     with relative_path(path).open("r", encoding="utf-8-sig") as stream:
-        return json.load(stream, object_pairs_hook=unique_object, parse_constant=invalid_constant)
+        return parse_json(stream.read())
 
 def write_json(path: str | Path, value: Any) -> None:
     content = json.dumps(native(value), ensure_ascii=True, indent=2, allow_nan=False) + "\n"
@@ -124,7 +137,9 @@ def read_rows(path: str | Path, encoding: str = "utf-8-sig", delimiter: str | No
             raise ValueError('Table support requires python -m pip install "pandas>=2.2,<4" "openpyxl>=3.1,<4" "pyarrow>=15,<30" "xlrd>=2,<3"') from error
     elif suffix in (".csv", ".tsv"):
         with target.open("r", encoding=encoding, newline="") as stream:
-            chosen = delimiter or ("\t" if suffix == ".tsv" else ",")
+            chosen = ("\t" if suffix == ".tsv" else ",") if delimiter is None else delimiter
+            if not isinstance(chosen, str):
+                raise ValueError("A table delimiter must be one character")
             if chosen == "auto":
                 sample = stream.read(65536)
                 stream.seek(0)
@@ -133,19 +148,22 @@ def read_rows(path: str | Path, encoding: str = "utf-8-sig", delimiter: str | No
                 except csv.Error as error:
                     raise ValueError("Cannot infer the delimiter; supply it explicitly") from error
             chosen = "\t" if chosen == "\\t" else chosen
-            if len(chosen) != 1:
+            if len(chosen) != 1 or chosen in "\r\n\0":
                 raise ValueError("A table delimiter must be one character")
             reader = csv.DictReader(stream, delimiter=chosen, strict=True)
-            headers = reader.fieldnames or []
-            if not headers or any(not name.strip() for name in headers) or len({name.strip().casefold() for name in headers}) != len(headers):
-                raise ValueError("CSV headers must be unique and nonempty")
-            result = []
-            for line, row in enumerate(reader, 2):
-                if None in row or any(value is None for value in row.values()):
-                    raise ValueError(f"CSV row {line} has a different column count")
-                result.append({key.strip(): value for key, value in row.items()})
+            try:
+                headers = reader.fieldnames or []
+                if not headers or any(not name.strip() for name in headers) or len({name.strip().casefold() for name in headers}) != len(headers):
+                    raise ValueError("CSV headers must be unique and nonempty")
+                result = []
+                for row in reader:
+                    if None in row or any(value is None for value in row.values()):
+                        raise ValueError(f"CSV row ending on line {reader.line_num} has a different column count")
+                    result.append({key.strip(): value for key, value in row.items()})
+            except csv.Error as error:
+                raise ValueError(f"Invalid CSV near line {reader.reader.line_num}: {error}") from error
     elif suffix == ".json":
-        value = json.loads(target.read_text(encoding=encoding), object_pairs_hook=unique_object, parse_constant=invalid_constant)
+        value = parse_json(target.read_text(encoding=encoding))
         if records_key is not None:
             if not isinstance(value, dict) or records_key not in value:
                 raise ValueError("The requested JSON record key does not exist")
@@ -159,7 +177,7 @@ def read_rows(path: str | Path, encoding: str = "utf-8-sig", delimiter: str | No
             for line, content in enumerate(stream, 1):
                 if content.strip():
                     try:
-                        result.append(json.loads(content, object_pairs_hook=unique_object, parse_constant=invalid_constant))
+                        result.append(parse_json(content))
                     except ValueError as error:
                         raise ValueError(f"Invalid JSON on line {line}: {error}") from error
     else:
@@ -187,7 +205,7 @@ def write_csv(path: str | Path, rows: list[dict], delimiter: str = ",") -> None:
     fields = list(dict.fromkeys(key for row in rows for key in row))
     if not fields:
         raise ValueError("CSV export requires at least one named column; use JSON for empty results")
-    if not isinstance(delimiter, str) or len(delimiter) != 1:
+    if not isinstance(delimiter, str) or len(delimiter) != 1 or delimiter in "\r\n\0":
         raise ValueError("A table delimiter must be one character")
     with atomic_stream(target, "utf-8-sig", "") as stream:
         writer = csv.DictWriter(stream, fieldnames=fields, delimiter=delimiter)
@@ -211,7 +229,7 @@ def load_bundle(path: str | Path) -> dict:
                 serialized = serialized.decode("utf-8")
             if not isinstance(serialized, str):
                 raise ValueError("Physical feature metadata must contain a JSON string")
-            result["rows"] = json.loads(serialized, object_pairs_hook=unique_object, parse_constant=invalid_constant)
+            result["rows"] = parse_json(serialized)
         validate_bundle(result)
     except (BadZipFile, CompressionError, EOFError, KeyError, TypeError, ValueError) as error:
         raise ValueError("Invalid physical feature archive: " + str(error)) from error

@@ -85,10 +85,12 @@ def main() -> None:
             report = relative_path(args.output).with_name(relative_path(args.output).stem + ".report.json")
             if any(same_path(report, path) for path in protected) or resolved(report).is_relative_to(resolved(args.model)):
                 raise ValueError("The prediction report cannot overwrite an input or model artifact")
+            # Validate report inputs before replacing existing predictions.
+            metrics = evaluate(predictions) if all("label" in row for row in predictions) else None
             write_rows(args.output, predictions)
             result = {"samples": len(predictions), "output": args.output}
-            if all("label" in row for row in predictions):
-                write_json(report, evaluate(predictions))
+            if metrics is not None:
+                write_json(report, metrics)
                 result["report"] = report.as_posix()
         print(json.dumps(result, indent=2, allow_nan=False))
     except ImportError as error:

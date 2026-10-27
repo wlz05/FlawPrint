@@ -6,8 +6,10 @@ from dataclasses import asdict, replace
 import hashlib
 import os
 from pathlib import Path
+from pickle import UnpicklingError
 import platform
 import random
+import re
 import tempfile
 import numpy as np
 import torch
@@ -120,6 +122,8 @@ def prepare(bundle: dict, archive: dict, config: ProfileConfig, folds: int, use_
     return packet, profiles
 
 def standardize(packet: dict, training: list[int], state: dict | None = None) -> tuple[dict, dict]:
+    if state is not None and (not isinstance(state, dict) or set(state) != set(packet["features"])):
+        raise ValueError("The source feature standardizer must match every encoded stream")
     learned = {} if state is None else state
     output = dict(packet, features={})
     for column, (name, values) in enumerate(packet["features"].items()):
@@ -129,8 +133,11 @@ def standardize(packet: dict, training: list[int], state: dict | None = None) ->
                 raise ValueError("Each encoded stream needs observed source training examples")
             selected = values[indices].astype(np.float64)
             learned[name] = {"center": selected.mean(0).tolist(), "scale": np.maximum(selected.std(0), 1e-6).tolist()}
-        center, scale = np.asarray(learned[name]["center"]), np.asarray(learned[name]["scale"])
-        if center.shape != (values.shape[1],) or scale.shape != center.shape or not np.isfinite(center).all() or not np.isfinite(scale).all() or np.any(scale <= 0):
+        settings = learned[name]
+        if not isinstance(settings, dict) or set(settings) != {"center", "scale"}:
+            raise ValueError("The source feature standardizer requires a center and scale")
+        center, scale = np.asarray(settings["center"]), np.asarray(settings["scale"])
+        if center.dtype.kind not in "fiu" or scale.dtype.kind not in "fiu" or center.shape != (values.shape[1],) or scale.shape != center.shape or not np.isfinite(center).all() or not np.isfinite(scale).all() or np.any(scale <= 0):
             raise ValueError("The source feature standardizer is invalid")
         normalized = (values.astype(np.float64) - center) / scale
         normalized[~packet["observed"][:, column]] = 0
@@ -146,25 +153,97 @@ def batch(packet: dict, indices: list[int], device: str) -> dict:
     return output
 
 def logits(model: ResidualAttention, packet: dict, indices: list[int], device: str, size: int, diagnostics: dict | None = None) -> np.ndarray:
+    if isinstance(size, bool) or not isinstance(size, int) or size < 1:
+        raise ValueError("Inference batch size must be a positive integer")
     model.eval()
     values, measurements = [], {}
     with torch.inference_mode():
         for start in range(0, len(indices), size):
-            output = model(**batch(packet, indices[start:start + size], device), explain=diagnostics is not None)
-            values.append(output["logit"].detach().cpu().numpy())
+            selected = indices[start:start + size]
+            output = model(**batch(packet, selected, device), explain=diagnostics is not None)
+            if not isinstance(output, dict) or not isinstance(output.get("logit"), torch.Tensor):
+                raise ValueError("Neural inference requires one logit tensor per batch")
+            # Check sample alignment before combining inference batches.
+            risk = output["logit"].detach().cpu().numpy()
+            if risk.shape != (len(selected),) or risk.dtype.kind != "f" or not np.isfinite(risk).all():
+                raise ValueError("Neural inference requires one finite risk per selected sample")
+            values.append(risk)
             if diagnostics is not None:
                 for name in ("attention_contrast_rms", "attention_shift_tv"):
                     if name in output:
-                        measurements.setdefault(name, []).append(output[name].detach().cpu().numpy())
+                        if not isinstance(output[name], torch.Tensor):
+                            raise ValueError("Neural diagnostics require tensors: " + name)
+                        value = output[name].detach().cpu().numpy()
+                        if value.shape != risk.shape or value.dtype.kind != "f" or not np.isfinite(value).all() or np.any(value < 0) or name == "attention_shift_tv" and np.any(value > 1):
+                            raise ValueError("Neural diagnostics require finite aligned values: " + name)
+                        measurements.setdefault(name, []).append(value)
     if diagnostics is not None:
-        diagnostics.update({name: np.concatenate(parts) for name, parts in measurements.items()})
+        combined = {name: np.concatenate(parts) for name, parts in measurements.items()}
+        if any(len(value) != len(indices) for value in combined.values()):
+            raise ValueError("Neural diagnostics must cover every selected sample")
+        diagnostics.update(combined)
     return np.concatenate(values) if values else np.empty(0)
 
 def scored(rows: list[dict], indices: list[int], risks: np.ndarray) -> list[dict]:
+    risks = np.asarray(risks)
+    if risks.shape != (len(indices),) or risks.dtype.kind not in "fiu" or not np.isfinite(risks).all():
+        raise ValueError("Scoring requires one finite risk per selected sample")
     return [dict(rows[index], fusion_risk=float(risk), prediction=int(risk >= 0), method="flawprint_residual_attention") for index, risk in zip(indices, risks)]
 
 def signature(archive: dict) -> dict:
     return {name: {"sha256": value.get("sha256"), "frozen": value.get("frozen")} for name, value in archive["provenance"].get("encoders", {}).items()}
+
+def checkpoint(metadata: dict) -> NeuralConfig:
+    required = {"version", "weights_sha256", "config", "dimensions", "feature_order", "trace_names", "normalizers", "encoder_signature", "calibration", "fit_identifiers", "fit_history", "profiles", "profile_sha256"}
+    if not isinstance(metadata, dict) or not required.issubset(metadata):
+        raise ValueError("Neural checkpoint metadata is missing required fields")
+    if metadata["version"] not in ("flawprint-neural-v1", "flawprint-neural-v2"):
+        raise ValueError("The neural checkpoint version is unsupported")
+    if metadata["version"] == "flawprint-neural-v2" and metadata.get("relation_operator") != "content-conditioned-reference-v2":
+        raise ValueError("The neural checkpoint relation operator is unsupported")
+    mappings = ("config", "dimensions", "normalizers", "encoder_signature", "calibration", "fit_history", "profiles", "profile_sha256")
+    if any(not isinstance(metadata[name], dict) for name in mappings) or "embedding_protocol" in metadata and not isinstance(metadata["embedding_protocol"], dict):
+        raise ValueError("Neural checkpoint settings must contain objects")
+    order, dimensions, names = (metadata[name] for name in ("feature_order", "dimensions", "trace_names"))
+    if order not in (list(embeddings.STREAMS), list(embeddings.STREAMS) + ["forensic"]) or set(dimensions) != set(order) or any(isinstance(value, bool) or not isinstance(value, int) or not 0 < value <= 8192 for value in dimensions.values()):
+        raise ValueError("Neural checkpoint streams or dimensions are invalid")
+    if not isinstance(names, list) or len(names) < 2 or any(not isinstance(name, str) or not name.strip() for name in names) or len(set(names)) != len(names):
+        raise ValueError("Neural checkpoint trace names must be unique nonempty strings")
+    identifiers = metadata["fit_identifiers"]
+    if not isinstance(identifiers, list) or not identifiers or any(not isinstance(value, str) or not value.strip() for value in identifiers) or len(set(identifiers)) != len(identifiers):
+        raise ValueError("Neural checkpoint fitting identifiers must be unique nonempty strings")
+    profiles, hashes = metadata["profiles"], metadata["profile_sha256"]
+    if set(profiles) != set(hashes) or any(not isinstance(domain, str) or not domain.strip() or not isinstance(path, str) or not path.strip() for domain, path in profiles.items()):
+        raise ValueError("Neural checkpoint reference paths and hashes must agree")
+    if any(not isinstance(value, str) or re.fullmatch("[0-9a-f]{64}", value) is None for value in [metadata["weights_sha256"], *hashes.values()]):
+        raise ValueError("Neural checkpoint hashes must be lowercase SHA256 strings")
+    try:
+        config = NeuralConfig(**metadata["config"])
+    except TypeError as error:
+        raise ValueError("Neural checkpoint configuration fields are invalid") from error
+    config.validate()
+    ensure_disjoint([], metadata["fit_history"])
+    apply_calibration([], metadata["calibration"])
+    return config
+
+def parameters(model: ResidualAttention, path: Path, checksum: str) -> None:
+    try:
+        # Validate stored tensors before moving the model to the GPU.
+        stored = torch.load(path, map_location="cpu", weights_only=True)
+    except (EOFError, UnpicklingError, RuntimeError, ValueError, TypeError, KeyError, IndexError) as error:
+        raise ValueError("Cannot decode neural checkpoint weights") from error
+    if digest(path) != checksum:
+        raise ValueError("The neural checkpoint weights changed while loading")
+    expected = model.state_dict()
+    if not isinstance(stored, dict) or set(stored) != set(expected):
+        raise ValueError("Neural checkpoint parameter names do not match the model")
+    for name, value in stored.items():
+        target = expected[name]
+        if not isinstance(value, torch.Tensor) or value.device.type != "cpu" or value.layout != torch.strided or value.shape != target.shape or value.dtype != target.dtype:
+            raise ValueError("Neural checkpoint parameter shape or type is invalid: " + name)
+        if not torch.isfinite(value).all():
+            raise ValueError("Neural checkpoint parameters must be finite: " + name)
+    model.load_state_dict(stored)
 
 def publish(destination: Path, parameters: dict, profiles: dict, metadata: dict) -> None:
     destination.parent.mkdir(parents=True, exist_ok=True)
@@ -269,10 +348,9 @@ def predict(bundle: dict, archive: dict, directory: str, split: str = "test", de
     device = embeddings.runtime(device)
     root = relative_path(directory)
     metadata = read_json(root / "model.json")
-    if metadata.get("version") not in ("flawprint-neural-v1", "flawprint-neural-v2") or digest(root / "parameters.pt") != metadata.get("weights_sha256"):
-        raise ValueError("The neural checkpoint version or weight hash is invalid")
-    if metadata["version"] == "flawprint-neural-v2" and metadata.get("relation_operator") != "content-conditioned-reference-v2":
-        raise ValueError("The neural checkpoint relation operator is unsupported")
+    config = checkpoint(metadata)
+    if digest(root / "parameters.pt") != metadata["weights_sha256"]:
+        raise ValueError("The neural checkpoint weight hash is invalid")
     if bundle["names"].tolist() != metadata["trace_names"] or signature(archive) != metadata["encoder_signature"]:
         raise ValueError("The query encoder or physical feature schema changed")
     if "embedding_protocol" in metadata and embeddings.protocol(archive) != metadata["embedding_protocol"]:
@@ -303,12 +381,12 @@ def predict(bundle: dict, archive: dict, directory: str, split: str = "test", de
         ranks, graph, mask = relation(profile, subset(selected, selected_indices))
         packet["ranks"][selected_indices], packet["graph"][selected_indices], packet["trace_observed"][selected_indices] = ranks, graph, mask
     packet, _ = standardize(packet, [], metadata["normalizers"])
-    config = NeuralConfig(**metadata["config"])
     if metadata["version"] == "flawprint-neural-v1" and config.mode == "coupled":
         config = replace(config, mode="broadcast")
     dimensions = {name: metadata["dimensions"][name] for name in metadata["feature_order"]}
-    model = ResidualAttention(dimensions, len(metadata["trace_names"]), config).to(device)
-    model.load_state_dict(torch.load(root / "parameters.pt", map_location=device, weights_only=True))
+    model = ResidualAttention(dimensions, len(metadata["trace_names"]), config)
+    parameters(model, root / "parameters.pt", metadata["weights_sha256"])
+    model.to(device)
     measurements = {} if explain else None
     risks = logits(model, packet, list(range(len(rows))), device, config.batch_size, measurements)
     disabled, uniform = risks, risks if config.mode == "uniform" else None
@@ -333,9 +411,9 @@ def predict(bundle: dict, archive: dict, directory: str, split: str = "test", de
         row["physical_reference_available"] = row["reference_domain"] in metadata["profiles"]
         if explain:
             row["potential_disabled_risk"] = float(disabled[index])
-            row["potential_risk_delta"] = float(risks[index] - disabled[index])
+            row["potential_risk_delta"] = float(risks[index]) - float(disabled[index])
             row["uniform_readout_risk"] = float(uniform[index]) if uniform is not None else None
-            row["query_readout_delta"] = float(risks[index] - uniform[index]) if uniform is not None else None
+            row["query_readout_delta"] = float(risks[index]) - float(uniform[index]) if uniform is not None else None
             for name in ("attention_contrast_rms", "attention_shift_tv"):
                 row[name] = float(measurements[name][index]) if name in measurements else None
             row["intervention_scope"] = "Fixed checkpoint and input nodes; local attention contrasts, potential-off risk, and uniform readout for coupled mode"

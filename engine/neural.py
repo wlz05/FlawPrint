@@ -29,10 +29,12 @@ def contrast(values: torch.Tensor, observed: torch.Tensor) -> torch.Tensor:
     return (values - center).masked_fill(~(keys & observed[:, None, :, None]), 0)
 
 def potential(logits: torch.Tensor, observed: torch.Tensor, relation: torch.Tensor, mode: str) -> torch.Tensor:
+    if logits.ndim != 4 or logits.shape[-1] != logits.shape[-2] or not logits.is_floating_point() or relation.ndim != 3 or relation.dtype != logits.dtype or relation.device != logits.device or observed.dtype != torch.bool or observed.device != logits.device:
+        raise ValueError("Attention potentials require square floating matrices and a Boolean node mask")
     batch, heads, length, _ = logits.shape
     traces = relation.shape[-1]
     prefix = length - traces
-    if prefix < 1 or relation.shape != (batch, traces, traces) or observed.shape != (batch, length):
+    if prefix < 1 or traces < 1 or relation.shape != (batch, traces, traces) or observed.shape != (batch, length):
         raise ValueError("Relation coordinates must match the attention sequence")
     mask = observed[:, prefix:]
     relation = relation * mask[:, :, None] * mask[:, None, :]
@@ -134,7 +136,7 @@ class ResidualAttention(nn.Module):
     def __init__(self, dimensions: dict[str, int], traces: int, config: NeuralConfig):
         super().__init__()
         config.validate()
-        if traces < 2 or not dimensions or any(not isinstance(value, int) or value < 1 for value in dimensions.values()):
+        if isinstance(traces, bool) or not isinstance(traces, int) or traces < 2 or not isinstance(dimensions, dict) or not dimensions or any(isinstance(value, bool) or not isinstance(value, int) or value < 1 for value in dimensions.values()):
             raise ValueError("Attention requires valid encoder and trace dimensions")
         self.config, self.names, self.traces = config, list(dimensions), traces
         self.projectors = nn.ModuleDict({name: nn.Sequential(nn.LayerNorm(size), nn.Linear(size, config.dimension)) for name, size in dimensions.items()})

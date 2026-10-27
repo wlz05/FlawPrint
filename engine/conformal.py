@@ -137,7 +137,9 @@ def apply_calibration(rows: list[dict], state: dict | None = None) -> list[dict]
         history = state["validation_identifiers"] + state["conformal"]["identifiers"] if state else []
     except (KeyError, TypeError, AttributeError) as error:
         raise ValueError("Malformed probability calibration state") from error
-    if len(set(history)) != len(history) or any(not isinstance(identifier, str) or not identifier.strip() for identifier in history):
+    if not isinstance(key, str) or not key.strip():
+        raise ValueError("Stored calibration score keys must be nonempty strings")
+    if any(not isinstance(identifier, str) or not identifier.strip() for identifier in history) or len(set(history)) != len(history):
         raise ValueError("Stored calibration identifiers must be unique and disjoint")
     forbidden = set(history)
     if forbidden & {row["id"] for row in rows}:

@@ -18,7 +18,7 @@ from doctor import environment, compatible
 from engine.data import identifier, normalize, portable_image, audit_splits
 from engine.formats import Conversion, convert_records
 from engine.provenance import conventions, manuscript_status
-from engine.storage import read_rows, write_rows, write_json, resolved
+from engine.storage import read_rows, write_rows, read_json, write_json, write_csv, resolved
 from engine.traces import TraceConfig, extract_one
 from engine.experiment import bundle_digest
 from engine.synthetic import fixture
@@ -72,9 +72,23 @@ class FormatTests(unittest.TestCase):
             read_rows(path)
 
     def test_json_rejects_duplicate_keys_and_nonstandard_nan(self) -> None:
-        for content in ('[{"id":"a","id":"b"}]', '[{"label":NaN}]'):
+        for content in ('[{"id":"a","id":"b"}]', '[{"label":NaN}]', '[{"extra":1e999}]', '[{"extra":-1e999}]'):
             with self.assertRaises(ValueError):
                 read_rows(self.write("bad.json", content))
+
+    def test_json_configuration_and_jsonl_reject_numeric_overflow(self) -> None:
+        for content in ('{"x":1e999}', '{"x":-1e999}', '{"x":Infinity}', '{"x":{"a":1,"a":2}}'):
+            with self.subTest(content=content):
+                with self.assertRaises(ValueError):
+                    read_json(self.write("config.json", content))
+                with self.assertRaisesRegex(ValueError, "line 2"):
+                    read_rows(self.write("bad.jsonl", '{}\n' + content + '\n'))
+        self.assertEqual(read_json(self.write("config.json", '{"x":1e308,"missing":null}')), {"x": 1e308, "missing": None})
+
+    def test_deeply_nested_json_has_an_explicit_input_error(self) -> None:
+        content = '[' * 20000 + '0' + ']' * 20000
+        with self.assertRaisesRegex(ValueError, "nesting"):
+            read_json(self.write("nested.json", content))
 
     def test_csv_rejects_duplicate_empty_or_colliding_headers(self) -> None:
         for text in ("id,id\na,b\n", "id, ID \na,b\n", "id,\na,b\n"):
@@ -86,6 +100,34 @@ class FormatTests(unittest.TestCase):
         for text in ("id,text\na,b,c\n", "id,text\na\n"):
             with self.assertRaises(ValueError):
                 read_rows(self.write("bad.csv", text))
+
+    def test_malformed_quoted_csv_reports_the_physical_line(self) -> None:
+        for content, line in [('id,text\na,"unterminated\n', 2), ('"unterminated\n', 1), ('id,text\na,"two\nlines"\nb,"unfinished\n', 4)]:
+            with self.subTest(content=content):
+                with self.assertRaisesRegex(ValueError, f"Invalid CSV near line {line}"):
+                    read_rows(self.write("bad.csv", content))
+
+    def test_conversion_cli_keeps_existing_output_after_malformed_csv(self) -> None:
+        source = self.write("bad.csv", 'id,text\na,"unterminated\n')
+        output = self.write("converted.jsonl", '{"id":"existing"}\n')
+        before = output.read_bytes()
+        result = subprocess.run([sys.executable, "-B", "convert.py", source.as_posix(), "--dataset", "canonical", "--output", output.as_posix()], capture_output=True, text=True)
+        self.assertEqual(result.returncode, 2, result.stderr)
+        self.assertIn("Invalid CSV near line 2", result.stderr)
+        self.assertNotIn("Traceback", result.stderr)
+        self.assertEqual(output.read_bytes(), before)
+        self.assertFalse(list(self.root.glob(".flawprint-*.tmp")))
+
+    def test_invalid_delimiters_are_rejected_before_output_replacement(self) -> None:
+        path = self.write("data.csv", 'id,text\na,report\n')
+        before = path.read_bytes()
+        for delimiter in (True, 1, [], "", ",,", "\r", "\n", "\0"):
+            with self.subTest(delimiter=delimiter):
+                with self.assertRaises(ValueError):
+                    read_rows(path, delimiter=delimiter)
+                with self.assertRaises(ValueError):
+                    write_csv(path, self.records, delimiter=delimiter)
+                self.assertEqual(path.read_bytes(), before)
 
     def test_csv_delimiter_can_be_explicit_or_inferred(self) -> None:
         path = self.write("data.csv", "id;text;label\n001;report;0\n002;other;1\n")
@@ -260,6 +302,14 @@ class FormatTests(unittest.TestCase):
         for paths in (["one.jpg", "one.jpg"], [1, "two.jpg"]):
             with self.assertRaises(ValueError):
                 convert_records([{"text": "report", "images": paths}], Conversion(image_policy="all"))
+
+    def test_serialized_image_lists_reject_nonstandard_missing_values(self) -> None:
+        for value in ('[NaN]', '["one.jpg",NaN]', '[Infinity]', '[1e999]'):
+            with self.subTest(value=value):
+                with self.assertRaises(ValueError):
+                    convert_records([{"text": "report", "images": value}], Conversion(image_policy="all"))
+        rows, _ = convert_records([{"text": "report", "images": '["one.jpg",null]'}], Conversion(image_policy="all"))
+        self.assertEqual([row["image"] for row in rows], ["one.jpg"])
 
     def test_relative_image_root_is_idempotent_and_portable(self) -> None:
         path = portable_image("data\\images\\photo.jpg", "./data/images")

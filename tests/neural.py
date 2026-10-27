@@ -10,19 +10,21 @@ from pathlib import Path
 import subprocess
 import sys
 import tempfile
+from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
+import warnings
 import numpy as np
 from engine import embeddings
 from engine.copula import score
 from engine.experiment import indices
 from engine.profile import DomainProfile, ProfileConfig
-from engine.storage import subset, write_rows, read_rows, read_json, save_bundle, write_json
+from engine.storage import subset, write_rows, read_rows, read_json, save_bundle, write_json, digest
 from engine.synthetic import fixture
 try:
     import torch
     from engine.neural import NeuralConfig, ResidualAttention, ResidualBlock, potential, scramble, contrast
-    from engine.learning import prepare, relation, fit, predict, standardize
+    from engine.learning import prepare, relation, fit, predict, standardize, logits, scored
 except ImportError:
     torch = None
 
@@ -120,6 +122,18 @@ class NeuralTests(unittest.TestCase):
         self.assertEqual(list(restored["features"]), list(embeddings.STREAMS))
         np.testing.assert_array_equal(restored["features"]["bert"], self.archive["features"]["bert"])
 
+    def test_embedding_metadata_rejects_overflow_in_unknown_fields(self) -> None:
+        path = self.root / "overflow.npz"
+        embeddings.save(path.as_posix(), self.archive)
+        with np.load(path, allow_pickle=False) as archive:
+            arrays = {name: archive[name].copy() for name in archive.files}
+        arrays["metadata"] = np.asarray('{"extra":1e999,' + arrays["metadata"].item()[1:])
+        np.savez_compressed(path, **arrays)
+        original = path.read_bytes()
+        with self.assertRaisesRegex(ValueError, "finite"):
+            embeddings.load(path.as_posix())
+        self.assertEqual(path.read_bytes(), original)
+
     def test_empty_extraction_fails_before_optional_encoder_imports(self) -> None:
         with patch.dict(sys.modules, {"transformers": None}):
             with self.assertRaisesRegex(ValueError, "nonempty"):
@@ -193,6 +207,146 @@ class NeuralTests(unittest.TestCase):
         legacy = predict(self.bundle, archive, directory.as_posix(), device="cpu")
         self.assertFalse(any(row["embedding_protocol_verified"] for row in legacy))
         np.testing.assert_array_equal([row["fusion_risk"] for row in before], [row["fusion_risk"] for row in legacy])
+
+    def test_checkpoint_rejects_malformed_metadata_before_inference(self) -> None:
+        directory = self.root / "metadata"
+        fit(self.bundle, self.archive, directory.as_posix(), replace(self.config, epochs=1), self.profile, "cpu")
+        original = read_json(directory / "model.json")
+        cases = [None, [], 1, {}, {key: value for key, value in original.items() if key != "config"}]
+        for key, value in (("config", []), ("config", {"unexpected": 1}), ("profiles", []), ("profile_sha256", {}), ("fit_history", None), ("fit_identifiers", [["invalid"]]), ("fit_identifiers", ["a", "a"]), ("feature_order", {}), ("trace_names", ["x", "x"]), ("normalizers", []), ("embedding_protocol", []), ("calibration", {})):
+            damaged = copy.deepcopy(original)
+            damaged[key] = value
+            cases.append(damaged)
+        for metadata in cases:
+            with self.subTest(metadata=metadata):
+                write_json(directory / "model.json", metadata)
+                with patch.object(ResidualAttention, "forward", side_effect=AssertionError("Inference must not start")):
+                    with self.assertRaises(ValueError):
+                        predict(self.bundle, self.archive, directory.as_posix(), device="cpu")
+        write_json(directory / "model.json", original)
+        self.assertTrue(predict(self.bundle, self.archive, directory.as_posix(), device="cpu"))
+
+    def test_checkpoint_rejects_corrupt_or_nonfinite_weights_before_inference(self) -> None:
+        directory = self.root / "weights"
+        fit(self.bundle, self.archive, directory.as_posix(), replace(self.config, epochs=1), self.profile, "cpu")
+        before = predict(self.bundle, self.archive, directory.as_posix(), device="cpu")
+        path = directory / "parameters.pt"
+        original = path.read_bytes()
+        metadata = read_json(directory / "model.json")
+        state = torch.load(path, map_location="cpu", weights_only=True)
+        name = next(iter(state))
+        for damage in ("empty", "invalid", "truncated", "container", "missing", "extra", "shape", "dtype", "nontensor", "nan", "inf"):
+            with self.subTest(damage=damage):
+                damaged = copy.deepcopy(state)
+                if damage in ("empty", "invalid", "truncated"):
+                    path.write_bytes({"empty": b"", "invalid": b"invalid checkpoint", "truncated": original[:80]}[damage])
+                else:
+                    if damage == "container":
+                        damaged = []
+                    elif damage == "missing":
+                        damaged.pop(name)
+                    elif damage == "extra":
+                        damaged["unexpected"] = torch.tensor(1.)
+                    elif damage == "shape":
+                        damaged[name] = damaged[name].flatten()[:1]
+                    elif damage == "dtype":
+                        damaged[name] = damaged[name].double()
+                    elif damage == "nontensor":
+                        damaged[name] = 0
+                    else:
+                        damaged[name].reshape(-1)[0] = float(damage)
+                    torch.save(damaged, path)
+                metadata["weights_sha256"] = digest(path)
+                write_json(directory / "model.json", metadata)
+                with patch.object(ResidualAttention, "forward", side_effect=AssertionError("Inference must not start")):
+                    with self.assertRaisesRegex(ValueError, "checkpoint"):
+                        predict(self.bundle, self.archive, directory.as_posix(), device="cpu")
+        path.write_bytes(original)
+        metadata["weights_sha256"] = digest(path)
+        write_json(directory / "model.json", metadata)
+        after = predict(self.bundle, self.archive, directory.as_posix(), device="cpu")
+        np.testing.assert_array_equal([row["fusion_risk"] for row in before], [row["fusion_risk"] for row in after])
+
+    def test_checkpoint_detects_weights_changed_during_loading(self) -> None:
+        directory = self.root / "changing"
+        fit(self.bundle, self.archive, directory.as_posix(), replace(self.config, epochs=1), self.profile, "cpu")
+        original = torch.load
+        def changing(path, **options):
+            state = original(path, **options)
+            with Path(path).open("ab") as stream:
+                stream.write(b"changed")
+            return state
+        with patch("engine.learning.torch.load", side_effect=changing):
+            with self.assertRaisesRegex(ValueError, "changed while loading"):
+                predict(self.bundle, self.archive, directory.as_posix(), device="cpu")
+
+    def test_explanation_differences_promote_finite_float32_risks(self) -> None:
+        directory = self.root / "differences"
+        fit(self.bundle, self.archive, directory.as_posix(), replace(self.config, epochs=1), self.profile, "cpu")
+        count = sum(row["split"] == "test" for row in self.bundle["rows"])
+        maximum = np.float32(3e38)
+        risks = [np.full(count, value, dtype=np.float32) for value in (maximum, -maximum, -maximum)]
+        with warnings.catch_warnings(record=True) as recorded:
+            warnings.simplefilter("always", RuntimeWarning)
+            with patch("engine.learning.logits", side_effect=risks):
+                rows = predict(self.bundle, self.archive, directory.as_posix(), device="cpu", explain=True)
+        self.assertFalse(recorded)
+        for row in rows:
+            self.assertEqual(row["potential_risk_delta"], 2 * float(maximum))
+            self.assertEqual(row["query_readout_delta"], 2 * float(maximum))
+
+    def test_inference_rejects_nonfinite_or_misaligned_batch_outputs(self) -> None:
+        model = ResidualAttention({name: 4 for name in embeddings.STREAMS}, 3, self.config)
+        packet = {"features": {name: np.zeros((2, 4), dtype=np.float32) for name in embeddings.STREAMS}, "observed": np.ones((2, 4), dtype=bool), "ranks": np.zeros((2, 3), dtype=np.float32), "graph": np.zeros((2, 3, 3), dtype=np.float32), "trace_observed": np.zeros((2, 3), dtype=bool)}
+        for risk in (None, [0., 1.], torch.tensor(0.), torch.zeros(2, 1), torch.zeros(1), torch.ones(2, dtype=torch.bool), torch.ones(2, dtype=torch.long), torch.tensor([0., float("nan")]), torch.tensor([0., float("inf")])):
+            with self.subTest(risk=risk):
+                with patch.object(model, "forward", return_value={"logit": risk}):
+                    with self.assertRaisesRegex(ValueError, "inference"):
+                        logits(model, packet, [0, 1], "cpu", 2)
+        for size in (0, -1, True, 1.5):
+            with self.assertRaisesRegex(ValueError, "batch size"):
+                logits(model, packet, [0, 1], "cpu", size)
+        np.testing.assert_array_equal(logits(model, packet, [], "cpu", 2), np.empty(0))
+
+    def test_inference_diagnostics_reject_missing_or_invalid_batch_values(self) -> None:
+        model = ResidualAttention({name: 4 for name in embeddings.STREAMS}, 3, self.config)
+        packet = {"features": {name: np.zeros((2, 4), dtype=np.float32) for name in embeddings.STREAMS}, "observed": np.ones((2, 4), dtype=bool), "ranks": np.zeros((2, 3), dtype=np.float32), "graph": np.zeros((2, 3, 3), dtype=np.float32), "trace_observed": np.zeros((2, 3), dtype=bool)}
+        for name, value in (("attention_shift_tv", torch.tensor([0., 1.1])), ("attention_contrast_rms", torch.tensor([-1., 0.])), ("attention_shift_tv", torch.tensor([float("nan"), 0.])), ("attention_shift_tv", torch.zeros(1)), ("attention_shift_tv", [0., 0.])):
+            diagnostics = {"retained": "value"}
+            with patch.object(model, "forward", return_value={"logit": torch.zeros(2), name: value}):
+                with self.assertRaisesRegex(ValueError, "diagnostics"):
+                    logits(model, packet, [0, 1], "cpu", 2, diagnostics)
+            self.assertEqual(diagnostics, {"retained": "value"})
+        outputs = [{"logit": torch.zeros(1), "attention_shift_tv": torch.zeros(1)}, {"logit": torch.zeros(1)}]
+        with patch.object(model, "forward", side_effect=outputs):
+            with self.assertRaisesRegex(ValueError, "every selected sample"):
+                logits(model, packet, [0, 1], "cpu", 1, {})
+
+    def test_scoring_cannot_silently_drop_samples(self) -> None:
+        for risks in (np.zeros(1), np.zeros(3), np.zeros((2, 1)), np.array([0., np.nan]), np.array([0., np.inf]), np.ones(2, dtype=bool), np.array([0j, 1j])):
+            with self.subTest(risks=risks):
+                with self.assertRaisesRegex(ValueError, "one finite risk"):
+                    scored(self.bundle["rows"], [0, 1], risks)
+        rows = scored(self.bundle["rows"], [1, 0], np.array([0.1, -0.1]))
+        self.assertEqual([row["id"] for row in rows], [self.bundle["rows"][1]["id"], self.bundle["rows"][0]["id"]])
+
+    def test_standardizer_rejects_malformed_stored_vectors(self) -> None:
+        packet = {"features": {"bert": np.ones((2, 2), dtype=np.float32)}, "observed": np.ones((2, 1), dtype=bool)}
+        for state in ([], {}, {"bert": []}, {"bert": {"center": [0., 0.]}}, {"bert": {"center": ["0", "0"], "scale": [1., 1.]}}, {"bert": {"center": [False, False], "scale": [1., 1.]}}, {"bert": {"center": [0., 0.], "scale": [1., 0.]}}):
+            with self.subTest(state=state):
+                with self.assertRaisesRegex(ValueError, "standardizer"):
+                    standardize(packet, [], state)
+
+    def test_potential_rejects_nonsquare_matrices_and_numeric_masks(self) -> None:
+        values, mask, graph = torch.zeros(2, 2, 7, 7), torch.ones(2, 7, dtype=torch.bool), torch.zeros(2, 3, 3)
+        for mode in ("coupled", "uniform", "broadcast"):
+            for logits_value, mask_value, graph_value in ((values[..., :6], mask, graph), (values[:, 0], mask, graph), (values, mask.float(), graph), (values.long(), mask, graph), (values, mask, graph.double()), (values, mask, graph[:, :, :2]), (values, mask, torch.zeros(2, 0, 0))):
+                with self.subTest(mode=mode):
+                    with self.assertRaises(ValueError):
+                        potential(logits_value, mask_value, graph_value, mode)
+        for dimensions, traces in (({"bert": True}, 3), ({"bert": 4}, True), ({"bert": 4}, 3.5)):
+            with self.assertRaises(ValueError):
+                ResidualAttention(dimensions, traces, self.config)
 
     def test_relation_graph_reconstructs_the_copula_quadratic_form(self) -> None:
         training = subset(self.bundle, indices(self.bundle, "train", "source_alpha"))
@@ -434,6 +588,22 @@ class NeuralTests(unittest.TestCase):
         provenance = read_json(model / "provenance.json")
         self.assertEqual(provenance["dataset"], "weibo21")
         self.assertFalse(provenance["inputs_changed_during_training"])
+
+    def test_failed_metric_validation_preserves_existing_prediction_files(self) -> None:
+        import deep
+        physical, vectors, output = self.root / "physical.npz", self.root / "vectors.npz", self.root / "predictions.jsonl"
+        for path in (physical, vectors):
+            path.write_bytes(b"fixture")
+        write_rows(output, [{"id": "existing"}])
+        report = output.with_name("predictions.report.json")
+        write_json(report, {"retained": True})
+        before = output.read_bytes(), report.read_bytes()
+        args = SimpleNamespace(command="predict", features=physical.as_posix(), embeddings=vectors.as_posix(), output=output.as_posix(), model=(self.root / "model").as_posix(), split="test", device="cpu", reference_domain=None, explain=False)
+        with patch("deep.arguments", return_value=args), patch("deep.load_bundle", return_value=self.bundle), patch("engine.embeddings.load", return_value=self.archive), patch("engine.learning.predict", return_value=[{"id": "sample", "label": 0}]), patch("engine.metrics.evaluate", side_effect=ValueError("Invalid report inputs")):
+            with self.assertRaisesRegex(SystemExit, "Invalid report inputs"):
+                deep.main()
+        self.assertEqual((output.read_bytes(), report.read_bytes()), before)
+        self.assertFalse(list(self.root.glob(".flawprint-*.tmp")))
 
     def test_all_neural_controls_have_finite_predictions(self) -> None:
         for mode in ("unbiased", "independent", "deep", "concat", "uniform", "broadcast", "diagonal", "shuffled"):

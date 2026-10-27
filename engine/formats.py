@@ -8,6 +8,7 @@ from decimal import Decimal, InvalidOperation
 import json
 import math
 from engine.data import SPLITS, SPLIT_ALIASES, identifier, missing, normalize, stable_identifier, portable_image
+from engine.storage import parse_json
 
 FIELDS = {"id": ("id", "news_id", "post_id", "tweet_id", "uid"), "image": ("image", "image_path", "images", "image_url", "picture"), "text": ("text", "content", "body", "news_text"), "label": ("label", "target", "class", "y"), "domain": ("domain", "topic", "category"), "platform": ("platform",), "group": ("group", "event_id", "cluster_id"), "split": ("split", "partition", "subset"), "semantic_logit": ("semantic_logit", "logit")}
 
@@ -106,8 +107,8 @@ def images(value: object, config: Conversion) -> list[str]:
         value = value.strip()
         if value.startswith(("[", "(")):
             try:
-                value = json.loads(value) if value.startswith("[") else ast.literal_eval(value)
-            except (ValueError, SyntaxError, json.JSONDecodeError):
+                value = parse_json(value) if value.startswith("[") else ast.literal_eval(value)
+            except (ValueError, SyntaxError):
                 try:
                     value = ast.literal_eval(value)
                 except (ValueError, SyntaxError) as error:
