@@ -143,7 +143,7 @@ def align(bundle: dict, archive: dict) -> tuple[dict, np.ndarray]:
         order.append(index)
     return {name: values[order] for name, values in archive["features"].items()}, archive["observed"][order]
 
-def extract(rows: list[dict], directories: dict, batch_size: int = 64, device: str = "cuda:0", max_length: int = 197) -> dict:
+def extract(rows: list[dict], directories: dict, batch_size: int = 64, device: str = "cuda:0", max_length: int = 128) -> dict:
     if isinstance(batch_size, bool) or not isinstance(batch_size, int) or batch_size < 1:
         raise ValueError("Encoder batch size and text length must be positive")
     context(max_length)

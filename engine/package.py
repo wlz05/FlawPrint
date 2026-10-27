@@ -66,9 +66,9 @@ PRESETS = {
             'epochs': 50,
             'batch_size': 64,
             'learning_rate': 0.0001,
-            'max_text_length': 197,
+            'max_text_length': 128,
             'early_stopping_patience': 5,
-            'weight_decay': 5e-05,
+            'weight_decay': 0.01,
             'embedding_dimension': 768
         },
         'partitions': {
@@ -149,7 +149,7 @@ PRESETS = {
         'epochs': 50,
         'batch_size': 64,
         'learning_rate': 0.0001,
-        'weight_decay': 5e-05,
+        'weight_decay': 0.01,
         'patience': 5,
         'seed': 42,
         'folds': 2,

@@ -148,7 +148,7 @@ Place complete Hugging Face checkpoints, tokenizer assets, and processor files i
 `deep.py` retains the BERT and MAE class-token vectors and both projected CLIP vectors. MAE uses all patches in fixed order. BERT and CLIP text are truncated to the smaller of the requested length, tokenizer limit, and checkpoint context. The archive records the requested and effective lengths, vector readouts, encoder hashes, availability masks, identities, and image checksums. Cache replacement is atomic; failed writes preserve an existing archive.
 
 ```bash
-python -B deep.py extract ./data/manifest.jsonl --bert ./models/bert --mae ./models/mae --clip ./models/clip --batch-size 64 --max-length 197 --device cuda:0 --output ./data/deep.npz
+python -B deep.py extract ./data/manifest.jsonl --bert ./models/bert --mae ./models/mae --clip ./models/clip --batch-size 64 --max-length 128 --device cuda:0 --output ./data/deep.npz
 ```
 
 Add `--forensic ./models/forensic` for a separately trained, Hugging Face-compatible forensic CLIP image encoder. This interface reads pooled image features. Every compared mode uses the same encoder set and cached sample identities. Image edits, JPEG compression, or resizing are followed by extraction of both physical and deep features.
@@ -214,10 +214,10 @@ New checkpoints use `flawprint-neural-v2` and record the relation operator. Exis
 |---|---|
 | GPU / seeds | Single RTX 4090 / 42, 52, 3047, 3407 |
 | Maximum epochs / batch size | 50 / 64 |
-| Optimizer / learning rate / weight decay | [AdamW](https://docs.pytorch.org/docs/stable/generated/torch.optim.AdamW.html) / 0.0001 / 0.00005 |
+| Optimizer / learning rate / weight decay | [AdamW](https://docs.pytorch.org/docs/stable/generated/torch.optim.AdamW.html) / 0.0001 / 0.01 |
 | Learning-rate schedule | Constant |
 | Source selection / patience | Validation macro F1 / 5 epochs |
-| Maximum text length | 197, limited by each encoder's context |
+| Maximum text length | 128, limited by each encoder's context |
 | Projected width / heads / layers | 128 / 4 / 2 |
 | Dropout / gradient norm limit | 0.1 / 1.0 |
 | Residual-potential bound | 2.0 |

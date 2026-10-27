@@ -73,7 +73,7 @@ class NeuralConfig:
     epochs: int = 50
     batch_size: int = 64
     learning_rate: float = 0.0001
-    weight_decay: float = 0.00005
+    weight_decay: float = 0.01
     patience: int = 5
     seed: int = 42
     folds: int = 2

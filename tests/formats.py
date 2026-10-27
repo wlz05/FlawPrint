@@ -603,6 +603,8 @@ class FormatTests(unittest.TestCase):
         with patch.object(sys, "argv", ["deep.py", "extract", "./manifest.jsonl", "--bert", "./bert", "--mae", "./mae", "--clip", "./clip"]):
             args = deep.arguments()
         self.assertEqual(args.max_length, settings["max_text_length"])
+        self.assertEqual(args.max_length, 128)
+        self.assertEqual(neural["weight_decay"], 0.01)
         table = {}
         for line in Path("README.md").read_text(encoding="utf-8").splitlines():
             if line.startswith("|"):
@@ -613,7 +615,7 @@ class FormatTests(unittest.TestCase):
         self.assertEqual(table["Source selection / patience"], f"Validation macro F1 / {neural['patience']} epochs")
         self.assertTrue(table["Maximum text length"].startswith(str(args.max_length)))
         self.assertIn(str(neural["learning_rate"]), table["Optimizer / learning rate / weight decay"])
-        self.assertIn(f"{neural['weight_decay']:.5f}", table["Optimizer / learning rate / weight decay"])
+        self.assertEqual(float(table["Optimizer / learning rate / weight decay"].split("/")[-1].strip()), neural["weight_decay"])
 
     def test_unknown_and_external_configurations_keep_strict_errors(self) -> None:
         from engine.package import configuration, configuration_record

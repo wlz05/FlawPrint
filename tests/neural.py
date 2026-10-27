@@ -65,8 +65,11 @@ class NeuralTests(unittest.TestCase):
         bundle, archive = self.source_data(("train", "validation", "test"))
         before = copy.deepcopy(bundle["rows"])
         output = self.root / "official"
-        result = fit(bundle, archive, output.as_posix(), replace(self.config, epochs=1), self.profile, "cpu")
+        with patch("torch.optim.AdamW", wraps=torch.optim.AdamW) as optimizer:
+            result = fit(bundle, archive, output.as_posix(), replace(self.config, epochs=1), self.profile, "cpu")
+        self.assertEqual(optimizer.call_args.kwargs["weight_decay"], 0.01)
         metadata = read_json(output / "model.json")
+        self.assertEqual(metadata["config"]["weight_decay"], 0.01)
         self.assertEqual(bundle["rows"], before)
         self.assertIsNone(metadata["calibration"])
         self.assertEqual(metadata["calibration_protocol"], "uncalibrated")
@@ -115,9 +118,13 @@ class NeuralTests(unittest.TestCase):
                     fit(bundle, archive, (self.root / "missing").as_posix(), self.config, self.profile, "cpu")
 
     def test_builtin_neural_defaults_match_the_runtime_dataclass(self) -> None:
+        from inspect import signature
         from engine.package import configuration
         self.assertEqual(configuration("builtin:neural"), asdict(NeuralConfig()))
         self.assertEqual(configuration("builtin:experiment")["seeds"], [42, 52, 3047, 3407])
+        self.assertEqual(NeuralConfig().weight_decay, 0.01)
+        self.assertEqual(signature(embeddings.extract).parameters["max_length"].default, 128)
+        self.assertEqual(embeddings.context(128, 512, 77), 77)
 
     def test_embedding_roundtrip_and_identity_alignment(self) -> None:
         path = self.root / "features.npz"
@@ -283,7 +290,7 @@ class NeuralTests(unittest.TestCase):
 
     def test_checkpoint_rejects_changed_feature_protocol_and_loads_legacy_metadata(self) -> None:
         archive = copy.deepcopy(self.archive)
-        archive["provenance"].update(max_text_length=197, mae_mask_ratio=0.0, text_context={"bert": 197, "clip": 77}, readout={name: "class_token" if name in ("bert", "mae") else "projected_vector" for name in embeddings.STREAMS})
+        archive["provenance"].update(max_text_length=128, mae_mask_ratio=0.0, text_context={"bert": 128, "clip": 77}, readout={name: "class_token" if name in ("bert", "mae") else "projected_vector" for name in embeddings.STREAMS})
         directory = self.root / "protocol"
         fit(self.bundle, archive, directory.as_posix(), replace(self.config, epochs=1), self.profile, "cpu")
         before = predict(self.bundle, archive, directory.as_posix(), device="cpu")

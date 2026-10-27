@@ -20,7 +20,7 @@ def arguments() -> argparse.Namespace:
         extraction.add_argument("--" + name, required=True)
     extraction.add_argument("--forensic", help="Optional local forensic CLIP checkpoint in Hugging Face format")
     extraction.add_argument("--batch-size", type=int, default=64)
-    extraction.add_argument("--max-length", type=int, default=197)
+    extraction.add_argument("--max-length", type=int, default=128)
     extraction.add_argument("--output", default="./data/deep.npz")
     training = commands.add_parser("train")
     training.add_argument("features")
