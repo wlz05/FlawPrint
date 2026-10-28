@@ -80,6 +80,11 @@ python -m venv .venv
 
 ```bash
 source .venv/bin/activate
+```
+
+With the environment active, run the following installation and verification commands in either shell:
+
+```bash
 python -m pip install "numpy>=1.26,<3" "scipy>=1.11,<2" "Pillow>=10,<13" "scikit-learn>=1.4,<2" "requests>=2.31,<3" "pypdf>=4,<7"
 python -m pip install "torch>=2.2" "transformers>=4.40,<6"
 python -m pip install "pandas>=2.2,<4" "openpyxl>=3.1,<4" "pyarrow>=15,<30" "xlrd>=2,<3"
@@ -139,11 +144,15 @@ python -B main.py extract ./data/manifest.jsonl --workers 1 --output ./data/feat
 
 Use the corresponding files from the dataset table for Weibo21 and FineFake. Conversion and merging retain sample IDs and the supplied partition roles. Frozen deep encoders and deterministic trace extraction produce reusable caches for those same records. Source training groups supply the domain reference through cross-fitting. Separately supplied target-reference records use the optional `profile` role.
 
+CSV input defaults to UTF-8-SIG; select `--encoding gb18030` for a file saved in that encoding. When annotations contain image filenames, set `--image-root ./data/images`. Custom tables can select columns explicitly, for example `--text-column content --image-column image_path --domain-column category`. Use `python -B convert.py --help` for the complete mapping options.
+
 Configuration defaults are built in. Use `--config builtin:default` for standard profiling, `--config builtin:quick` for the synthetic check, and `--config builtin:seed42` for the corresponding experiment seed. Neural training defaults to `builtin:neural`. Dataset conversion selects `builtin:weibo`, `builtin:weibo21`, or `builtin:finefake` through `--mapping`; the mappings declare the released label direction explicitly. A custom relative JSON path remains supported for each configuration option.
 
 ## Pretrained Encoders
 
 Place complete Hugging Face checkpoints, tokenizer assets, and processor files in `./models/bert`, `./models/mae`, and `./models/clip`. Extraction reads local files only through Transformers' [offline loading](https://huggingface.co/docs/transformers/installation#offline-mode). For Chinese input, compatible checkpoint families include [Chinese RoBERTa-wwm-ext](https://huggingface.co/hfl/chinese-roberta-wwm-ext), [ViT-MAE-base](https://huggingface.co/facebook/vit-mae-base), and [Chinese-CLIP](https://huggingface.co/OFA-Sys/chinese-clip-vit-base-patch16). Use language-matched BERT and CLIP checkpoints for other languages, and keep their exact files fixed within a comparison.
+
+Each directory contains `config.json` and its weights, including every shard when an index file is present. BERT also needs its tokenizer assets; MAE needs its image processor; CLIP needs both its tokenizer and image processor. Copy the actual files into these local directories. Encoder extraction requires the original images, while cached training and prediction use the prepared NPZ archives.
 
 `deep.py` retains the BERT and MAE class-token vectors and both projected CLIP vectors. MAE uses all patches in fixed order. BERT and CLIP text are truncated to the smaller of the requested length, tokenizer limit, and checkpoint context. The archive records the requested and effective lengths, vector readouts, encoder hashes, availability masks, identities, and image checksums. Cache replacement is atomic; failed writes preserve an existing archive.
 
@@ -174,20 +183,34 @@ Use `--dataset weibo21` or `--dataset finefake` with that dataset's prepared cac
 
 To move an experiment, copy the source, both feature archives, and the complete trained model directory, including `model.json`, `parameters.pt`, and `profiles/`. Keep image paths and the dataset layout relative to the repository root, then run commands from the copied root with the new relative model and cache paths. Prediction reads the cached vectors and saved references without loading the pretrained encoders or the original training input files. Copy complete encoder files when extracting features on the new machine; links into another machine's model cache are not portable. Both slash styles are accepted for relative CLI paths. Use `--device cpu` for a CPU run or `--device cuda:0` for the experiment GPU.
 
+### Reference and Calibration Roles
+
+For each domain, the reference comes from its source-training rows or an independently supplied `profile` pool. Source-training queries use references fitted on other connected event, image, and content groups; validation and saved source references use the complete source-training rows. Reference subsets below the configured `min_samples` use the content path for that query group. An independently evaluated target domain supplies its own unlabeled profile rows, which are merged into the manifest before both caches are extracted. The standard three-partition workflow is complete with `train`, `validation`, and `test`.
+
+An additional independently supplied `calibration` partition enables probability fitting on validation predictions and prediction-set calibration on those extra rows. For frozen-source transfer, add `--reference-domain Politics` to a prediction command to select a saved source reference named `Politics`. Select a key listed in `model.json` under `profiles`. Use a fresh output directory for each seed and mode; the directory contains the complete checkpoint needed by prediction.
+
 ## Baselines and Ablations
 
 | Core mode | Relation access | Readout |
 |---|---|---|
 | `deep` | No trace input | Ordinary content attention |
 | `unbiased` | Ranks, diagonal entries, and row summaries | Ordinary attention over summary tokens |
+| `summary` | The same nodes; relation reconstructed from its diagonal and row sums | Current-query responsibilities over the reconstructed relation |
 | `uniform` | The same tokens and the complete relation matrix | Uniform responsibilities in the reference map |
 | `coupled` | Identical to uniform | Current-query responsibilities in the reference map |
 
-The primary matched comparison is `uniform` versus `coupled`: both retain the complete graph, ordinary content attention, input nodes, and trainable parameter count. Only responsibilities in the reference map change. The `unbiased` comparison also changes access from relation summaries to the complete pair matrix.
+Two matched comparisons isolate the core operation. `summary` versus `coupled` keeps the node summaries, current-query rule, and trainable parameter count while replacing the full relation with its minimum-norm reconstruction from the same diagonal and row sums. `uniform` versus `coupled` keeps the complete relation and ordinary content attention while changing only responsibilities in the reference map. The `unbiased` comparison additionally removes the potential.
+
+Train the two controls from the same caches and repeat each with seeds 42, 52, 3047, and 3407:
+
+```bash
+python -B deep.py train ./data/features.npz ./data/deep.npz --dataset weibo --seed 42 --mode summary --device cuda:0 --output ./models/summary42
+python -B deep.py train ./data/features.npz ./data/deep.npz --dataset weibo --seed 42 --mode uniform --device cuda:0 --output ./models/uniform42
+```
 
 Additional controls are `independent` (ranks only), `concat` (MLP over summary tokens), `broadcast` (the earlier row-summary operator), `diagonal` (diagonal-only potential), and `shuffled` (permuted relation identities). Use a fresh model directory for each mode and retain the same encoder caches, source supervision, split identities, and training budget. Keep auxiliary image supervision identical and report actual parameter counts.
 
-Recent studies informing the matched controls include [the frozen-component design study](https://arxiv.org/abs/2609.30402v1), [RAEGNet](https://arxiv.org/abs/2609.36902v1), and [SynthCLIC v2](https://arxiv.org/abs/2602.12381v2). Their settings separate encoder effects, evidence acquisition, and the measured decision quantity.
+The evaluation separates the reference source, retained pair information, and content-query responsibility. [MLCCD](https://arxiv.org/abs/2610.36569v1) studies task-conditioned semantic evidence selection, [SSPC](https://aclanthology.org/2026.emnlp-main.1279/) separates relation reliability from prediction reliance, and [MMFact](https://arxiv.org/abs/2610.34162v1) organizes compatible shared inputs. These studies inform the comparison design; the repository retains its existing dataset partitions.
 
 Related complete news models include [DAPT](https://doi.org/10.1145/3746027.3755192), [DAMMFND](https://github.com/luweihai/DAMMFND), [MMDFND](https://github.com/yutchina/MMDFND), and [TERN](https://www.mdpi.com/2076-3417/16/13/6759). [ReAlign](https://openaccess.thecvf.com/content/CVPR2026/papers/Huang_ReAlign_Generalizable_Image_Forgery_Detection_via_Reasoning-Aligned_Representation_CVPR_2026_paper.pdf) provides a learned image-forensics comparison. [Falsdo](https://www.ijcai.org/proceedings/2026/275) motivates artifact-matched Real/Control/Fake evaluation.
 
@@ -205,8 +228,9 @@ python -B deep.py predict ./data/features.npz ./data/deep.npz --model ./models/n
 | `attention_shift_tv` | Mean layer total variation between attention with and without the potential, using the same layer inputs |
 | `potential_disabled_risk` / `potential_risk_delta` | Whole-model raw risk with the potential disabled / original minus disabled risk |
 | `uniform_readout_risk` / `query_readout_delta` | Whole-model risk with uniform content responsibilities / original minus uniform risk |
+| `summary_readout_risk` / `pair_readout_delta` | Whole-model risk with summary-reconstructed relations / original minus summary risk |
 
-Local measurements include the class node and available content queries, with all available keys; masked nodes are excluded from their denominators. A missing relation gives zero local change. The concat control has no attention measurements and exports missing values. The uniform intervention applies to coupled checkpoints and adds a second forward pass after the potential-off pass; uniform checkpoints report zero query-readout delta, and other modes export missing values for that intervention. Input nodes and weights stay fixed while hidden states update normally in each forward pass. Probabilities and prediction sets use the original calibrated risk.
+Local measurements include the class node and available content queries, with all available keys; masked nodes are excluded from their denominators. A missing relation gives zero local change. The concat control has no attention measurements and exports missing values. Coupled checkpoints add three diagnostic forwards: potential off, uniform responsibility, and summary reconstruction. Uniform and summary checkpoints report zero for their corresponding self-intervention delta; other inapplicable readouts export missing values. Input nodes and weights stay fixed while hidden states update normally in each forward pass. Probabilities and prediction sets use the original model risk.
 
 New checkpoints use `flawprint-neural-v2` and record the relation operator. Existing `v1` coupled checkpoints retain their original broadcast operation when loaded. Prediction output includes the effective mode and checkpoint version.
 

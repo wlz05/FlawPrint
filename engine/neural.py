@@ -8,8 +8,27 @@ from numbers import Real
 import torch
 from torch import nn
 
-MODES = ("coupled", "unbiased", "independent", "deep", "concat", "uniform", "broadcast", "diagonal", "shuffled")
-BIASED = ("coupled", "uniform", "broadcast", "diagonal", "shuffled")
+MODES = ("coupled", "unbiased", "independent", "deep", "concat", "uniform", "broadcast", "diagonal", "shuffled", "summary")
+BIASED = ("coupled", "uniform", "broadcast", "diagonal", "shuffled", "summary")
+
+def summarize(relation: torch.Tensor, observed: torch.Tensor) -> torch.Tensor:
+    if not isinstance(relation, torch.Tensor) or not isinstance(observed, torch.Tensor) or relation.ndim != 3 or relation.shape[-1] < 1 or relation.shape[-1] != relation.shape[-2] or not relation.is_floating_point() or observed.dtype != torch.bool or observed.device != relation.device or observed.shape != relation.shape[:2]:
+        raise ValueError("Summary reconstruction requires square relations and aligned Boolean masks")
+    pairs = observed[:, :, None] & observed[:, None, :]
+    values = relation.masked_fill(~pairs, 0)
+    if not torch.isfinite(values).all() or not torch.allclose(values, values.transpose(-1, -2)):
+        raise ValueError("Summary reconstruction requires finite symmetric relations")
+    diagonal = values.diagonal(dim1=-2, dim2=-1)
+    residual = values.sum(-1) - diagonal
+    count = observed.sum(-1).to(relation.dtype)[:, None, None]
+    # Recover the minimum-norm relation fixed by its diagonal and row sums.
+    off_diagonal = (residual[:, :, None] + residual[:, None, :] - residual.sum(-1)[:, None, None] / (count - 1).clamp_min(1)) / (count - 2).clamp_min(1)
+    active = pairs & ~torch.eye(relation.shape[-1], device=relation.device, dtype=torch.bool)[None]
+    reconstructed = torch.diag_embed(diagonal) + off_diagonal.masked_fill(~active, 0)
+    result = torch.where(count <= 2, values, reconstructed)
+    if not torch.isfinite(result).all():
+        raise ValueError("Summary reconstruction overflowed; rescale the relation")
+    return result
 
 def scramble(relation: torch.Tensor, observed: torch.Tensor) -> torch.Tensor:
     indices = torch.arange(relation.shape[-1], device=relation.device).expand(len(relation), -1).clone()
@@ -45,7 +64,9 @@ def potential(logits: torch.Tensor, observed: torch.Tensor, relation: torch.Tens
         output[:, :, :prefix, prefix:] = values[:, None, None, :]
         output[:, :, prefix:, :prefix] = values[:, None, :, None]
         return output.expand(-1, heads, -1, -1)
-    if mode == "diagonal":
+    if mode == "summary":
+        relation = summarize(relation, mask)
+    elif mode == "diagonal":
         relation = torch.diag_embed(relation.diagonal(dim1=-2, dim2=-1))
     elif mode == "shuffled":
         relation = scramble(relation, mask)

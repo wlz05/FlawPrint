@@ -28,7 +28,7 @@ def arguments() -> argparse.Namespace:
     training.add_argument("--config", default="builtin:neural")
     training.add_argument("--profile-config", default="builtin:default")
     training.add_argument("--seed", type=int)
-    training.add_argument("--mode", type=str.lower, choices=("coupled", "unbiased", "independent", "deep", "concat", "uniform", "broadcast", "diagonal", "shuffled"))
+    training.add_argument("--mode", type=str.lower, choices=("coupled", "unbiased", "independent", "deep", "concat", "uniform", "broadcast", "diagonal", "shuffled", "summary"))
     training.add_argument("--dataset", type=str.lower, choices=("weibo", "weibo21", "finefake"))
     training.add_argument("--output", default="./models/neural")
     prediction = commands.add_parser("predict")

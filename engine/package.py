@@ -117,7 +117,11 @@ PRESETS = {
             'config': 'builtin:neural',
             'frozen_encoders': ['bert', 'mae', 'clip'],
             'optional_encoder': 'forensic',
-            'modes': ['coupled', 'unbiased', 'independent', 'deep', 'concat', 'uniform', 'broadcast', 'diagonal', 'shuffled'],
+            'modes': ['coupled', 'unbiased', 'independent', 'deep', 'concat', 'uniform', 'broadcast', 'diagonal', 'shuffled', 'summary'],
+            'core_comparisons': {
+                'pair_information': ['summary', 'coupled'],
+                'content_readout': ['uniform', 'coupled']
+            },
             'source_reference': 'group cross-fitting',
             'target_reference': 'independent unlabeled profile rows',
             'target_labels_used_for_fitting': False,

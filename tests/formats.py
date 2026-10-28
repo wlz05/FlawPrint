@@ -18,7 +18,7 @@ from convert import convert_files
 from doctor import environment, compatible
 from engine.data import identifier, normalize, portable_image, audit_splits
 from engine.formats import Conversion, convert_records
-from engine.provenance import conventions, manuscript_status
+from engine.provenance import conventions, manuscript_status, source_digest, source_files
 from engine.storage import read_rows, write_rows, read_json, write_json, write_csv, resolved
 from engine.traces import TraceConfig, extract_one
 from engine.experiment import bundle_digest
@@ -524,6 +524,26 @@ class FormatTests(unittest.TestCase):
         manuscript_status(str(path), str(snapshot), accept=True)
         self.assertEqual(snapshot.read_bytes(), path.read_bytes())
         self.assertFalse(manuscript_status(str(path), str(snapshot))["changed"])
+
+    def test_manuscript_audit_tracks_sequential_and_legacy_equation_tags(self) -> None:
+        document = self.write("paper.md", "# Paper\n\\tag{1}\n\\tag{2}\n\\tag{F36}\n\\tag{I.1}\n")
+        report = manuscript_status(document.as_posix(), (self.root / "snapshot.md").as_posix())
+        self.assertEqual(report["formulas"], ["1", "2", "F36", "I.1"])
+
+    def test_source_identity_excludes_cached_and_generated_python_files(self) -> None:
+        root = self.root / "source tree"
+        root.mkdir()
+        module = root / "main.py"
+        module.write_text("value = 1\n", encoding="utf-8")
+        original = source_digest(root.as_posix())
+        for name in ("models", "data", "outputs", "tmp", "references"):
+            folder = root / name
+            folder.mkdir()
+            (folder / "external_name.py").write_text("external = True\n", encoding="utf-8")
+        self.assertEqual(source_files(root.as_posix()), [module])
+        self.assertEqual(source_digest(root.as_posix()), original)
+        module.write_text("value = 2\n", encoding="utf-8")
+        self.assertNotEqual(source_digest(root.as_posix()), original)
 
     def test_dataset_names_are_case_insensitive_in_api_and_cli(self) -> None:
         for name in ("WeIbO", "WEIBO21", "FineFake"):

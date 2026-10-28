@@ -389,6 +389,7 @@ def predict(bundle: dict, archive: dict, directory: str, split: str = "test", de
     measurements = {} if explain else None
     risks = logits(model, packet, list(range(len(rows))), device, config.batch_size, measurements)
     disabled, uniform = risks, risks if config.mode == "uniform" else None
+    summarized = risks if config.mode == "summary" else None
     if explain:
         try:
             if config.mode in BIASED:
@@ -398,6 +399,9 @@ def predict(bundle: dict, archive: dict, directory: str, split: str = "test", de
                 # Change only the responsibility rule at the fixed checkpoint.
                 model.config = replace(config, mode="uniform")
                 uniform = logits(model, packet, list(range(len(rows))), device, config.batch_size)
+                # Retain the same query rule while removing unsummarized pair information.
+                model.config = replace(config, mode="summary")
+                summarized = logits(model, packet, list(range(len(rows))), device, config.batch_size)
         finally:
             model.config = config
     predictions = apply_calibration(scored(rows, list(range(len(rows))), risks), metadata["calibration"])
@@ -413,9 +417,11 @@ def predict(bundle: dict, archive: dict, directory: str, split: str = "test", de
             row["potential_risk_delta"] = float(risks[index]) - float(disabled[index])
             row["uniform_readout_risk"] = float(uniform[index]) if uniform is not None else None
             row["query_readout_delta"] = float(risks[index]) - float(uniform[index]) if uniform is not None else None
+            row["summary_readout_risk"] = float(summarized[index]) if summarized is not None else None
+            row["pair_readout_delta"] = float(risks[index]) - float(summarized[index]) if summarized is not None else None
             for name in ("attention_contrast_rms", "attention_shift_tv"):
                 row[name] = float(measurements[name][index]) if name in measurements else None
-            row["intervention_scope"] = "Fixed checkpoint and input nodes; local attention contrasts, potential-off risk, and uniform readout for coupled mode"
+            row["intervention_scope"] = "Fixed checkpoint and nodes; local attention contrasts and potential-off, uniform, and summary readouts"
     return predictions
 
 # Author: Weiliang Zhu

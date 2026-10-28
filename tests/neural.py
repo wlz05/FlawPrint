@@ -24,7 +24,7 @@ from engine.storage import subset, write_rows, read_rows, read_json, save_bundle
 from engine.synthetic import fixture
 try:
     import torch
-    from engine.neural import NeuralConfig, ResidualAttention, ResidualBlock, potential, scramble, contrast
+    from engine.neural import NeuralConfig, ResidualAttention, ResidualBlock, potential, scramble, contrast, summarize
     from engine.learning import prepare, relation, fit, predict, standardize, logits, scored
 except ImportError:
     torch = None
@@ -384,7 +384,7 @@ class NeuralTests(unittest.TestCase):
         fit(self.bundle, self.archive, directory.as_posix(), replace(self.config, epochs=1), self.profile, "cpu")
         count = sum(row["split"] == "test" for row in self.bundle["rows"])
         maximum = np.float32(3e38)
-        risks = [np.full(count, value, dtype=np.float32) for value in (maximum, -maximum, -maximum)]
+        risks = [np.full(count, value, dtype=np.float32) for value in (maximum, -maximum, -maximum, -maximum)]
         with warnings.catch_warnings(record=True) as recorded:
             warnings.simplefilter("always", RuntimeWarning)
             with patch("engine.learning.logits", side_effect=risks):
@@ -393,6 +393,7 @@ class NeuralTests(unittest.TestCase):
         for row in rows:
             self.assertEqual(row["potential_risk_delta"], 2 * float(maximum))
             self.assertEqual(row["query_readout_delta"], 2 * float(maximum))
+            self.assertEqual(row["pair_readout_delta"], 2 * float(maximum))
 
     def test_inference_rejects_nonfinite_or_misaligned_batch_outputs(self) -> None:
         model = ResidualAttention({name: 4 for name in embeddings.STREAMS}, 3, self.config)
@@ -542,6 +543,79 @@ class NeuralTests(unittest.TestCase):
         torch.testing.assert_close(broadcast[0, :, :2], broadcast[1, :, :2])
         uniform = potential(logits, observed, graph, "uniform")
         torch.testing.assert_close(uniform[0, :, :2], uniform[1, :, :2])
+        reconstructed = potential(logits, observed, graph, "summary")
+        torch.testing.assert_close(reconstructed[0], reconstructed[1])
+
+    def test_summary_reconstruction_preserves_summaries_and_is_orthogonal(self) -> None:
+        torch.manual_seed(42)
+        original = torch.randn(3, 6, 6, dtype=torch.float64, requires_grad=True)
+        relation = (original + original.transpose(-1, -2)) / 2
+        mask = torch.tensor([[True] * 6, [True, False, True, True, False, True], [False] * 6])
+        pairs = mask[:, :, None] & mask[:, None, :]
+        values = relation.masked_fill(~pairs, 0)
+        reconstructed = summarize(relation, mask)
+        torch.testing.assert_close(reconstructed.diagonal(dim1=-2, dim2=-1), values.diagonal(dim1=-2, dim2=-1))
+        torch.testing.assert_close(reconstructed.sum(-1), values.sum(-1))
+        torch.testing.assert_close(reconstructed, reconstructed.transpose(-1, -2))
+        torch.testing.assert_close(summarize(reconstructed, mask), reconstructed)
+        remainder = values - reconstructed
+        torch.testing.assert_close((reconstructed * remainder).sum((1, 2)), torch.zeros(3, dtype=torch.float64), atol=1e-12, rtol=0)
+        self.assertTrue(torch.all(reconstructed.norm(dim=(-2, -1)) <= values.norm(dim=(-2, -1)) + 1e-12))
+        self.assertTrue(torch.all(reconstructed[~pairs] == 0))
+        reconstructed.square().sum().backward()
+        self.assertTrue(torch.isfinite(original.grad).all())
+
+    def test_summary_reconstruction_handles_small_support_and_masked_garbage(self) -> None:
+        values = torch.randn(4, 5, 5, dtype=torch.float64)
+        values = (values + values.transpose(-1, -2)) / 2
+        mask = torch.arange(5)[None] < torch.arange(4)[:, None]
+        pairs = mask[:, :, None] & mask[:, None, :]
+        expected = values.masked_fill(~pairs, 0)
+        damaged = values.masked_fill(~pairs, float("nan"))
+        torch.testing.assert_close(summarize(damaged, mask), expected, atol=1e-12, rtol=0)
+
+    def test_summary_reconstruction_rejects_invalid_active_relations(self) -> None:
+        graph, mask = torch.eye(4)[None], torch.ones(1, 4, dtype=torch.bool)
+        for relation, observed in ((graph[:, :, :3], mask), (graph, mask.float()), (graph.long(), mask), (None, mask), (graph, None)):
+            with self.assertRaises(ValueError):
+                summarize(relation, observed)
+        for value in (float("nan"), float("inf"), 1.0):
+            damaged = graph.clone()
+            damaged[0, 0, 1] = value
+            with self.assertRaisesRegex(ValueError, "finite symmetric"):
+                summarize(damaged, mask)
+
+    def test_summary_reconstruction_rejects_overflow_in_finite_inputs(self) -> None:
+        graph = torch.full((1, 6, 6), torch.finfo(torch.float32).max)
+        with self.assertRaisesRegex(ValueError, "overflowed"):
+            summarize(graph, torch.ones(1, 6, dtype=torch.bool))
+
+    def test_summary_cli_and_experiment_metadata_share_the_same_controls(self) -> None:
+        import deep
+        from engine.package import configuration
+        with patch.object(sys, "argv", ["deep.py", "train", "./physical.npz", "./deep.npz", "--mode", "Summary"]):
+            arguments = deep.arguments()
+        self.assertEqual(arguments.mode, "summary")
+        extension = configuration("builtin:experiment")["neural_extension"]
+        self.assertIn("summary", extension["modes"])
+        self.assertEqual(extension["core_comparisons"], {"pair_information": ["summary", "coupled"], "content_readout": ["uniform", "coupled"]})
+
+    def test_summary_control_keeps_the_same_input_nodes_and_query_parameters(self) -> None:
+        model = ResidualAttention({name: 4 for name in embeddings.STREAMS}, 4, self.config).eval()
+        features = {name: torch.randn(2, 4) for name in embeddings.STREAMS}
+        observed, mask = torch.ones(2, 4, dtype=torch.bool), torch.ones(2, 4, dtype=torch.bool)
+        ranks, graph = torch.randn(2, 4), torch.randn(2, 4, 4)
+        graph = graph + graph.transpose(-1, -2)
+        seen = []
+        hook = model.blocks[0].register_forward_pre_hook(lambda module, args: seen.append(args[0].detach().clone()))
+        try:
+            model(features, observed, ranks, graph, mask)
+            model.config = replace(self.config, mode="summary")
+            result = model(features, observed, ranks, graph, mask)
+        finally:
+            hook.remove()
+        torch.testing.assert_close(seen[0], seen[1], rtol=0, atol=0)
+        self.assertTrue(torch.isfinite(result["logit"]).all())
 
     def test_relation_mismatch_preserves_active_spectrum_and_parameter_budget(self) -> None:
         torch.manual_seed(3047)
@@ -554,7 +628,7 @@ class NeuralTests(unittest.TestCase):
         torch.testing.assert_close(relation.norm(dim=(-2, -1)), permuted.norm(dim=(-2, -1)))
         self.assertFalse(torch.allclose(relation[0], permuted[0]))
         budgets = []
-        for mode in ("coupled", "uniform", "broadcast", "diagonal", "shuffled"):
+        for mode in ("coupled", "uniform", "broadcast", "diagonal", "shuffled", "summary"):
             model = ResidualAttention({name: 4 for name in embeddings.STREAMS}, 4, replace(self.config, mode=mode))
             budgets.append(sum(value.numel() for value in model.parameters() if value.requires_grad))
         self.assertEqual(len(set(budgets)), 1)
@@ -613,6 +687,8 @@ class NeuralTests(unittest.TestCase):
         for row in predictions:
             self.assertTrue(np.isfinite(row["uniform_readout_risk"]))
             self.assertAlmostEqual(row["query_readout_delta"], row["fusion_risk"] - row["uniform_readout_risk"])
+            self.assertTrue(np.isfinite(row["summary_readout_risk"]))
+            self.assertAlmostEqual(row["pair_readout_delta"], row["fusion_risk"] - row["summary_readout_risk"])
             self.assertGreaterEqual(row["attention_contrast_rms"], 0)
             self.assertTrue(0 <= row["attention_shift_tv"] <= 1)
         self.assertTrue(all(row["checkpoint_version"] == "flawprint-neural-v2" for row in predictions))
@@ -886,7 +962,7 @@ class NeuralTests(unittest.TestCase):
         self.assertFalse(list(self.root.glob(".flawprint-*")))
 
     def test_all_neural_controls_have_finite_predictions(self) -> None:
-        for mode in ("unbiased", "independent", "deep", "concat", "uniform", "broadcast", "diagonal", "shuffled"):
+        for mode in ("unbiased", "independent", "deep", "concat", "uniform", "broadcast", "diagonal", "shuffled", "summary"):
             with self.subTest(mode=mode):
                 directory = (self.root / mode).as_posix()
                 fit(self.bundle, self.archive, directory, replace(self.config, mode=mode, epochs=1), self.profile, "cpu")
@@ -900,6 +976,10 @@ class NeuralTests(unittest.TestCase):
                     self.assertTrue(all(row["query_readout_delta"] == 0 for row in rows))
                 else:
                     self.assertTrue(all(row["uniform_readout_risk"] is None for row in rows))
+                if mode == "summary":
+                    self.assertTrue(all(row["pair_readout_delta"] == 0 for row in rows))
+                else:
+                    self.assertTrue(all(row["summary_readout_risk"] is None for row in rows))
                 if mode == "deep":
                     self.assertFalse(read_json(Path(directory) / "model.json")["profiles"])
 

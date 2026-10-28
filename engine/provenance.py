@@ -30,7 +30,7 @@ def manuscript_status(manuscript: str | None = None, snapshot: str | None = None
     content = path.read_bytes()
     current = content.decode("utf-8-sig")
     previous = saved.read_bytes().decode("utf-8-sig") if saved.exists() else ""
-    result = {"manuscript": path.as_posix(), "sha256": hashlib.sha256(content).hexdigest(), "bytes": len(content), "formulas": sorted(set(re.findall(r"\\tag\{(F\d+)\}", current)), key=lambda value: int(value[1:])), "headings": [line for line in current.splitlines() if line.startswith("###")], "changed": current != previous, "diff": "\n".join(difflib.unified_diff(previous.splitlines(), current.splitlines(), fromfile="accepted_manuscript", tofile="current_manuscript", lineterm="")) if previous else "Initial manuscript snapshot"}
+    result = {"manuscript": path.as_posix(), "sha256": hashlib.sha256(content).hexdigest(), "bytes": len(content), "formulas": list(dict.fromkeys(re.findall(r"\\tag\{([^{}]+)\}", current))), "headings": [line for line in current.splitlines() if line.startswith("###")], "changed": current != previous, "diff": "\n".join(difflib.unified_diff(previous.splitlines(), current.splitlines(), fromfile="accepted_manuscript", tofile="current_manuscript", lineterm="")) if previous else "Initial manuscript snapshot"}
     if accept:
         if path.read_bytes() != content:
             raise RuntimeError("The manuscript changed during review; audit it again before acceptance")
@@ -40,7 +40,10 @@ def manuscript_status(manuscript: str | None = None, snapshot: str | None = None
     return result
 
 def source_files(root: str = ".") -> list[Path]:
-    return sorted(path for path in relative_path(root).rglob("*.py") if not set(path.parts).intersection((".git", ".venv", "venv", "node_modules", "__pycache__")))
+    base = relative_path(root)
+    ignored = {".git", ".venv", "venv", "node_modules", "__pycache__", "tmp", "models", "outputs", "data", "references", "weibo21", "FineFake"}
+    # Keep model assets and generated files outside the project source identity.
+    return sorted((path for path in base.rglob("*.py") if not set(path.relative_to(base).parts).intersection(ignored)), key=lambda path: path.relative_to(base).as_posix())
 
 def source_digest(root: str = ".") -> str:
     checksum = hashlib.sha256()
