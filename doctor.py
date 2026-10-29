@@ -48,8 +48,13 @@ def environment(tables: bool = False, semantic: bool = False) -> dict:
     return {"timestamp_utc": datetime.now(timezone.utc).isoformat(), "python": platform.python_version(), "implementation": platform.python_implementation(), "system": platform.system(), "machine": platform.machine(), "packages": versions, "missing": unavailable, "incompatible": incompatible, "python_supported": supported, "workspace_ready": root_ok, "passed": supported and root_ok and not unavailable and not incompatible, "path_base": "process working directory", "installation": 'python -m pip install "numpy>=1.26,<3" "scipy>=1.11,<2" "Pillow>=10,<13" "scikit-learn>=1.4,<2" "requests>=2.31,<3" "pypdf>=4,<7"', "optional_tables": 'python -m pip install "pandas>=2.2,<4" "openpyxl>=3.1,<4" "pyarrow>=15,<30" "xlrd>=2,<3"', "optional_semantic": 'python -m pip install "torch>=2.2" "transformers>=4.40,<6"'}
 
 def relative(value: str) -> Path:
-    path = Path(value)
-    if path.is_absolute() or PureWindowsPath(value).drive or value.startswith(("/", "\\")):
+    if not isinstance(value, str) or not value.strip() or "\0" in value:
+        raise ValueError("Use a nonempty relative output path")
+    text = value.replace("\\", "/")
+    path = Path(text)
+    if path.is_absolute() or PureWindowsPath(text).drive or text.startswith("/"):
+        raise ValueError("Use a relative output path")
+    if text == "~" or text.startswith("~/") or text.casefold().startswith(("http://", "https://", "file://")):
         raise ValueError("Use a relative output path")
     return path
 

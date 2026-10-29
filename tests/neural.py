@@ -888,6 +888,17 @@ class NeuralTests(unittest.TestCase):
         parameters = [torch.load(moved / "models" / name / "parameters.pt", map_location="cpu", weights_only=True) for name in ("checkpoint", "retrained")]
         for name in parameters[0]:
             torch.testing.assert_close(parameters[0][name], parameters[1][name], rtol=0, atol=0)
+        relocated = moved / "cached inputs"
+        relocated.mkdir()
+        self.assertTrue(relocated.resolve().is_relative_to(self.root.resolve()))
+        # Move caches and the complete model independently of their training paths.
+        (moved / "data" / "physical.npz").rename(relocated / "traces.npz")
+        (moved / "data" / "vectors.npz").rename(relocated / "content.npz")
+        (moved / "models" / "checkpoint").rename(moved / "restored model")
+        arguments = ["predict", "cached inputs\\traces.npz", "cached inputs/content.npz", "--model", "restored model", "--device", "cpu", "--output", "outputs/relocated.jsonl"]
+        result = subprocess.run([sys.executable, "-B", "-c", bootstrap, *arguments], cwd=moved, env=environment, capture_output=True, text=True, timeout=60)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(read_rows(moved / "outputs" / "relocated.jsonl"), before)
 
     def test_alignment_output_cannot_replace_encoder_files_or_source_images(self) -> None:
         import encode

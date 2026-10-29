@@ -15,7 +15,7 @@ from unittest.mock import patch
 import numpy as np
 from PIL import Image
 from convert import convert_files
-from doctor import environment, compatible
+from doctor import environment, compatible, relative as environment_path
 from engine.data import identifier, normalize, portable_image, audit_splits
 from engine.formats import Conversion, convert_records
 from engine.provenance import conventions, manuscript_status, source_digest, source_files
@@ -183,8 +183,26 @@ class FormatTests(unittest.TestCase):
     def test_parquet_preserves_the_canonical_contract(self) -> None:
         import pandas as pd
         path = self.root / "data.parquet"
-        pd.DataFrame(self.records).to_parquet(path, index=False)
-        self.assertEqual(normalize(read_rows(path)), normalize(self.records))
+        pd.DataFrame(self.records).to_parquet(path, engine="pyarrow", index=False)
+        with pd.option_context("io.parquet.engine", "fastparquet"):
+            self.assertEqual(normalize(read_rows(path)), normalize(self.records))
+
+    @unittest.skipUnless(importlib.util.find_spec("pandas") and importlib.util.find_spec("pyarrow"), "Parquet dependencies are not installed")
+    def test_parquet_nullable_columns_and_image_lists_convert_without_repartitioning(self) -> None:
+        import pandas as pd
+        path = self.root / "nullable.parquet"
+        table = pd.DataFrame({"id": pd.Series(["001", "002"], dtype="string"), "text": pd.Series(["Report.", "Image report."], dtype="string"), "image": [["photo.jpg"], []], "domain": pd.Series(["science", "science"], dtype="string"), "label": pd.Series([0, 1], dtype="Int64"), "group": pd.Series([pd.NA, "event2"], dtype="string"), "split": ["train", "test"], "physical_manipulated": pd.Series([pd.NA, False], dtype="boolean")})
+        table.to_parquet(path, engine="pyarrow", index=False)
+        rows, _ = convert_files([path.as_posix()], Conversion(dataset="canonical", image_root="./data/images", keep_columns=["physical_manipulated"]))
+        self.assertEqual([row["id"] for row in rows], ["001", "002"])
+        self.assertEqual([row["split"] for row in rows], ["train", "test"])
+        self.assertEqual([row["label"] for row in rows], [0, 1])
+        self.assertEqual([row["image"] for row in rows], ["data/images/photo.jpg", ""])
+        self.assertNotIn("physical_manipulated", rows[0])
+        self.assertIs(rows[1]["physical_manipulated"], False)
+        output = self.root / "converted.jsonl"
+        write_rows(output, rows)
+        self.assertEqual(normalize(read_rows(output)), rows)
 
     def test_optional_table_dependency_failure_is_actionable(self) -> None:
         with patch.dict(sys.modules, {"pandas": None}):
@@ -486,6 +504,14 @@ class FormatTests(unittest.TestCase):
         self.assertFalse(compatible("transformers", "6.0.0"))
         self.assertTrue(compatible("transformers", "5.15.0"))
         self.assertTrue(compatible("torch", "2.5.1+cpu"))
+
+    def test_environment_output_paths_are_portable_and_explicit(self) -> None:
+        self.assertEqual(environment_path(".\\outputs\\environment.json"), Path("outputs/environment.json"))
+        self.assertEqual(environment_path("./outputs/environment.json"), Path("outputs/environment.json"))
+        for path in ("", " ", "\0", "~", "~/environment.json", "https://host/environment.json", "file://host/environment.json", "//host/share/environment.json", str(self.root.resolve() / "environment.json")):
+            with self.subTest(path=path):
+                with self.assertRaises(ValueError):
+                    environment_path(path)
 
     def test_conversion_cli_rejects_input_overwrite(self) -> None:
         path = self.root / "data.json"

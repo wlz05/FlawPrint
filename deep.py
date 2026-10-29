@@ -37,7 +37,7 @@ def arguments() -> argparse.Namespace:
     prediction.add_argument("--model", required=True)
     prediction.add_argument("--split", default="test")
     prediction.add_argument("--reference-domain")
-    prediction.add_argument("--explain", action="store_true", help="Export attention contrasts and fixed-checkpoint potential-off and uniform-readout responses")
+    prediction.add_argument("--explain", action="store_true", help="Export attention contrasts and fixed-checkpoint potential-off, uniform, and summary responses")
     prediction.add_argument("--output", default="./outputs/neural/predictions.jsonl")
     for command in (extraction, training, prediction):
         command.add_argument("--device", default="cuda:0")

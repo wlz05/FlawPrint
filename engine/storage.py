@@ -147,7 +147,8 @@ def read_rows(path: str | Path, encoding: str = "utf-8-sig", delimiter: str | No
                 frame = table.iloc[1:].copy()
                 frame.columns = [name.strip() for name in headers]
             elif suffix == ".parquet":
-                frame = pd.read_parquet(target)
+                # Keep the table engine independent of machine-local pandas options.
+                frame = pd.read_parquet(target, engine="pyarrow")
             else:
                 frame = pd.read_pickle(target)
             if not isinstance(frame, pd.DataFrame):

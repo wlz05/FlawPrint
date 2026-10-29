@@ -63,6 +63,7 @@ FlawPrint/
 | NumPy / SciPy | >=1.26, <3 / >=1.11, <2 |
 | Pillow / scikit-learn | >=10, <13 / >=1.4, <2 |
 | Deep learning | PyTorch >=2.2; Transformers >=4.40, <6 |
+| Table input | pandas >=2.2, <4; PyArrow >=15, <30; openpyxl >=3.1, <4; xlrd >=2, <3 |
 | GPU | Single NVIDIA GeForce RTX 4090 |
 | Seeds | 42, 52, 3047, 3407 |
 
@@ -93,6 +94,15 @@ python -B test.py
 ```
 
 Use the activation command for your shell. The first installation command supplies the deterministic pipeline, the second adds deep learning, and the third adds Excel and Parquet readers. Trace profiling runs on CPU; deep extraction and training use `cuda:0` by default. Unavailable CUDA devices fail before training with an explicit message; use `--device cpu` for CPU execution.
+
+Parquet input uses the [PyArrow engine](https://pandas.pydata.org/docs/reference/api/pandas.read_parquet.html) explicitly. Run the following check with the same Python interpreter used for conversion and training:
+
+```bash
+python -c "import pandas, pyarrow; print('pandas', pandas.__version__, 'pyarrow', pyarrow.__version__)"
+python -B -m unittest discover -s tests -p formats.py -k parquet -v
+```
+
+For a new machine, create its virtual environment and rerun the installation commands. Reinstall the appropriate CUDA-enabled PyTorch build there. The version list written by `doctor.py --freeze` records the source environment for comparison.
 
 ## Datasets
 
@@ -182,6 +192,8 @@ python -B deep.py train ./data/features.npz ./data/deep.npz --dataset weibo --se
 Use `--dataset weibo21` or `--dataset finefake` with that dataset's prepared caches for the other benchmarks. Predict each selected checkpoint on the same test identities and report mean and sample standard deviation across the four seeds. The model directory stores `parameters.pt`, `model.json`, `profiles/`, and CLI `provenance.json`. Metadata records the run seed, settings, partition counts, encoder protocol, and input hashes. Labeled test predictions produce a `.report.json` metric file. The standard three-partition workflow outputs the news-head decision and sigmoid probability. An additional supplied `calibration` partition enables probability calibration and prediction sets as a separate evaluation option.
 
 To move an experiment, copy the source, both feature archives, and the complete trained model directory, including `model.json`, `parameters.pt`, and `profiles/`. Keep image paths and the dataset layout relative to the repository root, then run commands from the copied root with the new relative model and cache paths. Prediction reads the cached vectors and saved references without loading the pretrained encoders or the original training input files. Copy complete encoder files when extracting features on the new machine; links into another machine's model cache are not portable. Both slash styles are accepted for relative CLI paths. Use `--device cpu` for a CPU run or `--device cuda:0` for the experiment GPU.
+
+The cache archives and complete model directory may move to new relative locations or names; pass those locations through the two positional cache arguments and `--model`. Preserve sample IDs, image paths within both archives, and files inside the model directory. Image paths are resolved from the repository root during extraction; cached prediction uses their recorded identities. GPU runs require a CUDA-enabled PyTorch installation even when all features are already cached.
 
 ### Reference and Calibration Roles
 
