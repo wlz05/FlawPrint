@@ -148,7 +148,18 @@ class ResidualBlock(nn.Module):
             plain = torch.softmax(original.masked_fill(~observed[:, None, None, :], -torch.inf), dim=-1)
             shifts = (weights[:, :, :prefix] - plain[:, :, :prefix]).abs().sum(-1) * queries[:, None]
             variation = shifts.sum((1, 2)) / (2 * self.heads * queries.sum(-1).clamp_min(1))
-            diagnostics.append({"attention_contrast_rms": rms, "attention_shift_tv": variation})
+            measured = {"attention_contrast_rms": rms, "attention_shift_tv": variation}
+            if mode == "coupled":
+                summary = summarize(relation, observed[:, prefix:])
+                # Remove only pair information while keeping the current layer state fixed.
+                reduced = strength * potential(original, observed, summary, "coupled")
+                difference = contrast(bias - reduced, observed)[:, :, :prefix]
+                alternative = torch.softmax((original + reduced).masked_fill(~observed[:, None, None, :], -torch.inf), dim=-1)
+                change = (weights[:, :, :prefix] - alternative[:, :, :prefix]).abs().sum(-1) * queries[:, None]
+                energy = relation.square().sum((1, 2))
+                fraction = (relation - summary).square().sum((1, 2)) / energy.clamp_min(torch.finfo(relation.dtype).tiny)
+                measured.update(pair_relation_fraction=fraction.clamp(0, 1), pair_contrast_rms=(difference.square().sum((1, 2, 3)) / pairs).sqrt(), pair_attention_shift_tv=change.sum((1, 2)) / (2 * self.heads * queries.sum(-1).clamp_min(1)))
+            diagnostics.append(measured)
         mixed = (weights @ value).transpose(1, 2).reshape(batch, length, dimension)
         tokens = tokens + self.dropout(self.output(mixed))
         return (tokens + self.dropout(self.feed(tokens))) * observed[:, :, None]

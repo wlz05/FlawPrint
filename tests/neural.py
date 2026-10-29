@@ -411,7 +411,7 @@ class NeuralTests(unittest.TestCase):
     def test_inference_diagnostics_reject_missing_or_invalid_batch_values(self) -> None:
         model = ResidualAttention({name: 4 for name in embeddings.STREAMS}, 3, self.config)
         packet = {"features": {name: np.zeros((2, 4), dtype=np.float32) for name in embeddings.STREAMS}, "observed": np.ones((2, 4), dtype=bool), "ranks": np.zeros((2, 3), dtype=np.float32), "graph": np.zeros((2, 3, 3), dtype=np.float32), "trace_observed": np.zeros((2, 3), dtype=bool)}
-        for name, value in (("attention_shift_tv", torch.tensor([0., 1.1])), ("attention_contrast_rms", torch.tensor([-1., 0.])), ("attention_shift_tv", torch.tensor([float("nan"), 0.])), ("attention_shift_tv", torch.zeros(1)), ("attention_shift_tv", [0., 0.])):
+        for name, value in (("attention_shift_tv", torch.tensor([0., 1.1])), ("attention_contrast_rms", torch.tensor([-1., 0.])), ("attention_shift_tv", torch.tensor([float("nan"), 0.])), ("attention_shift_tv", torch.zeros(1)), ("attention_shift_tv", [0., 0.]), ("pair_relation_fraction", torch.tensor([0., 1.1])), ("pair_contrast_rms", torch.tensor([-1., 0.])), ("pair_attention_shift_tv", torch.tensor([float("nan"), 0.]))):
             diagnostics = {"retained": "value"}
             with patch.object(model, "forward", return_value={"logit": torch.zeros(2), name: value}):
                 with self.assertRaisesRegex(ValueError, "diagnostics"):
@@ -691,6 +691,9 @@ class NeuralTests(unittest.TestCase):
             self.assertAlmostEqual(row["pair_readout_delta"], row["fusion_risk"] - row["summary_readout_risk"])
             self.assertGreaterEqual(row["attention_contrast_rms"], 0)
             self.assertTrue(0 <= row["attention_shift_tv"] <= 1)
+            self.assertTrue(0 <= row["pair_relation_fraction"] <= 1)
+            self.assertGreaterEqual(row["pair_contrast_rms"], 0)
+            self.assertTrue(0 <= row["pair_attention_shift_tv"] <= 1)
         self.assertTrue(all(row["checkpoint_version"] == "flawprint-neural-v2" for row in predictions))
         self.assertEqual(read_json(Path(directory) / "model.json")["feature_order"], list(embeddings.STREAMS))
         history = read_json(Path(directory) / "model.json")["history"]
@@ -991,6 +994,7 @@ class NeuralTests(unittest.TestCase):
                     self.assertTrue(all(row["pair_readout_delta"] == 0 for row in rows))
                 else:
                     self.assertTrue(all(row["summary_readout_risk"] is None for row in rows))
+                self.assertTrue(all(row[name] is None for row in rows for name in ("pair_relation_fraction", "pair_contrast_rms", "pair_attention_shift_tv")))
                 if mode == "deep":
                     self.assertFalse(read_json(Path(directory) / "model.json")["profiles"])
 
@@ -1103,6 +1107,55 @@ class NeuralTests(unittest.TestCase):
         measured = shifted[:, :, 0, 1] - shifted[:, :, 0, 2] - base[:, :, 0, 1] + base[:, :, 0, 2]
         torch.testing.assert_close(measured, 0.7 * expected)
 
+    def test_summary_null_information_depends_on_responsibility_contrasts(self) -> None:
+        graph = torch.tensor([[[0., 1., -1., 0.], [1., 0., 0., -1.], [-1., 0., 0., 1.], [0., -1., 1., 0.]]], dtype=torch.float64)
+        observed = torch.ones(1, 7, dtype=torch.bool)
+        delta = torch.tensor([[.1, -.1, 0., 0.], [0., .1, -.1, 0.], [.1, 0., -.1, 0.]], dtype=torch.float64)
+        torch.testing.assert_close(summarize(graph, observed[:, 3:]), torch.zeros_like(graph))
+        outputs = []
+        for scale in (0., .5, 1.):
+            values = torch.zeros(1, 1, 7, 7, dtype=torch.float64)
+            responsibilities = .25 + scale * delta
+            values[0, 0, :3, 3:] = responsibilities.log()
+            outputs.append(potential(values, observed, graph, "coupled"))
+            measured = outputs[-1][0, 0, 0, 1] - outputs[-1][0, 0, 0, 2]
+            expected = (responsibilities[0] - .25) @ graph[0] @ (responsibilities[1] - responsibilities[2])
+            torch.testing.assert_close(measured, expected)
+            bound = torch.linalg.matrix_norm(graph[0], ord=2) * (responsibilities[0] - .25).norm() * (responsibilities[1] - responsibilities[2]).norm()
+            self.assertLessEqual(measured.abs(), bound + 1e-14)
+        torch.testing.assert_close(outputs[0][:, :, :3], torch.zeros_like(outputs[0][:, :, :3]), atol=1e-14, rtol=0)
+        torch.testing.assert_close(outputs[1][:, :, :3, :3], outputs[2][:, :, :3, :3] / 4, atol=1e-14, rtol=0)
+        torch.testing.assert_close(outputs[1][:, :, :3, 3:], outputs[2][:, :, :3, 3:] / 2, atol=1e-14, rtol=0)
+        self.assertGreater(outputs[2][:, :, :3, :3].abs().max(), 0)
+
+    def test_pair_diagnostics_separate_available_information_from_local_use(self) -> None:
+        torch.manual_seed(42)
+        block = ResidualBlock(self.config).double().eval()
+        tokens = torch.randn(2, 7, self.config.dimension, dtype=torch.float64)
+        observed = torch.ones(2, 7, dtype=torch.bool)
+        observed[1, 3:] = False
+        graph = torch.tensor([[[0., 1., -1., 0.], [1., 0., 0., -1.], [-1., 0., 0., 1.], [0., -1., 1., 0.]]], dtype=torch.float64).repeat(2, 1, 1) / 5
+        graph[1] = 0
+        original = copy.deepcopy(block.qkv.state_dict())
+        with torch.no_grad():
+            block.qkv.weight.zero_()
+            block.qkv.bias.zero_()
+        measurements = []
+        block(tokens, observed, graph, "coupled", measurements)
+        uniform = measurements[0]
+        torch.testing.assert_close(uniform["pair_relation_fraction"], torch.tensor([1., 0.], dtype=torch.float64))
+        torch.testing.assert_close(uniform["pair_contrast_rms"], torch.zeros(2, dtype=torch.float64), atol=1e-14, rtol=0)
+        torch.testing.assert_close(uniform["pair_attention_shift_tv"], torch.zeros(2, dtype=torch.float64), atol=1e-14, rtol=0)
+        block.qkv.load_state_dict(original)
+        measurements = []
+        block(tokens, observed, graph, "coupled", measurements)
+        selected = measurements[0]
+        torch.testing.assert_close(selected["pair_contrast_rms"], selected["attention_contrast_rms"])
+        torch.testing.assert_close(selected["pair_attention_shift_tv"], selected["attention_shift_tv"])
+        self.assertGreater(selected["pair_contrast_rms"][0], 0)
+        self.assertGreater(selected["pair_attention_shift_tv"][0], 0)
+        self.assertEqual(selected["pair_contrast_rms"][1], 0)
+
     def test_uniform_readout_ignores_queries_and_respects_missing_anchors(self) -> None:
         torch.manual_seed(3047)
         graph = torch.randn(2, 4, 4)
@@ -1148,6 +1201,7 @@ class NeuralTests(unittest.TestCase):
         features = {name: torch.randn(2, 4) for name in embeddings.STREAMS}
         observed = torch.ones(2, 4, dtype=torch.bool)
         ranks, graph = torch.randn(2, 3), torch.randn(2, 3, 3)
+        graph = graph + graph.transpose(-1, -2)
         mask = torch.tensor([[True, True, True], [False, False, False]])
         ordinary = model(features, observed, ranks, graph, mask)
         measured = model(features, observed, ranks, graph, mask, explain=True)

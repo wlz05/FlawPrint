@@ -153,12 +153,12 @@ def logits(model: ResidualAttention, packet: dict, indices: list[int], device: s
                 raise ValueError("Neural inference requires one finite risk per selected sample")
             values.append(risk)
             if diagnostics is not None:
-                for name in ("attention_contrast_rms", "attention_shift_tv"):
+                for name in ("attention_contrast_rms", "attention_shift_tv", "pair_relation_fraction", "pair_contrast_rms", "pair_attention_shift_tv"):
                     if name in output:
                         if not isinstance(output[name], torch.Tensor):
                             raise ValueError("Neural diagnostics require tensors: " + name)
                         value = output[name].detach().cpu().numpy()
-                        if value.shape != risk.shape or value.dtype.kind != "f" or not np.isfinite(value).all() or np.any(value < 0) or name == "attention_shift_tv" and np.any(value > 1):
+                        if value.shape != risk.shape or value.dtype.kind != "f" or not np.isfinite(value).all() or np.any(value < 0) or name in ("attention_shift_tv", "pair_relation_fraction", "pair_attention_shift_tv") and np.any(value > 1):
                             raise ValueError("Neural diagnostics require finite aligned values: " + name)
                         measurements.setdefault(name, []).append(value)
     if diagnostics is not None:
@@ -419,7 +419,7 @@ def predict(bundle: dict, archive: dict, directory: str, split: str = "test", de
             row["query_readout_delta"] = float(risks[index]) - float(uniform[index]) if uniform is not None else None
             row["summary_readout_risk"] = float(summarized[index]) if summarized is not None else None
             row["pair_readout_delta"] = float(risks[index]) - float(summarized[index]) if summarized is not None else None
-            for name in ("attention_contrast_rms", "attention_shift_tv"):
+            for name in ("attention_contrast_rms", "attention_shift_tv", "pair_relation_fraction", "pair_contrast_rms", "pair_attention_shift_tv"):
                 row[name] = float(measurements[name][index]) if name in measurements else None
             row["intervention_scope"] = "Fixed checkpoint and nodes; local attention contrasts and potential-off, uniform, and summary readouts"
     return predictions

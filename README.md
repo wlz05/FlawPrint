@@ -34,6 +34,8 @@ Independent pool --> Frozen ranks and domain copula      |
 
 The [core operation in step 4](engine/neural.py) keeps pair identities available during content interaction. The domain pool defines statistical trace compatibility, and source news labels train the final decision. Query/key scores read the complete relation matrix without a separate gating network.
 
+Pair information contributes through the current query's trace responsibilities. The component lost by diagonal and row summaries has zero row sums: a uniform query cancels its direct contribution, while content-specific responsibilities can turn it into relative attention preferences. The diagnostics below measure retained pair energy, its local use, and the resulting whole-model response separately.
+
 ## Project Structure
 
 ```text
@@ -238,11 +240,16 @@ python -B deep.py predict ./data/features.npz ./data/deep.npz --model ./models/n
 |---|---|
 | `attention_contrast_rms` | Mean layer RMS of the scaled potential after removing each row's shared offset |
 | `attention_shift_tv` | Mean layer total variation between attention with and without the potential, using the same layer inputs |
+| `pair_relation_fraction` | Fraction of relation energy outside its diagonal-and-row-sum reconstruction, for coupled checkpoints |
+| `pair_contrast_rms` | Mean layer RMS of the effective pair-only bias on available class and content queries |
+| `pair_attention_shift_tv` | Mean layer attention total variation after removing only unsummarized pair information at the same layer state |
 | `potential_disabled_risk` / `potential_risk_delta` | Whole-model raw risk with the potential disabled / original minus disabled risk |
 | `uniform_readout_risk` / `query_readout_delta` | Whole-model risk with uniform content responsibilities / original minus uniform risk |
 | `summary_readout_risk` / `pair_readout_delta` | Whole-model risk with summary-reconstructed relations / original minus summary risk |
 
 Local measurements include the class node and available content queries, with all available keys; masked nodes are excluded from their denominators. A missing relation gives zero local change. The concat control has no attention measurements and exports missing values. Coupled checkpoints add three diagnostic forwards: potential off, uniform responsibility, and summary reconstruction. Uniform and summary checkpoints report zero for their corresponding self-intervention delta; other inapplicable readouts export missing values. Input nodes and weights stay fixed while hidden states update normally in each forward pass. Probabilities and prediction sets use the original model risk.
+
+The three pair measurements are available for coupled checkpoints. Local summary removal reuses the current Q/K/V tensors and masks; it does not launch another whole-model forward. Other modes export missing values for these fields. Compare these measurements by news ID with `pair_readout_delta` and the paired task outcomes: retained matrix energy, local attention use, and final correction measure different stages of the same readout.
 
 New checkpoints use `flawprint-neural-v2` and record the relation operator. Existing `v1` coupled checkpoints retain their original broadcast operation when loaded. Prediction output includes the effective mode and checkpoint version.
 
