@@ -8,7 +8,7 @@ from pathlib import Path
 import numpy as np
 from PIL.Image import DecompressionBombError
 from scipy.special import ndtr
-from engine.storage import read_json, write_json, read_rows, write_rows, write_csv, load_bundle, save_bundle, subset, relative_path, resolved, same_path, protect_outputs
+from engine.storage import read_json, write_json, read_rows, write_rows, write_csv, load_bundle, save_bundle, subset, relative_path, resolved, same_path, protect_outputs, staged_outputs
 from engine.data import normalize, partition, audit_splits, join_predictions
 from engine.traces import TraceConfig, NAMES, extract
 from engine.profile import ProfileConfig, DomainProfile
@@ -79,8 +79,9 @@ def command_extract(args: argparse.Namespace) -> dict:
     # Verify input stability before saving extracted features.
     if digest(args.input) != original_hash:
         raise ValueError("The manifest changed during extraction; rerun with a stable input")
-    save_bundle(args.output, values, observed, patches, metadata, NAMES)
-    write_json(provenance, {"version": VERSION, "manifest": {"path": args.input, "sha256": original_hash}, "features": {"path": args.output, "sha256": digest(args.output), "names": NAMES}, "trace_config": asdict(config), "workers": args.workers, "source_sha256": source_digest(), "environment": environment(), "audit": audit})
+    with staged_outputs([args.output, provenance]) as stages:
+        save_bundle(stages[0], values, observed, patches, metadata, NAMES)
+        write_json(stages[1], {"version": VERSION, "manifest": {"path": args.input, "sha256": original_hash}, "features": {"path": args.output, "sha256": digest(stages[0]), "names": NAMES}, "trace_config": asdict(config), "workers": args.workers, "source_sha256": source_digest(), "environment": environment(), "audit": audit})
     return {"samples": len(rows), "features": len(NAMES), "tiles": patches.shape[1], "output": args.output, "config": asdict(config), "audit": audit}
 
 def command_profile(args: argparse.Namespace) -> dict:

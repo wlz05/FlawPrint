@@ -293,7 +293,7 @@ def fit(bundle: dict, archive: dict, output: str, config: NeuralConfig, profile_
     dimensions = {name: int(values.shape[1]) for name, values in packet["features"].items()}
     model = ResidualAttention(dimensions, len(bundle["names"]), config).to(device)
     optimizer = torch.optim.AdamW((value for value in model.parameters() if value.requires_grad), lr=config.learning_rate, weight_decay=config.weight_decay)
-    rng, history, best, best_score, patience = np.random.default_rng(config.seed), [], None, -1.0, 0
+    rng, history, best, best_score, patience, selected_epoch = np.random.default_rng(config.seed), [], None, -1.0, 0, 0
     for epoch in range(config.epochs):
         model.train()
         order = rng.permutation(partitions["train"]).tolist()
@@ -321,6 +321,7 @@ def fit(bundle: dict, archive: dict, output: str, config: NeuralConfig, profile_
         history.append({"epoch": epoch + 1, "loss": total / len(order), "validation_macro_f1": validation["macro_f1"], "image_supervised_samples": auxiliary_count})
         if validation["macro_f1"] > best_score:
             best_score, patience = validation["macro_f1"], 0
+            selected_epoch = epoch + 1
             best = {name: value.detach().cpu().clone() for name, value in model.state_dict().items()}
         else:
             patience += 1
@@ -336,10 +337,11 @@ def fit(bundle: dict, archive: dict, output: str, config: NeuralConfig, profile_
     metadata["embedding_protocol"] = embeddings.protocol(archive)
     metadata["partition_counts"] = {role: sum(row["split"] == role for row in rows) for role in ("train", "validation", "calibration", "profile", "test")}
     metadata["partition_policy"] = "Preserve supplied sample identities and partition roles"
+    metadata["selected_epoch"] = selected_epoch
     metadata["calibration_protocol"] = "independent_source_partitions" if state is not None else "uncalibrated"
     publish(destination, best, profiles, metadata, provenance)
     image_samples = sum(isinstance(rows[index].get("physical_manipulated"), (bool, np.bool_)) and bool(rows[index].get("image")) for index in partitions["train"]) if config.auxiliary_weight else 0
-    return {"output": output, "epochs": len(history), "best_validation_macro_f1": best_score, "trainable_parameters": metadata["trainable_parameters"], "image_supervised_samples": image_samples, "calibration_samples": len(partitions["calibration"])}
+    return {"output": output, "epochs": len(history), "selected_epoch": selected_epoch, "best_validation_macro_f1": best_score, "trainable_parameters": metadata["trainable_parameters"], "image_supervised_samples": image_samples, "calibration_samples": len(partitions["calibration"])}
 
 def predict(bundle: dict, archive: dict, directory: str, split: str = "test", device: str = "cuda:0", reference_domain: str | None = None, explain: bool = False) -> list[dict]:
     validate_bundle(bundle)

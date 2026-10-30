@@ -209,6 +209,76 @@ class FormatTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "pip install.*pandas"):
                 read_rows(self.root / "data.xlsx")
 
+    def test_numpy_missing_text_stays_empty_in_image_only_conversion(self) -> None:
+        for value in (None, np.float16("nan"), np.float32("nan"), np.float64("nan")):
+            rows, _ = convert_records([{"id": "001", "text": value, "image": "assets/photo.jpg"}], Conversion())
+            self.assertEqual(rows[0]["text"], "")
+            self.assertEqual(rows[0]["id"], "001")
+        rows, _ = convert_records([{"id": "literal", "text": "nan"}], Conversion())
+        self.assertEqual(rows[0]["text"], "nan")
+        with self.assertRaisesRegex(ValueError, "requires text or an image"):
+            convert_records([{"id": "empty", "text": np.float32("nan")}], Conversion())
+
+    def test_unlabeled_profile_conversion_preserves_ids_and_roles(self) -> None:
+        records = [{"id": "001", "text": "Reference one.", "domain": "science"}, {"id": "002", "text": "Reference two.", "domain": "science"}]
+        for dataset in ("weibo", "weibo21", "finefake"):
+            rows, _ = convert_records(records, Conversion(dataset=dataset, split="profile"))
+            self.assertEqual([row["id"] for row in rows], ["001", "002"])
+            self.assertTrue(all(row["split"] == "profile" and "label" not in row for row in rows))
+            supplied = [dict(row, partition="pool") for row in records]
+            rows, _ = convert_records(supplied, Conversion(dataset=dataset, split_map={"pool": "profile"}))
+            self.assertTrue(all(row["split"] == "profile" for row in rows))
+        with self.assertRaisesRegex(ValueError, "Required columns"):
+            convert_records(records, Conversion(dataset="weibo", split="train"))
+
+    def test_profile_annotations_are_discarded_before_label_mapping(self) -> None:
+        records = [{"id": "001", "text": "Reference one.", "domain": "science", "label": "unused-category"}]
+        for dataset in ("weibo21", "finefake"):
+            config = Conversion(dataset=dataset, split="profile", label_map={"0": 0})
+            rows, report = convert_records(records, config)
+            self.assertNotIn("label", rows[0])
+            self.assertEqual(report["profile_labels_removed"], 1)
+            config.split = "train"
+            with self.assertRaisesRegex(ValueError, "Unmapped label"):
+                convert_records(records, config)
+
+    def test_conversion_rechecks_earlier_tables_after_reading_the_batch(self) -> None:
+        sources = [self.root / "first.jsonl", self.root / "second.jsonl"]
+        for index, path in enumerate(sources):
+            write_rows(path, [{"id": str(index), "text": "Report " + str(index), "split": "test"}])
+        def reading(path, *arguments):
+            rows = read_rows(path, *arguments)
+            if path == sources[1]:
+                sources[0].write_text('{"id":"changed","text":"Changed."}\n', encoding="utf-8")
+            return rows
+        with patch("convert.read_rows", side_effect=reading):
+            with self.assertRaisesRegex(ValueError, "changed during conversion"):
+                convert_files([path.as_posix() for path in sources], Conversion())
+
+    def test_conversion_report_write_failure_preserves_both_outputs(self) -> None:
+        import convert
+        source, output, report = self.root / "source.jsonl", self.root / "converted.jsonl", self.root / "converted.conversion.json"
+        write_rows(source, [{"id": "news", "text": "Report."}])
+        write_rows(output, [{"id": "retained"}])
+        write_json(report, {"retained": True})
+        before = output.read_bytes(), report.read_bytes()
+        with patch.object(sys, "argv", ["convert.py", source.as_posix(), "--output", output.as_posix()]), patch("convert.write_json", side_effect=OSError("Report write failed")):
+            with self.assertRaises(SystemExit):
+                convert.main()
+        self.assertEqual((output.read_bytes(), report.read_bytes()), before)
+        self.assertFalse(list(self.root.glob(".flawprint-*")))
+
+    def test_invalid_conversion_report_path_preserves_existing_manifest(self) -> None:
+        source, output, report = self.root / "source.jsonl", self.root / "converted.jsonl", self.root / "report"
+        write_rows(source, [{"id": "news", "text": "Report."}])
+        write_rows(output, [{"id": "retained"}])
+        report.mkdir()
+        before = output.read_bytes()
+        result = subprocess.run([sys.executable, "-B", "convert.py", source.as_posix(), "--output", output.as_posix(), "--report", report.as_posix()], capture_output=True, text=True, timeout=60)
+        self.assertEqual(result.returncode, 2, result.stderr)
+        self.assertIn("regular files", result.stderr)
+        self.assertEqual(output.read_bytes(), before)
+
     def test_finefake_aliases_and_binary_labels_are_converted(self) -> None:
         records = [{"text": "report", "image_path": "photo.jpg", "topic": "science", "label": 1}]
         rows, report = convert_records(records, Conversion(dataset="finefake", image_root="./data/images"))

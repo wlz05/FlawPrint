@@ -7,6 +7,7 @@ import copy
 import hashlib
 import json
 import os
+import shutil
 import tempfile
 from zipfile import BadZipFile
 from zlib import error as CompressionError
@@ -39,8 +40,18 @@ def same_path(first: str | Path, second: str | Path) -> bool:
 
 def protect_outputs(outputs: list[str | Path], inputs: list[str | Path]) -> None:
     targets = [resolved(path) for path in outputs]
+    for target in targets:
+        if target.exists() and not target.is_file():
+            raise ValueError("Output paths must name regular files")
+        parent = target.parent
+        while not parent.exists() and parent != parent.parent:
+            parent = parent.parent
+        if not parent.is_dir():
+            raise ValueError("Output parents must be directories")
     if any(same_path(first, second) for index, first in enumerate(outputs) for second in outputs[index + 1:]):
         raise ValueError("Output files must be distinct")
+    if any(first in second.parents or second in first.parents for index, first in enumerate(targets) for second in targets[index + 1:]):
+        raise ValueError("Output files cannot contain other output paths")
     existing = [path for path in targets if path.exists()]
     seen = set()
     for value in inputs:
@@ -50,6 +61,67 @@ def protect_outputs(outputs: list[str | Path], inputs: list[str | Path]) -> None
         seen.add(source)
         if source in targets or source.exists() and any(os.path.samefile(source, target) for target in existing):
             raise ValueError("Output paths cannot overwrite source files")
+
+@contextmanager
+def staged_outputs(outputs: list[str | Path]):
+    targets = [relative_path(path) for path in outputs]
+    protect_outputs(targets, [])
+    temporary, retained, backups, committed = [], set(), {}, []
+    def allocate(target: Path, suffix: str) -> Path:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        with tempfile.NamedTemporaryFile(dir=target.parent, prefix=".flawprint-", suffix=suffix, delete=False) as stream:
+            path = relative_path(os.path.relpath(stream.name))
+        temporary.append(path)
+        path.unlink()
+        return path
+    def current(target: Path) -> str | None:
+        return digest(target) if target.exists() else None
+    try:
+        original = [current(target) for target in targets]
+        stages = [allocate(target, ".tmp" + target.suffix) for target in targets]
+        yield stages
+        protect_outputs(targets, [])
+        if any(not stage.is_file() for stage in stages):
+            raise ValueError("Every staged output must be written before publication")
+        hashes = [digest(stage) for stage in stages]
+        for index, target in enumerate(targets):
+            if current(target) != original[index]:
+                raise ValueError("An output changed during preparation; use distinct output paths")
+            if original[index] is not None:
+                backup = allocate(target, ".recovery")
+                backups[index] = backup
+                shutil.copyfile(target, backup)
+                if digest(backup) != original[index]:
+                    raise ValueError("An output changed while its recovery copy was prepared")
+        try:
+            for index, target in enumerate(targets):
+                if current(target) != original[index]:
+                    raise ValueError("An output changed before publication")
+                os.replace(stages[index], target)
+                committed.append(index)
+        except BaseException as error:
+            failed = []
+            # Restore only files that still belong to this publication.
+            for index in reversed(committed):
+                try:
+                    if current(targets[index]) != hashes[index]:
+                        raise ValueError("An output changed before rollback")
+                    if index in backups:
+                        os.replace(backups[index], targets[index])
+                    else:
+                        targets[index].unlink()
+                except (OSError, ValueError):
+                    if index in backups:
+                        retained.add(backups[index])
+                    failed.append(targets[index].as_posix())
+            if failed:
+                recovery = ", ".join(path.as_posix() for path in retained)
+                raise OSError("Output rollback incomplete for " + ", ".join(failed) + "; recovery copies: " + recovery) from error
+            raise
+    finally:
+        for path in temporary:
+            if path not in retained and path.exists():
+                path.unlink()
 
 @contextmanager
 def atomic_stream(path: str | Path, encoding: str = "utf-8", newline: str = "\n", binary: bool = False):

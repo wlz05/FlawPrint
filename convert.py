@@ -4,7 +4,7 @@
 from __future__ import annotations
 import argparse
 from pathlib import Path
-from engine.storage import digest, read_json, read_rows, relative_path, resolved, same_path, write_json, write_rows, protect_outputs
+from engine.storage import digest, read_json, read_rows, relative_path, resolved, same_path, write_json, write_rows, protect_outputs, staged_outputs
 from engine.data import audit_splits, normalize
 from engine.formats import Conversion, FIELDS, convert_records
 from engine.package import configuration, is_builtin
@@ -22,6 +22,8 @@ def convert_files(inputs: list[str], config: Conversion, encoding: str = "utf-8-
             raise ValueError("An input table changed during conversion; rerun with a stable copy")
         rows.extend(converted)
         reports.append(dict(report, file=path.as_posix(), sha256=before))
+    if any(digest(path) != report["sha256"] for path, report in zip(paths, reports)):
+        raise ValueError("An input table changed during conversion; rerun with a stable copy")
     rows = normalize(rows)
     if not rows:
         raise ValueError("No samples remain after conversion")
@@ -93,9 +95,10 @@ def main() -> None:
         sheet = int(args.sheet) if args.sheet.isdigit() else args.sheet
         rows, result = convert_files(args.input, config, args.encoding, args.delimiter, args.records_key, sheet, args.trusted_pickle, args.check_files)
         protect_outputs([output, report], [row["image"] for row in rows if row["image"]])
-        write_rows(output, rows)
-        result["output"] = {"file": output.as_posix(), "sha256": digest(output)}
-        write_json(report, result)
+        with staged_outputs([output, report]) as stages:
+            write_rows(stages[0], rows)
+            result["output"] = {"file": output.as_posix(), "sha256": digest(stages[0])}
+            write_json(stages[1], result)
         print(f"Converted {len(rows)} samples; report: {report.as_posix()}")
     except (ValueError, TypeError, OSError, UnicodeError, KeyError) as error:
         parser.error(str(error))

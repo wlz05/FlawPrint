@@ -178,6 +178,8 @@ Add `--forensic ./models/forensic` for a separately trained, Hugging Face-compat
 
 The [training pipeline](engine/learning.py) consumes the cached records with their supplied `train`, `validation`, and `test` roles. Encoders remain frozen. Each epoch shuffles training indices with the run seed and samples mini-batches of 64 records; a final smaller batch is retained. Training records fit the feature standardizers and source references, and train the projections, residual attention, and news head. After each epoch, validation Macro-F1 selects the checkpoint and controls early stopping with patience 5. The selected checkpoint is then used for the final test run.
 
+Validation ties retain the first best epoch. `selected_epoch` records that epoch in `model.json` and the training summary; saved parameters come from this selected state.
+
 ```bash
 python -B deep.py train ./data/features.npz ./data/deep.npz --dataset weibo --config builtin:neural --profile-config builtin:default --seed 42 --mode coupled --device cuda:0 --output ./models/neural42
 python -B deep.py predict ./data/features.npz ./data/deep.npz --model ./models/neural42 --split test --device cuda:0 --output ./outputs/neural42/predictions.jsonl
@@ -197,9 +199,19 @@ To move an experiment, copy the source, both feature archives, and the complete 
 
 The cache archives and complete model directory may move to new relative locations or names; pass those locations through the two positional cache arguments and `--model`. Preserve sample IDs, image paths within both archives, and files inside the model directory. Image paths are resolved from the repository root during extraction; cached prediction uses their recorded identities. GPU runs require a CUDA-enabled PyTorch installation even when all features are already cached.
 
+Physical and deep archives must agree on recorded image checksums. When either archive records a checksum, the other contains the same one. Re-extract both caches from the same manifest when a pair is incomplete.
+
 ### Reference and Calibration Roles
 
 For each domain, the reference comes from its source-training rows or an independently supplied `profile` pool. Source-training queries use references fitted on other connected event, image, and content groups; validation and saved source references use the complete source-training rows. Reference subsets below the configured `min_samples` use the content path for that query group. An independently evaluated target domain supplies its own unlabeled profile rows, which are merged into the manifest before both caches are extracted. The standard three-partition workflow is complete with `train`, `validation`, and `test`.
+
+For a target domain without source-training rows, convert its reference table with the `profile` role. Dataset-specific profile tables require text and domain columns; label columns are optional. Existing annotations are discarded before label mapping.
+
+```bash
+python -B convert.py ./data/reference.csv --mapping builtin:weibo21 --split profile --output ./data/reference.jsonl
+```
+
+Merge these rows with the prepared partitions before extracting both feature archives. Conversion rechecks every source table after reading the complete batch.
 
 An additional independently supplied `calibration` partition enables probability fitting on validation predictions and prediction-set calibration on those extra rows. For frozen-source transfer, add `--reference-domain Politics` to a prediction command to select a saved source reference named `Politics`. Select a key listed in `model.json` under `profiles`. Use a fresh output directory for each seed and mode; the directory contains the complete checkpoint needed by prediction.
 
@@ -254,6 +266,8 @@ The three pair measurements are available for coupled checkpoints. Local summary
 Prediction files support JSONL, JSON, CSV, and TSV. The shared [prediction reader](engine/results.py) restores numeric diagnostics and missing values consistently across these formats, including summary risks and all pair measurements.
 
 Missing or null labels use the unlabeled prediction flow. Use a fresh prediction output path for unlabeled queries when a report already exists at the corresponding `.report.json` path. The command checks this before writing, preserving the existing predictions and report.
+
+Conversion, physical extraction, and neural prediction prepare their data and report files together before publication. A report-write failure leaves existing outputs intact; a failed replacement rolls back files already replaced. If rollback cannot restore a file, the error identifies the retained recovery copy.
 
 New checkpoints use `flawprint-neural-v2` and record the relation operator. Existing `v1` coupled checkpoints retain their original broadcast operation when loaded. Prediction output includes the effective mode and checkpoint version.
 

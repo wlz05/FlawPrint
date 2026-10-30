@@ -6,7 +6,6 @@ import ast
 from dataclasses import asdict, dataclass, field
 from decimal import Decimal, InvalidOperation
 import json
-import math
 from engine.data import SPLITS, SPLIT_ALIASES, identifier, missing, normalize, stable_identifier, portable_image
 from engine.storage import parse_json
 
@@ -89,7 +88,9 @@ def resolve_columns(records: list[dict], config: Conversion) -> dict[str, str]:
                 raise ValueError(f"Ambiguous {field} columns; provide an explicit mapping")
             if candidates:
                 selected[field] = candidates[0]
-    required = ("text", "label", "domain") if config.dataset in ("weibo", "finefake", "weibo21") else ()
+    roles = [config.split or config.split_map.get(str(row.get(selected.get("split", ""), "")).strip(), row.get(selected.get("split", ""), "")) for row in records]
+    profile_only = all(canonical_split(role) == "profile" for role in roles)
+    required = (("text", "domain") if profile_only else ("text", "label", "domain")) if config.dataset in ("weibo", "finefake", "weibo21") else ()
     if any(field not in selected for field in required):
         raise ValueError("Required columns are missing: " + ", ".join(field for field in required if field not in selected))
     if "text" not in selected and "image" not in selected:
@@ -156,7 +157,7 @@ def convert_records(records: list[dict], config: Conversion, source: str = "") -
         def value(field: str, default: object = "") -> object:
             return original.get(columns.get(field, ""), default)
         text_value = value("text")
-        text = "" if text_value is None or type(text_value).__name__ in ("NAType", "NaTType") or isinstance(text_value, float) and math.isnan(text_value) else str(text_value)
+        text = "" if not isinstance(text_value, str) and missing(text_value) else str(text_value)
         domain = "unknown" if missing(value("domain")) else str(value("domain")).strip()
         domain = config.domain_map.get(domain, domain)
         if domain in config.exclude_domains:
@@ -176,6 +177,10 @@ def convert_records(records: list[dict], config: Conversion, source: str = "") -
         group = identifier(value("group")) or raw_id
         split = config.split or config.split_map.get(str(value("split")).strip(), value("split"))
         raw_label = value("label", None)
+        profile_label = canonical_split(split) == "profile" and not missing(raw_label)
+        if canonical_split(split) == "profile":
+            # Reference rows discard annotations before label interpretation.
+            raw_label = None
         mapped = bool(config.label_map)
         if not missing(raw_label):
             token = label_token(raw_label)
@@ -201,7 +206,7 @@ def convert_records(records: list[dict], config: Conversion, source: str = "") -
         selected = paths if config.image_policy == "all" else paths[:1]
         expanded += max(0, len(selected) - 1)
         discarded += len(paths) - len(selected)
-        if canonical_split(split) == "profile" and not missing(raw_label):
+        if profile_label:
             removed_labels += 1
         for index, image in enumerate(selected, 1):
             suffix = f":image{index}" if len(selected) > 1 else ""

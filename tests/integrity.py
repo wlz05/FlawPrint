@@ -15,7 +15,7 @@ from unittest.mock import patch
 import warnings
 import numpy as np
 from PIL import Image
-from engine.storage import validate_bundle, save_bundle, load_bundle, subset, write_json, write_rows, read_rows, digest, protect_outputs
+from engine.storage import validate_bundle, save_bundle, load_bundle, subset, write_json, write_rows, read_rows, digest, protect_outputs, staged_outputs
 from engine.synthetic import fixture
 from engine.experiment import indices
 from engine.profile import DomainProfile, ProfileConfig
@@ -526,6 +526,106 @@ class IntegrityTests(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     operation()
         self.assertFalse(recorded)
+
+    def test_staged_report_failure_preserves_all_existing_outputs(self) -> None:
+        outputs = [self.root / "predictions.jsonl", self.root / "report.json"]
+        for path in outputs:
+            path.write_text("original", encoding="utf-8")
+        with self.assertRaisesRegex(OSError, "Report write failed"):
+            with staged_outputs(outputs) as stages:
+                write_rows(stages[0], [{"id": "new"}])
+                raise OSError("Report write failed")
+        self.assertTrue(all(path.read_text(encoding="utf-8") == "original" for path in outputs))
+        self.assertFalse(list(self.root.glob(".flawprint-*")))
+
+    def test_staged_replacement_failure_rolls_back_existing_and_new_outputs(self) -> None:
+        import os
+        original = os.replace
+        for existing in (True, False):
+            folder = self.root / ("existing" if existing else "new")
+            folder.mkdir()
+            outputs = [folder / "predictions.jsonl", folder / "report.json"]
+            if existing:
+                for path in outputs:
+                    path.write_text("original", encoding="utf-8")
+            def replacing(source, target):
+                if Path(target) == outputs[1]:
+                    raise OSError("Second replacement failed")
+                return original(source, target)
+            with patch("engine.storage.os.replace", side_effect=replacing):
+                with self.assertRaisesRegex(OSError, "Second replacement failed"):
+                    with staged_outputs(outputs) as stages:
+                        write_rows(stages[0], [{"id": "new"}])
+                        write_json(stages[1], {"samples": 1})
+            if existing:
+                self.assertTrue(all(path.read_text(encoding="utf-8") == "original" for path in outputs))
+            else:
+                self.assertTrue(all(not path.exists() for path in outputs))
+            self.assertFalse(list(folder.glob(".flawprint-*")))
+
+    def test_staged_outputs_preserve_a_competing_writer(self) -> None:
+        output = self.root / "predictions.jsonl"
+        output.write_text("original", encoding="utf-8")
+        with self.assertRaisesRegex(ValueError, "changed during preparation"):
+            with staged_outputs([output]) as stages:
+                write_rows(stages[0], [{"id": "ours"}])
+                output.write_text("external", encoding="utf-8")
+        self.assertEqual(output.read_text(encoding="utf-8"), "external")
+        self.assertFalse(list(self.root.glob(".flawprint-*")))
+
+    def test_failed_rollback_retains_the_original_recovery_copy(self) -> None:
+        import os
+        original = os.replace
+        outputs = [self.root / "predictions.jsonl", self.root / "report.json"]
+        for path in outputs:
+            path.write_text("original", encoding="utf-8")
+        def replacing(source, target):
+            if Path(target) == outputs[1] or Path(target) == outputs[0] and Path(source).suffix == ".recovery":
+                raise OSError("Replacement unavailable")
+            return original(source, target)
+        with patch("engine.storage.os.replace", side_effect=replacing):
+            with self.assertRaisesRegex(OSError, "recovery copies"):
+                with staged_outputs(outputs) as stages:
+                    write_rows(stages[0], [{"id": "new"}])
+                    write_json(stages[1], {"samples": 1})
+        recovery = list(self.root.glob(".flawprint-*.recovery"))
+        self.assertEqual(len(recovery), 1)
+        self.assertEqual(recovery[0].read_text(encoding="utf-8"), "original")
+        self.assertEqual(outputs[1].read_text(encoding="utf-8"), "original")
+
+    def test_physical_provenance_write_failure_preserves_the_previous_cache(self) -> None:
+        from types import SimpleNamespace
+        from main import command_extract
+        source, output = self.root / "manifest.jsonl", self.root / "physical.npz"
+        rows = [dict(self.bundle["rows"][0], image="", has_image=False)]
+        write_rows(source, rows)
+        save_bundle(output, self.bundle["values"], self.bundle["observed"], self.bundle["patches"], self.bundle["rows"], self.bundle["names"].tolist())
+        report = output.with_suffix(".provenance.json")
+        write_json(report, {"retained": True})
+        before = output.read_bytes(), report.read_bytes()
+        args = SimpleNamespace(input=source.as_posix(), output=output.as_posix(), max_side=768, tile_grid=4, min_side=32, workers=1)
+        extracted = self.bundle["values"][:1], self.bundle["observed"][:1], self.bundle["patches"][:1], rows
+        with patch("main.extract", return_value=extracted), patch("main.environment", return_value={}), patch("main.write_json", side_effect=OSError("Provenance write failed")):
+            with self.assertRaisesRegex(OSError, "Provenance write failed"):
+                command_extract(args)
+        self.assertEqual((output.read_bytes(), report.read_bytes()), before)
+        self.assertFalse(list(self.root.glob(".flawprint-*")))
+
+    def test_output_preflight_rejects_directories_and_blocked_parents(self) -> None:
+        existing, directory = self.root / "existing.jsonl", self.root / "report"
+        existing.write_text("retained", encoding="utf-8")
+        directory.mkdir()
+        for output in (directory, existing / "nested" / "report.json"):
+            with self.assertRaisesRegex(ValueError, "Output"):
+                protect_outputs([existing, output], [])
+        self.assertEqual(existing.read_text(encoding="utf-8"), "retained")
+        parent = self.root / "new.csv"
+        for outputs in ([parent, parent / "report.json"], [parent / "report.json", parent]):
+            with self.assertRaisesRegex(ValueError, "cannot contain"):
+                protect_outputs(outputs, [])
+        self.assertFalse(parent.exists())
+        protect_outputs([self.root / "new" / "report.json"], [])
+        self.assertFalse((self.root / "new").exists())
 
     def test_neural_diagnostics_keep_boolean_and_numeric_types_in_csv(self) -> None:
         rows = [{"id": "sample", "domain": "a", "physical_reference_available": False, "embedding_protocol_verified": False, "potential_disabled_risk": -0.5, "potential_risk_delta": 0.25, "uniform_readout_risk": -0.4, "query_readout_delta": 0.15, "attention_contrast_rms": 0.2, "attention_shift_tv": 0.05}]

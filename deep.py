@@ -6,7 +6,7 @@ import argparse
 from dataclasses import replace
 import json
 from PIL.Image import DecompressionBombError
-from engine.storage import relative_path, resolved, same_path, read_json, write_json, read_rows, write_rows, load_bundle, digest, protect_outputs
+from engine.storage import relative_path, resolved, same_path, read_json, write_json, read_rows, write_rows, load_bundle, digest, protect_outputs, staged_outputs
 from engine.data import normalize, missing
 from engine.provenance import source_digest
 from engine.package import configuration, configuration_record, is_builtin
@@ -95,10 +95,12 @@ def main() -> None:
             metrics = evaluate(predictions) if all(not missing(row.get("label")) for row in predictions) else None
             if metrics is None and report.exists():
                 raise ValueError("Choose a fresh output path for unlabeled predictions when a report already exists")
-            write_rows(args.output, predictions)
+            with staged_outputs([args.output] + ([report] if metrics is not None else [])) as stages:
+                write_rows(stages[0], predictions)
+                if metrics is not None:
+                    write_json(stages[1], metrics)
             result = {"samples": len(predictions), "output": args.output}
             if metrics is not None:
-                write_json(report, metrics)
                 result["report"] = report.as_posix()
         print(json.dumps(result, indent=2, allow_nan=False))
     except ImportError as error:

@@ -11,7 +11,7 @@ import re
 from zipfile import BadZipFile
 from zlib import error as CompressionError
 import numpy as np
-from engine.data import normalize
+from engine.data import normalize, missing
 from engine.storage import relative_path, digest, native, parse_json, atomic_stream
 
 STREAMS = ("bert", "mae", "clip_text", "clip_image")
@@ -144,8 +144,9 @@ def align(bundle: dict, archive: dict) -> tuple[dict, np.ndarray]:
         other = archive["rows"][index]
         if any(row.get(key) != other.get(key) for key in ("text", "image", "group", "domain", "split")):
             raise ValueError("Cached embeddings disagree with the physical input metadata")
-        if row.get("content_sha256") and row["content_sha256"] != other.get("content_sha256"):
-            raise ValueError("Deep and physical features describe different image bytes")
+        checksums = [None if missing(item.get("content_sha256")) else item["content_sha256"] for item in (row, other)]
+        if any(value is not None for value in checksums) and (any(not isinstance(value, str) or re.fullmatch("[0-9a-f]{64}", value) is None for value in checksums) or checksums[0] != checksums[1]):
+            raise ValueError("Deep and physical features describe different image bytes or lack matching SHA256 fingerprints")
         order.append(index)
     return {name: values[order] for name, values in archive["features"].items()}, archive["observed"][order]
 

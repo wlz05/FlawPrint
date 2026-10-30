@@ -127,6 +127,55 @@ class NeuralTests(unittest.TestCase):
         self.assertEqual(signature(embeddings.extract).parameters["max_length"].default, 128)
         self.assertEqual(embeddings.context(128, 512, 77), 77)
 
+    def test_cache_alignment_requires_matching_well_formed_image_fingerprints(self) -> None:
+        for physical, deep in ((None, "a" * 64), ("a" * 64, None), ("a" * 64, "b" * 64), ("invalid", "invalid"), (False, False)):
+            bundle, archive = copy.deepcopy(self.bundle), copy.deepcopy(self.archive)
+            if physical is not None:
+                bundle["rows"][0]["content_sha256"] = physical
+            if deep is not None:
+                archive["rows"][0]["content_sha256"] = deep
+            with self.subTest(physical=physical, deep=deep):
+                with self.assertRaisesRegex(ValueError, "different image bytes"):
+                    embeddings.align(bundle, archive)
+        self.bundle["rows"][0]["content_sha256"] = "a" * 64
+        self.archive["rows"][0]["content_sha256"] = "a" * 64
+        embeddings.align(self.bundle, self.archive)
+
+    def test_selected_epoch_restores_the_first_best_validation_checkpoint(self) -> None:
+        bundle, archive = self.source_data(("train", "validation", "test"))
+        states = []
+        def observed(model, *arguments, **options):
+            states.append({name: value.detach().cpu().clone() for name, value in model.state_dict().items()})
+            return logits(model, *arguments, **options)
+        output = self.root / "selected"
+        with patch("engine.learning.logits", side_effect=observed), patch("engine.learning.binary", side_effect=[{"macro_f1": value} for value in (.8, .3, .8)]):
+            result = fit(bundle, archive, output.as_posix(), replace(self.config, epochs=3, patience=2), self.profile, "cpu")
+        metadata = read_json(output / "model.json")
+        self.assertEqual(result["selected_epoch"], 1)
+        self.assertEqual(metadata["selected_epoch"], 1)
+        self.assertEqual(result["epochs"], 3)
+        self.assertTrue(any(not torch.equal(states[0][name], states[2][name]) for name in states[0]))
+        restored = torch.load(output / "parameters.pt", map_location="cpu", weights_only=True)
+        for name in restored:
+            torch.testing.assert_close(restored[name], states[0][name], rtol=0, atol=0)
+            torch.testing.assert_close(states[3][name], states[0][name], rtol=0, atol=0)
+
+    def test_invalid_prediction_report_path_preserves_existing_predictions(self) -> None:
+        import deep
+        physical, vectors, output = self.root / "physical.npz", self.root / "vectors.npz", self.root / "predictions.jsonl"
+        for path in (physical, vectors):
+            path.write_bytes(b"fixture")
+        write_rows(output, [{"id": "retained"}])
+        report = self.root / "predictions.report.json"
+        report.mkdir()
+        before = output.read_bytes()
+        args = SimpleNamespace(command="predict", features=physical.as_posix(), embeddings=vectors.as_posix(), output=output.as_posix(), model=(self.root / "model").as_posix(), split="test", device="cpu", reference_domain=None, explain=False)
+        with patch("deep.arguments", return_value=args), patch("deep.load_bundle", return_value=self.bundle), patch("engine.embeddings.load", return_value=self.archive), patch("engine.learning.predict", return_value=[{"id": "news", "label": 0}]), patch("engine.metrics.evaluate", side_effect=AssertionError("Invalid output paths must fail before evaluation")):
+            with self.assertRaisesRegex(SystemExit, "regular files"):
+                deep.main()
+        self.assertEqual(output.read_bytes(), before)
+        self.assertTrue(report.is_dir())
+
     def test_embedding_roundtrip_and_identity_alignment(self) -> None:
         path = self.root / "features.npz"
         embeddings.save(path.as_posix(), self.archive)
@@ -981,6 +1030,10 @@ class NeuralTests(unittest.TestCase):
         args = SimpleNamespace(command="predict", features=physical.as_posix(), embeddings=vectors.as_posix(), output=output.as_posix(), model=(self.root / "model").as_posix(), split="test", device="cpu", reference_domain=None, explain=False)
         with patch("deep.arguments", return_value=args), patch("deep.load_bundle", return_value=self.bundle), patch("engine.embeddings.load", return_value=self.archive), patch("engine.learning.predict", return_value=[{"id": "sample", "label": 0}]), patch("engine.metrics.evaluate", side_effect=ValueError("Invalid report inputs")):
             with self.assertRaisesRegex(SystemExit, "Invalid report inputs"):
+                deep.main()
+        self.assertEqual((output.read_bytes(), report.read_bytes()), before)
+        with patch("deep.arguments", return_value=args), patch("deep.load_bundle", return_value=self.bundle), patch("engine.embeddings.load", return_value=self.archive), patch("engine.learning.predict", return_value=[{"id": "news", "label": 0}]), patch("engine.metrics.evaluate", return_value={"samples": 1}), patch("deep.write_json", side_effect=OSError("Report write failed")):
+            with self.assertRaisesRegex(SystemExit, "Report write failed"):
                 deep.main()
         self.assertEqual((output.read_bytes(), report.read_bytes()), before)
         with patch("deep.arguments", return_value=args), patch("deep.load_bundle", return_value=self.bundle), patch("engine.embeddings.load", return_value=self.archive), patch("engine.learning.predict", return_value=[{"id": "unlabeled", "fusion_risk": 0.2, "prediction": 1}]):
