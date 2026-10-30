@@ -251,6 +251,10 @@ Local measurements include the class node and available content queries, with al
 
 The three pair measurements are available for coupled checkpoints. Local summary removal reuses the current Q/K/V tensors and masks; it does not launch another whole-model forward. Other modes export missing values for these fields. Compare these measurements by news ID with `pair_readout_delta` and the paired task outcomes: retained matrix energy, local attention use, and final correction measure different stages of the same readout.
 
+Prediction files support JSONL, JSON, CSV, and TSV. The shared [prediction reader](engine/results.py) restores numeric diagnostics and missing values consistently across these formats, including summary risks and all pair measurements.
+
+Missing or null labels use the unlabeled prediction flow. Use a fresh prediction output path for unlabeled queries when a report already exists at the corresponding `.report.json` path. The command checks this before writing, preserving the existing predictions and report.
+
 New checkpoints use `flawprint-neural-v2` and record the relation operator. Existing `v1` coupled checkpoints retain their original broadcast operation when loaded. Prediction output includes the effective mode and checkpoint version.
 
 ## Implementation Details

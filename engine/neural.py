@@ -39,7 +39,7 @@ def scramble(relation: torch.Tensor, observed: torch.Tensor) -> torch.Tensor:
     return relation.gather(1, indices[:, :, None].expand_as(relation)).gather(2, indices[:, None, :].expand_as(relation))
 
 def contrast(values: torch.Tensor, observed: torch.Tensor) -> torch.Tensor:
-    if values.ndim != 4 or values.shape[-2] != values.shape[-1] or observed.shape != (values.shape[0], values.shape[-1]) or observed.dtype != torch.bool:
+    if not isinstance(values, torch.Tensor) or not isinstance(observed, torch.Tensor) or values.ndim != 4 or not values.is_floating_point() or values.shape[-2] != values.shape[-1] or observed.shape != (values.shape[0], values.shape[-1]) or observed.dtype != torch.bool or observed.device != values.device:
         raise ValueError("Attention contrasts require square head matrices and a Boolean node mask")
     keys = observed[:, None, None, :]
     count = observed.sum(-1)[:, None, None, None].clamp_min(1)
@@ -48,7 +48,7 @@ def contrast(values: torch.Tensor, observed: torch.Tensor) -> torch.Tensor:
     return (values - center).masked_fill(~(keys & observed[:, None, :, None]), 0)
 
 def potential(logits: torch.Tensor, observed: torch.Tensor, relation: torch.Tensor, mode: str) -> torch.Tensor:
-    if logits.ndim != 4 or logits.shape[-1] != logits.shape[-2] or not logits.is_floating_point() or relation.ndim != 3 or relation.dtype != logits.dtype or relation.device != logits.device or observed.dtype != torch.bool or observed.device != logits.device:
+    if not all(isinstance(value, torch.Tensor) for value in (logits, observed, relation)) or logits.ndim != 4 or logits.shape[-1] != logits.shape[-2] or not logits.is_floating_point() or relation.ndim != 3 or relation.dtype != logits.dtype or relation.device != logits.device or observed.dtype != torch.bool or observed.device != logits.device:
         raise ValueError("Attention potentials require square floating matrices and a Boolean node mask")
     batch, heads, length, _ = logits.shape
     traces = relation.shape[-1]
@@ -56,7 +56,7 @@ def potential(logits: torch.Tensor, observed: torch.Tensor, relation: torch.Tens
     if prefix < 1 or traces < 1 or relation.shape != (batch, traces, traces) or observed.shape != (batch, length):
         raise ValueError("Relation coordinates must match the attention sequence")
     mask = observed[:, prefix:]
-    relation = relation * mask[:, :, None] * mask[:, None, :]
+    relation = relation.masked_fill(~(mask[:, :, None] & mask[:, None, :]), 0)
     if mode == "broadcast":
         values = relation.sum(-1) / math.sqrt(traces)
         output = logits.new_zeros((batch, 1, length, length))
@@ -73,13 +73,13 @@ def potential(logits: torch.Tensor, observed: torch.Tensor, relation: torch.Tens
     elif mode not in ("coupled", "uniform"):
         raise ValueError("The attention potential requires a biased comparison mode")
     # Map each content query onto its available trace anchors.
-    affinity = logits[:, :, :prefix, prefix:]
+    affinity = logits[:, :, :prefix, prefix:].masked_fill(~observed[:, None, :prefix, None], 0)
     if mode == "uniform":
         weights = mask.to(logits.dtype) / mask.sum(-1, keepdim=True).clamp_min(1)
         weights = weights[:, None, None, :].expand(batch, heads, prefix, -1)
     else:
         weights = torch.softmax(affinity.masked_fill(~mask[:, None, None, :], torch.finfo(logits.dtype).min), dim=-1)
-    weights = weights * mask[:, None, None, :] * observed[:, None, :prefix, None]
+    weights = weights.masked_fill(~(mask[:, None, None, :] & observed[:, None, :prefix, None]), 0)
     anchors = torch.eye(traces, device=logits.device, dtype=logits.dtype)[None, None] * mask[:, None, :, None]
     coordinates = torch.cat((weights, anchors.expand(batch, heads, -1, -1)), dim=2)
     return (coordinates @ relation[:, None]) @ coordinates.transpose(-1, -2)
@@ -129,6 +129,10 @@ class ResidualBlock(nn.Module):
 
     def forward(self, tokens: torch.Tensor, observed: torch.Tensor, relation: torch.Tensor, mode: str, diagnostics: list | None = None) -> torch.Tensor:
         batch, length, dimension = tokens.shape
+        # Discard unavailable values before normalization and matrix products.
+        tokens = tokens.masked_fill(~observed[:, :, None], 0)
+        trace_mask = observed[:, length - relation.shape[-1]:]
+        relation = relation.masked_fill(~(trace_mask[:, :, None] & trace_mask[:, None, :]), 0)
         qkv = self.qkv(self.norm(tokens)).reshape(batch, length, 3, self.heads, self.width).permute(2, 0, 3, 1, 4)
         query, key, value = qkv.unbind(0)
         logits = query @ key.transpose(-1, -2) / math.sqrt(self.width)
@@ -162,7 +166,7 @@ class ResidualBlock(nn.Module):
             diagnostics.append(measured)
         mixed = (weights @ value).transpose(1, 2).reshape(batch, length, dimension)
         tokens = tokens + self.dropout(self.output(mixed))
-        return (tokens + self.dropout(self.feed(tokens))) * observed[:, :, None]
+        return (tokens + self.dropout(self.feed(tokens))).masked_fill(~observed[:, :, None], 0)
 
 class ResidualAttention(nn.Module):
     def __init__(self, dimensions: dict[str, int], traces: int, config: NeuralConfig):
@@ -189,18 +193,19 @@ class ResidualAttention(nn.Module):
             block.strength.requires_grad_(config.mode in BIASED)
 
     def forward(self, features: dict[str, torch.Tensor], observed: torch.Tensor, ranks: torch.Tensor, graph: torch.Tensor, trace_observed: torch.Tensor, explain: bool = False) -> dict:
-        deep = torch.stack([self.projectors[name](features[name]) for name in self.names], dim=1)
-        graph = graph * trace_observed[:, :, None] * trace_observed[:, None, :]
+        deep = torch.stack([self.projectors[name](features[name].masked_fill(~observed[:, column, None], 0)) for column, name in enumerate(self.names)], dim=1)
+        if self.config.mode == "deep":
+            trace_observed = torch.zeros_like(trace_observed)
+        graph = graph.masked_fill(~(trace_observed[:, :, None] & trace_observed[:, None, :]), 0)
+        ranks = ranks.masked_fill(~trace_observed, 0)
         if self.config.mode == "independent":
             graph = torch.zeros_like(graph)
         base = graph / (1 + torch.linalg.matrix_norm(graph, keepdim=True))
         contributions = base.sum(-1) / math.sqrt(self.traces)
         trace_values = torch.stack((ranks, base.diagonal(dim1=-2, dim2=-1), contributions), dim=-1)
         trace_tokens = self.trace_projection(trace_values)
-        if self.config.mode == "deep":
-            trace_observed = torch.zeros_like(trace_observed)
-        deep = deep * observed[:, :, None]
-        trace_tokens = trace_tokens * trace_observed[:, :, None]
+        deep = deep.masked_fill(~observed[:, :, None], 0)
+        trace_tokens = trace_tokens.masked_fill(~trace_observed[:, :, None], 0)
         image_columns = [index for index, name in enumerate(self.names) if name in ("mae", "clip_image", "forensic")]
         image_mask = observed[:, image_columns]
         image = (deep[:, image_columns] * image_mask[:, :, None]).sum(1) / image_mask.sum(1, keepdim=True).clamp_min(1)

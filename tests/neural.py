@@ -488,6 +488,55 @@ class NeuralTests(unittest.TestCase):
         second = model(features, observed, ranks, graph, mask)["logit"]
         torch.testing.assert_close(first, second)
 
+    def test_masked_nonfinite_inputs_are_neutral_in_every_neural_mode(self) -> None:
+        features = {name: torch.randn(2, 4) for name in embeddings.STREAMS}
+        observed = torch.tensor([[False, True, True, True], [True, False, True, False]])
+        ranks, graph = torch.randn(2, 4), torch.randn(2, 4, 4)
+        graph = graph + graph.transpose(-1, -2)
+        mask = torch.tensor([[False, True, True, True], [False, False, False, False]])
+        pairs = mask[:, :, None] & mask[:, None, :]
+        for mode in ("coupled", "unbiased", "independent", "deep", "concat", "uniform", "broadcast", "diagonal", "shuffled", "summary"):
+            model = ResidualAttention({name: 4 for name in features}, 4, replace(self.config, mode=mode)).eval()
+            expected = model(features, observed, ranks, graph, mask, explain=True)
+            for value in (float("nan"), float("inf"), -float("inf")):
+                changed = {name: values.masked_fill(~observed[:, column, None], value) for column, (name, values) in enumerate(features.items())}
+                damaged_ranks = torch.full_like(ranks, value) if mode == "deep" else ranks.masked_fill(~mask, value)
+                damaged_graph = torch.full_like(graph, value) if mode == "deep" else graph.masked_fill(~pairs, value)
+                actual = model(changed, observed, damaged_ranks, damaged_graph, mask, explain=True)
+                for name in expected:
+                    with self.subTest(mode=mode, value=value, output=name):
+                        self.assertTrue(torch.isfinite(actual[name]).all())
+                        torch.testing.assert_close(actual[name], expected[name], rtol=0, atol=0)
+
+    def test_masked_nonfinite_features_keep_training_gradients_finite(self) -> None:
+        model = ResidualAttention({name: 4 for name in embeddings.STREAMS}, 4, self.config)
+        observed = torch.tensor([[False, True, True, True], [False, True, True, True]])
+        features = {name: torch.randn(2, 4).requires_grad_() for name in embeddings.STREAMS}
+        features["bert"] = torch.full((2, 4), float("nan"), requires_grad=True)
+        mask = torch.ones(2, 4, dtype=torch.bool)
+        graph = torch.eye(4)[None].expand(2, -1, -1)
+        model(features, observed, torch.zeros(2, 4), graph, mask)["logit"].square().mean().backward()
+        self.assertTrue(all(value.grad is None or torch.isfinite(value.grad).all() for value in model.parameters()))
+        torch.testing.assert_close(features["bert"].grad, torch.zeros_like(features["bert"]))
+
+    def test_attention_helpers_ignore_masked_nonfinite_queries_and_relations(self) -> None:
+        values = torch.randn(1, 2, 7, 7)
+        observed = torch.tensor([[True, False, True, False, True, True, True]])
+        graph = torch.randn(1, 4, 4)
+        graph = graph + graph.transpose(-1, -2)
+        damaged = values.masked_fill(~(observed[:, None, :, None] & observed[:, None, None, :]), float("nan"))
+        trace_mask = observed[:, 3:]
+        changed = graph.masked_fill(~(trace_mask[:, :, None] & trace_mask[:, None, :]), float("nan"))
+        torch.testing.assert_close(contrast(damaged, observed), contrast(values, observed))
+        for mode in ("coupled", "uniform", "broadcast", "diagonal", "shuffled", "summary"):
+            torch.testing.assert_close(potential(damaged, observed, changed, mode), potential(values, observed, graph, mode))
+        for arguments in ((None, observed, graph), (values, None, graph), (values, observed, None)):
+            with self.assertRaises(ValueError):
+                potential(*arguments, "coupled")
+        for tensor, mask in ((None, observed), (values, None), (values.long(), observed)):
+            with self.assertRaises(ValueError):
+                contrast(tensor, mask)
+
     def test_content_queries_select_different_reference_interactions(self) -> None:
         logits = torch.zeros(1, 2, 7, 7, requires_grad=True)
         with torch.no_grad():
@@ -934,6 +983,15 @@ class NeuralTests(unittest.TestCase):
             with self.assertRaisesRegex(SystemExit, "Invalid report inputs"):
                 deep.main()
         self.assertEqual((output.read_bytes(), report.read_bytes()), before)
+        with patch("deep.arguments", return_value=args), patch("deep.load_bundle", return_value=self.bundle), patch("engine.embeddings.load", return_value=self.archive), patch("engine.learning.predict", return_value=[{"id": "unlabeled", "fusion_risk": 0.2, "prediction": 1}]):
+            with self.assertRaisesRegex(SystemExit, "fresh output path"):
+                deep.main()
+        self.assertEqual((output.read_bytes(), report.read_bytes()), before)
+        args.output = (self.root / "unlabeled.jsonl").as_posix()
+        with patch("deep.arguments", return_value=args), patch("deep.load_bundle", return_value=self.bundle), patch("engine.embeddings.load", return_value=self.archive), patch("engine.learning.predict", return_value=[{"id": "unlabeled", "label": None, "fusion_risk": 0.2, "prediction": 1}]), patch("builtins.print"):
+            deep.main()
+        self.assertEqual(read_rows(args.output)[0]["id"], "unlabeled")
+        self.assertFalse((self.root / "unlabeled.report.json").exists())
         self.assertFalse(list(self.root.glob(".flawprint-*.tmp")))
 
     def test_prediction_exports_protect_images_referenced_by_the_cache(self) -> None:
@@ -1148,13 +1206,21 @@ class NeuralTests(unittest.TestCase):
         torch.testing.assert_close(uniform["pair_attention_shift_tv"], torch.zeros(2, dtype=torch.float64), atol=1e-14, rtol=0)
         block.qkv.load_state_dict(original)
         measurements = []
-        block(tokens, observed, graph, "coupled", measurements)
+        expected = block(tokens, observed, graph, "coupled", measurements)
         selected = measurements[0]
         torch.testing.assert_close(selected["pair_contrast_rms"], selected["attention_contrast_rms"])
         torch.testing.assert_close(selected["pair_attention_shift_tv"], selected["attention_shift_tv"])
         self.assertGreater(selected["pair_contrast_rms"][0], 0)
         self.assertGreater(selected["pair_attention_shift_tv"][0], 0)
         self.assertEqual(selected["pair_contrast_rms"][1], 0)
+        changed_tokens = tokens.masked_fill(~observed[:, :, None], float("nan"))
+        mask = observed[:, 3:]
+        changed_graph = graph.masked_fill(~(mask[:, :, None] & mask[:, None, :]), float("nan"))
+        measured = []
+        actual = block(changed_tokens, observed, changed_graph, "coupled", measured)
+        torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+        for name in selected:
+            torch.testing.assert_close(measured[0][name], selected[name], rtol=0, atol=0)
 
     def test_uniform_readout_ignores_queries_and_respects_missing_anchors(self) -> None:
         torch.manual_seed(3047)

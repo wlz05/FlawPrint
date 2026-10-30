@@ -529,6 +529,9 @@ class IntegrityTests(unittest.TestCase):
 
     def test_neural_diagnostics_keep_boolean_and_numeric_types_in_csv(self) -> None:
         rows = [{"id": "sample", "domain": "a", "physical_reference_available": False, "embedding_protocol_verified": False, "potential_disabled_risk": -0.5, "potential_risk_delta": 0.25, "uniform_readout_risk": -0.4, "query_readout_delta": 0.15, "attention_contrast_rms": 0.2, "attention_shift_tv": 0.05}]
+        added = {"summary_readout_risk": -0.3, "pair_readout_delta": 0.05, "pair_relation_fraction": 0.5, "pair_contrast_rms": 0.02, "pair_attention_shift_tv": 0.01}
+        rows[0].update(added)
+        rows.append(dict(id="unavailable", **{key: None for key in added}))
         for suffix in ("csv", "tsv", "jsonl"):
             path = self.root / ("diagnostics." + suffix)
             write_rows(path, rows)
@@ -537,15 +540,26 @@ class IntegrityTests(unittest.TestCase):
             self.assertIs(restored["embedding_protocol_verified"], False)
             self.assertEqual(restored["potential_disabled_risk"], -0.5)
             self.assertEqual(restored["potential_risk_delta"], 0.25)
-            for key in ("uniform_readout_risk", "query_readout_delta", "attention_contrast_rms", "attention_shift_tv"):
+            for key in ("uniform_readout_risk", "query_readout_delta", "attention_contrast_rms", "attention_shift_tv", *added):
                 self.assertIsInstance(restored[key], float)
                 self.assertEqual(restored[key], rows[0][key])
+            unavailable = prediction_rows(read_rows(path))[1]
+            self.assertTrue(all(unavailable[key] is None for key in added))
 
     def test_prediction_diagnostics_reject_nonfinite_and_boolean_scores(self) -> None:
-        for key in ("potential_disabled_risk", "potential_risk_delta", "uniform_readout_risk", "query_readout_delta", "attention_contrast_rms", "attention_shift_tv"):
+        for key in ("potential_disabled_risk", "potential_risk_delta", "uniform_readout_risk", "query_readout_delta", "summary_readout_risk", "pair_readout_delta", "attention_contrast_rms", "attention_shift_tv", "pair_relation_fraction", "pair_contrast_rms", "pair_attention_shift_tv"):
             for value in (float("inf"), True):
                 with self.assertRaises(ValueError):
                     prediction_rows([{"id": "a", key: value}])
+
+    def test_prediction_diagnostic_ranges_reject_corrupt_exports(self) -> None:
+        for key in ("observed_fraction", "sign_conflict_ratio", "pair_relation_fraction", "pair_attention_shift_tv"):
+            for value in (-0.1, 1.1, "-0.1", "1.1"):
+                with self.subTest(key=key, value=value):
+                    with self.assertRaises(ValueError):
+                        prediction_rows([{"id": "a", key: value}])
+        with self.assertRaises(ValueError):
+            prediction_rows([{"id": "a", "pair_contrast_rms": "-0.1"}])
 
     def test_csv_prediction_structures_use_strict_json(self) -> None:
         invalid = ('{"x":NaN}', '{"x":Infinity}', '{"x":1e999}', '{"x":1,"x":2}')
