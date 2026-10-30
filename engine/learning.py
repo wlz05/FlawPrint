@@ -5,6 +5,7 @@ from __future__ import annotations
 import copy
 from dataclasses import asdict, replace
 import hashlib
+import io
 import os
 from pathlib import Path
 from pickle import UnpicklingError
@@ -211,9 +212,13 @@ def checkpoint(metadata: dict) -> NeuralConfig:
     return config
 
 def parameters(model: ResidualAttention, path: Path, checksum: str) -> None:
+    path = relative_path(path)
+    content = path.read_bytes()
+    if hashlib.sha256(content).hexdigest() != checksum:
+        raise ValueError("The neural checkpoint weights changed while loading")
     try:
         # Validate stored tensors before moving the model to the GPU.
-        stored = torch.load(path, map_location="cpu", weights_only=True)
+        stored = torch.load(io.BytesIO(content), map_location="cpu", weights_only=True)
     except (EOFError, UnpicklingError, RuntimeError, ValueError, TypeError, KeyError, IndexError) as error:
         raise ValueError("Cannot decode neural checkpoint weights") from error
     if digest(path) != checksum:
@@ -228,6 +233,23 @@ def parameters(model: ResidualAttention, path: Path, checksum: str) -> None:
         if not torch.isfinite(value).all():
             raise ValueError("Neural checkpoint parameters must be finite: " + name)
     model.load_state_dict(stored)
+
+def artifacts(root: Path, metadata: dict, checksum: str) -> dict[Path, str]:
+    # Require the complete saved reference set after a model transfer.
+    files = {root / "model.json": checksum, root / "parameters.pt": metadata["weights_sha256"]}
+    for domain, filename in metadata["profiles"].items():
+        path = root / relative_path(filename)
+        if path in files:
+            raise ValueError("Neural checkpoint artifact paths must be distinct")
+        files[path] = metadata["profile_sha256"][domain]
+    paths = [path.resolve() for path in files]
+    if len(set(paths)) != len(paths):
+        raise ValueError("Neural checkpoint artifact paths must be distinct")
+    if any(not path.is_file() or not path.resolve().is_relative_to(root.resolve()) for path in files):
+        raise ValueError("The neural checkpoint is incomplete or has files outside its directory")
+    if any(digest(path) != expected for path, expected in files.items()):
+        raise ValueError("The neural checkpoint artifact hash is invalid")
+    return files
 
 def publish(destination: Path, parameters: dict, profiles: dict, metadata: dict, provenance: dict | None = None) -> None:
     destination.parent.mkdir(parents=True, exist_ok=True)
@@ -247,12 +269,19 @@ def publish(destination: Path, parameters: dict, profiles: dict, metadata: dict,
             write_json(stage / "provenance.json", provenance)
             if any(digest(item["path"]) != item["sha256"] for item in provenance["inputs"]):
                 raise ValueError("An input changed during training; the checkpoint was not published")
-        if destination.exists():
+        prepared = destination.exists()
+        if prepared:
             if not destination.is_dir() or any(destination.iterdir()):
                 raise ValueError("The model output became occupied during training")
-            destination.rmdir()
-        # Publish the complete checkpoint without mixing separate runs.
-        stage.rename(destination)
+        try:
+            if prepared:
+                destination.rmdir()
+            # Publish the complete checkpoint without mixing separate runs.
+            stage.rename(destination)
+        except BaseException:
+            if prepared and not destination.exists():
+                destination.mkdir(exist_ok=True)
+            raise
 
 def fit(bundle: dict, archive: dict, output: str, config: NeuralConfig, profile_config: ProfileConfig, device: str = "cuda:0", provenance: dict | None = None) -> dict:
     config.validate()
@@ -348,10 +377,15 @@ def predict(bundle: dict, archive: dict, directory: str, split: str = "test", de
     embeddings.validate(archive)
     device = embeddings.runtime(device)
     root = relative_path(directory)
-    metadata = read_json(root / "model.json")
+    document = root / "model.json"
+    if not document.is_file() or not document.resolve().is_relative_to(root.resolve()):
+        raise ValueError("The neural checkpoint metadata is missing or outside its directory")
+    checksum = digest(document)
+    metadata = read_json(document, checksum)
+    if digest(document) != checksum:
+        raise ValueError("The neural checkpoint metadata changed while loading")
     config = checkpoint(metadata)
-    if digest(root / "parameters.pt") != metadata["weights_sha256"]:
-        raise ValueError("The neural checkpoint weight hash is invalid")
+    files = artifacts(root, metadata, checksum)
     if bundle["names"].tolist() != metadata["trace_names"] or signature(archive) != metadata["encoder_signature"]:
         raise ValueError("The query encoder or physical feature schema changed")
     if "embedding_protocol" in metadata and embeddings.protocol(archive) != metadata["embedding_protocol"]:
@@ -377,7 +411,11 @@ def predict(bundle: dict, archive: dict, directory: str, split: str = "test", de
         path = root / relative_path(metadata["profiles"][reference])
         if not path.resolve().is_relative_to(root.resolve()) or digest(path) != metadata["profile_sha256"][reference]:
             raise ValueError("The saved physical reference changed")
-        profile = DomainProfile.load(path.as_posix())
+        profile = DomainProfile.load(path.as_posix(), metadata["profile_sha256"][reference])
+        if digest(path) != metadata["profile_sha256"][reference]:
+            raise ValueError("The saved physical reference changed while loading")
+        if profile.domain != reference:
+            raise ValueError("The saved physical reference domain does not match its checkpoint key")
         selected_indices = [index for index, row in enumerate(rows) if row["domain"] == domain]
         ranks, graph, mask = relation(profile, subset(selected, selected_indices))
         packet["ranks"][selected_indices], packet["graph"][selected_indices], packet["trace_observed"][selected_indices] = ranks, graph, mask
@@ -410,6 +448,7 @@ def predict(bundle: dict, archive: dict, directory: str, split: str = "test", de
     for index, row in enumerate(predictions):
         row["model_mode"] = config.mode
         row["checkpoint_version"] = metadata["version"]
+        row["checkpoint_sha256"] = checksum
         row["relation_operator"] = metadata.get("relation_operator", "broadcast-reference-v1")
         row["embedding_protocol_verified"] = bool(metadata.get("embedding_protocol", {}).get("complete"))
         row["reference_domain"] = reference_domain or row["domain"]
@@ -424,6 +463,9 @@ def predict(bundle: dict, archive: dict, directory: str, split: str = "test", de
             for name in ("attention_contrast_rms", "attention_shift_tv", "pair_relation_fraction", "pair_contrast_rms", "pair_attention_shift_tv"):
                 row[name] = float(measurements[name][index]) if name in measurements else None
             row["intervention_scope"] = "Fixed checkpoint and nodes; local attention contrasts and potential-off, uniform, and summary readouts"
+    # Bind every returned prediction to one complete checkpoint snapshot.
+    if any(not path.is_file() or not path.resolve().is_relative_to(root.resolve()) or digest(path) != expected for path, expected in files.items()):
+        raise ValueError("The neural checkpoint artifacts changed during inference")
     return predictions
 
 # Author: Weiliang Zhu

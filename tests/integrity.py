@@ -541,8 +541,8 @@ class IntegrityTests(unittest.TestCase):
     def test_staged_replacement_failure_rolls_back_existing_and_new_outputs(self) -> None:
         import os
         original = os.replace
-        for existing in (True, False):
-            folder = self.root / ("existing" if existing else "new")
+        for existing, error in ((True, OSError), (False, OSError), (True, KeyboardInterrupt), (False, KeyboardInterrupt)):
+            folder = self.root / (("existing" if existing else "new") + error.__name__.lower())
             folder.mkdir()
             outputs = [folder / "predictions.jsonl", folder / "report.json"]
             if existing:
@@ -550,10 +550,10 @@ class IntegrityTests(unittest.TestCase):
                     path.write_text("original", encoding="utf-8")
             def replacing(source, target):
                 if Path(target) == outputs[1]:
-                    raise OSError("Second replacement failed")
+                    raise error("Second replacement failed")
                 return original(source, target)
             with patch("engine.storage.os.replace", side_effect=replacing):
-                with self.assertRaisesRegex(OSError, "Second replacement failed"):
+                with self.assertRaisesRegex(error, "Second replacement failed"):
                     with staged_outputs(outputs) as stages:
                         write_rows(stages[0], [{"id": "new"}])
                         write_json(stages[1], {"samples": 1})

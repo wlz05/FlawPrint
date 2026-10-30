@@ -192,7 +192,13 @@ def parse_json(content: str) -> Any:
     except RecursionError as error:
         raise ValueError("JSON nesting exceeds the supported depth") from error
 
-def read_json(path: str | Path) -> Any:
+def read_json(path: str | Path, checksum: str | None = None) -> Any:
+    if checksum is not None:
+        content = relative_path(path).read_bytes()
+        if hashlib.sha256(content).hexdigest() != checksum:
+            raise ValueError("JSON content changed or has an invalid SHA256 fingerprint")
+        # Decode the same bytes whose fingerprint was verified.
+        return parse_json(content.decode("utf-8-sig"))
     with relative_path(path).open("r", encoding="utf-8-sig") as stream:
         return parse_json(stream.read())
 

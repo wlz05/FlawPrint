@@ -177,8 +177,8 @@ class DomainProfile:
         write_json(path, self.document())
 
     @classmethod
-    def load(cls, path: str) -> DomainProfile:
-        value = read_json(path)
+    def load(cls, path: str, checksum: str | None = None) -> DomainProfile:
+        value = read_json(path) if checksum is None else read_json(path, checksum)
         if not isinstance(value, dict) or value.get("version") != "flawprint-profile-v1":
             raise ValueError("Unsupported profile version")
         try:

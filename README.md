@@ -180,6 +180,8 @@ The [training pipeline](engine/learning.py) consumes the cached records with the
 
 Validation ties retain the first best epoch. `selected_epoch` records that epoch in `model.json` and the training summary; saved parameters come from this selected state.
 
+After interrupted training, rerun the command with the same caches, configuration, and seed using a new or still-empty model directory. Training begins at epoch 1. The complete selected checkpoint is published as one directory; a failed final rename restores a pre-existing empty destination.
+
 ```bash
 python -B deep.py train ./data/features.npz ./data/deep.npz --dataset weibo --config builtin:neural --profile-config builtin:default --seed 42 --mode coupled --device cuda:0 --output ./models/neural42
 python -B deep.py predict ./data/features.npz ./data/deep.npz --model ./models/neural42 --split test --device cuda:0 --output ./outputs/neural42/predictions.jsonl
@@ -200,6 +202,8 @@ To move an experiment, copy the source, both feature archives, and the complete 
 The cache archives and complete model directory may move to new relative locations or names; pass those locations through the two positional cache arguments and `--model`. Preserve sample IDs, image paths within both archives, and files inside the model directory. Image paths are resolved from the repository root during extraction; cached prediction uses their recorded identities. GPU runs require a CUDA-enabled PyTorch installation even when all features are already cached.
 
 Physical and deep archives must agree on recorded image checksums. When either archive records a checksum, the other contains the same one. Re-extract both caches from the same manifest when a pair is incomplete.
+
+Reloading verifies `model.json`, `parameters.pt`, and every saved reference file before inference. Checkpoint paths resolve within the copied model directory, and reference domains match their metadata keys. File checksums cover the exact bytes decoded into metadata, references, and tensors; the complete file set is checked again before predictions are returned. Each prediction records `checkpoint_sha256`, the SHA256 of `model.json`, which remains stable when the complete model directory moves.
 
 ### Reference and Calibration Roles
 
@@ -263,7 +267,7 @@ Local measurements include the class node and available content queries, with al
 
 The three pair measurements are available for coupled checkpoints. Local summary removal reuses the current Q/K/V tensors and masks; it does not launch another whole-model forward. Other modes export missing values for these fields. Compare these measurements by news ID with `pair_readout_delta` and the paired task outcomes: retained matrix energy, local attention use, and final correction measure different stages of the same readout.
 
-Prediction files support JSONL, JSON, CSV, and TSV. The shared [prediction reader](engine/results.py) restores numeric diagnostics and missing values consistently across these formats, including summary risks and all pair measurements.
+Prediction files support JSONL, NDJSON, JSON, CSV, and TSV. The shared [prediction reader](engine/results.py) restores numeric diagnostics and missing values consistently across these formats, including summary risks and all pair measurements.
 
 Missing or null labels use the unlabeled prediction flow. Use a fresh prediction output path for unlabeled queries when a report already exists at the corresponding `.report.json` path. The command checks this before writing, preserving the existing predictions and report.
 

@@ -415,13 +415,168 @@ class NeuralTests(unittest.TestCase):
         after = predict(self.bundle, self.archive, directory.as_posix(), device="cpu")
         np.testing.assert_array_equal([row["fusion_risk"] for row in before], [row["fusion_risk"] for row in after])
 
+    def test_checkpoint_detects_metadata_changed_during_loading(self) -> None:
+        directory = self.root / "metadatachange"
+        fit(self.bundle, self.archive, directory.as_posix(), replace(self.config, epochs=1), self.profile, "cpu")
+        def changing(path, *arguments):
+            result = read_json(path, *arguments)
+            Path(path).write_bytes(Path(path).read_bytes() + b" ")
+            return result
+        with patch("engine.learning.read_json", side_effect=changing), patch.object(ResidualAttention, "forward", side_effect=AssertionError("Inference must not start")):
+            with self.assertRaisesRegex(ValueError, "changed"):
+                predict(self.bundle, self.archive, directory.as_posix(), device="cpu")
+
+    def test_metadata_replacement_and_restoration_cannot_change_the_loaded_state(self) -> None:
+        directory = self.root / "metadatasnapshot"
+        fit(self.bundle, self.archive, directory.as_posix(), replace(self.config, epochs=1), self.profile, "cpu")
+        def changing(path, *arguments):
+            original = Path(path).read_bytes()
+            document = read_json(path)
+            document["normalizers"]["bert"]["center"][0] += 1
+            write_json(path, document)
+            try:
+                return read_json(path, *arguments)
+            finally:
+                Path(path).write_bytes(original)
+        with patch("engine.learning.read_json", side_effect=changing):
+            with self.assertRaisesRegex(ValueError, "changed|fingerprint"):
+                predict(self.bundle, self.archive, directory.as_posix(), device="cpu")
+
+    def test_reference_replacement_and_restoration_cannot_change_the_loaded_state(self) -> None:
+        directory = self.root / "referencesnapshot"
+        fit(self.bundle, self.archive, directory.as_posix(), replace(self.config, epochs=1), self.profile, "cpu")
+        original = DomainProfile.load
+        def changing(path, *arguments):
+            content = Path(path).read_bytes()
+            document = read_json(path)
+            document["sorted_values"] = (np.asarray(document["sorted_values"]) + 1).tolist()
+            write_json(path, document)
+            try:
+                return original(path, *arguments)
+            finally:
+                Path(path).write_bytes(content)
+        with patch.object(DomainProfile, "load", side_effect=changing):
+            with self.assertRaisesRegex(ValueError, "changed|fingerprint"):
+                predict(self.bundle, self.archive, directory.as_posix(), device="cpu")
+
+    def test_weight_decoding_uses_the_verified_bytes(self) -> None:
+        import io
+        from engine.learning import parameters
+        model = ResidualAttention({name: 4 for name in embeddings.STREAMS}, 3, self.config)
+        expected = {name: value.clone() for name, value in model.state_dict().items()}
+        path = self.root / "parameters.pt"
+        torch.save(expected, path)
+        content, checksum = path.read_bytes(), digest(path)
+        alternate = copy.deepcopy(expected)
+        name = next(name for name, value in alternate.items() if value.dtype.is_floating_point)
+        alternate[name] += 1
+        stream = io.BytesIO()
+        torch.save(alternate, stream)
+        original = torch.load
+        def changing(source, **options):
+            if not isinstance(source, (str, Path)):
+                return original(source, **options)
+            path.write_bytes(stream.getvalue())
+            try:
+                return original(source, **options)
+            finally:
+                path.write_bytes(content)
+        with patch("engine.learning.torch.load", side_effect=changing):
+            parameters(model, path, checksum)
+        for name, value in model.state_dict().items():
+            torch.testing.assert_close(value, expected[name], rtol=0, atol=0)
+
+    def test_checkpoint_requires_all_saved_files_before_inference(self) -> None:
+        directory = self.root / "completecopy"
+        fit(self.bundle, self.archive, directory.as_posix(), replace(self.config, epochs=1), self.profile, "cpu")
+        metadata = read_json(directory / "model.json")
+        backup = self.root / "retained"
+        files = [directory / "model.json", directory / "parameters.pt"] + [directory / name for name in metadata["profiles"].values()]
+        for path in files:
+            path.rename(backup)
+            with self.subTest(file=path.name), patch.object(ResidualAttention, "forward", side_effect=AssertionError("Inference must not start")):
+                try:
+                    with self.assertRaisesRegex(ValueError, "missing|incomplete"):
+                        predict(self.bundle, self.archive, directory.as_posix(), device="cpu", reference_domain="source_alpha")
+                finally:
+                    backup.rename(path)
+        self.assertTrue(predict(self.bundle, self.archive, directory.as_posix(), device="cpu"))
+
+    def test_checkpoint_rejects_external_duplicate_and_mislabeled_references(self) -> None:
+        directory = self.root / "referencepaths"
+        fit(self.bundle, self.archive, directory.as_posix(), replace(self.config, epochs=1), self.profile, "cpu")
+        document = directory / "model.json"
+        metadata = read_json(document)
+        domains = list(metadata["profiles"])
+        path = directory / metadata["profiles"][domains[0]]
+        external = self.root / "external.json"
+        shutil.copyfile(path, external)
+        for filename in ("../external.json", external.resolve().as_posix(), metadata["profiles"][domains[1]]):
+            damaged = copy.deepcopy(metadata)
+            damaged["profiles"][domains[0]] = filename
+            write_json(document, damaged)
+            with self.subTest(path=filename), patch.object(ResidualAttention, "forward", side_effect=AssertionError("Inference must not start")):
+                with self.assertRaises(ValueError):
+                    predict(self.bundle, self.archive, directory.as_posix(), device="cpu")
+        profile = read_json(path)
+        profile["domain"] = "mislabeled"
+        write_json(path, profile)
+        metadata["profile_sha256"][domains[0]] = digest(path)
+        write_json(document, metadata)
+        with patch.object(ResidualAttention, "forward", side_effect=AssertionError("Inference must not start")):
+            with self.assertRaisesRegex(ValueError, "domain does not match"):
+                predict(self.bundle, self.archive, directory.as_posix(), device="cpu")
+
+    def test_checkpoint_detects_references_changed_during_loading(self) -> None:
+        directory = self.root / "referencechange"
+        fit(self.bundle, self.archive, directory.as_posix(), replace(self.config, epochs=1), self.profile, "cpu")
+        original = DomainProfile.load
+        def changing(path, *arguments):
+            document = read_json(path)
+            document["sorted_values"] = (np.asarray(document["sorted_values"]) + 1).tolist()
+            write_json(path, document)
+            return original(path, *arguments)
+        with patch.object(DomainProfile, "load", side_effect=changing), patch.object(ResidualAttention, "forward", side_effect=AssertionError("Inference must not start")):
+            with self.assertRaisesRegex(ValueError, "changed"):
+                predict(self.bundle, self.archive, directory.as_posix(), device="cpu")
+
+    def test_model_changes_during_inference_preserve_previous_exports(self) -> None:
+        import deep
+        directory = self.root / "inferencechange"
+        fit(self.bundle, self.archive, directory.as_posix(), replace(self.config, epochs=1), self.profile, "cpu")
+        metadata = read_json(directory / "model.json")
+        physical, vectors, output = self.root / "physical.npz", self.root / "vectors.npz", self.root / "predictions.jsonl"
+        save_bundle(physical, self.bundle["values"], self.bundle["observed"], self.bundle["patches"], self.bundle["rows"], self.bundle["names"].tolist())
+        embeddings.save(vectors.as_posix(), self.archive)
+        report = output.with_name("predictions.report.json")
+        write_rows(output, [{"id": "retained"}])
+        write_json(report, {"retained": True})
+        before = output.read_bytes(), report.read_bytes()
+        args = SimpleNamespace(command="predict", features=physical.as_posix(), embeddings=vectors.as_posix(), output=output.as_posix(), model=directory.as_posix(), split="test", device="cpu", reference_domain=None, explain=False)
+        files = [directory / "model.json", directory / "parameters.pt", directory / next(iter(metadata["profiles"].values()))]
+        for path in files:
+            original = path.read_bytes()
+            def changing(*arguments, **options):
+                values = logits(*arguments, **options)
+                path.write_bytes(original + b" ")
+                return values
+            with self.subTest(file=path.name), patch("deep.arguments", return_value=args), patch("engine.learning.logits", side_effect=changing):
+                try:
+                    with self.assertRaisesRegex(SystemExit, "changed"):
+                        deep.main()
+                    self.assertEqual((output.read_bytes(), report.read_bytes()), before)
+                finally:
+                    path.write_bytes(original)
+        self.assertFalse(list(self.root.glob(".flawprint-*")))
+
     def test_checkpoint_detects_weights_changed_during_loading(self) -> None:
         directory = self.root / "changing"
         fit(self.bundle, self.archive, directory.as_posix(), replace(self.config, epochs=1), self.profile, "cpu")
         original = torch.load
-        def changing(path, **options):
-            state = original(path, **options)
-            with Path(path).open("ab") as stream:
+        path = directory / "parameters.pt"
+        def changing(source, **options):
+            state = original(source, **options)
+            with path.open("ab") as stream:
                 stream.write(b"changed")
             return state
         with patch("engine.learning.torch.load", side_effect=changing):
@@ -824,6 +979,49 @@ class NeuralTests(unittest.TestCase):
                 self.assertFalse(output.exists() and list(output.iterdir()))
                 self.assertFalse(list(self.root.glob(".flawprint-*")))
 
+    def test_failed_final_checkpoint_rename_preserves_the_empty_destination(self) -> None:
+        for error in (OSError, KeyboardInterrupt):
+            for preexisting in (False, True):
+                output = self.root / (error.__name__.lower() + ("empty" if preexisting else "new"))
+                if preexisting:
+                    output.mkdir()
+                with self.subTest(error=error.__name__, preexisting=preexisting), patch.object(Path, "rename", side_effect=error("Publication interrupted")):
+                    with self.assertRaisesRegex(error, "Publication interrupted"):
+                        fit(self.bundle, self.archive, output.as_posix(), replace(self.config, epochs=1), self.profile, "cpu")
+                self.assertEqual(output.exists(), preexisting)
+                self.assertFalse(output.exists() and list(output.iterdir()))
+                self.assertFalse(list(self.root.glob(".flawprint-*")))
+
+    def test_checkpoint_published_before_interrupt_remains_reloadable(self) -> None:
+        output = self.root / "published"
+        original = Path.rename
+        def interrupted(stage, target):
+            original(stage, target)
+            raise KeyboardInterrupt("Publication completed before interruption")
+        with patch.object(Path, "rename", interrupted):
+            with self.assertRaisesRegex(KeyboardInterrupt, "Publication completed"):
+                fit(self.bundle, self.archive, output.as_posix(), replace(self.config, epochs=1), self.profile, "cpu")
+        self.assertTrue(predict(self.bundle, self.archive, output.as_posix(), device="cpu"))
+        self.assertFalse(list(self.root.glob(".flawprint-*")))
+
+    def test_training_interrupt_can_restart_deterministically(self) -> None:
+        output, baseline = self.root / "restarted", self.root / "baseline"
+        output.mkdir()
+        original = torch.optim.AdamW.step
+        def interrupted(optimizer, *arguments, **options):
+            original(optimizer, *arguments, **options)
+            raise KeyboardInterrupt("Training interrupted")
+        with patch.object(torch.optim.AdamW, "step", interrupted):
+            with self.assertRaisesRegex(KeyboardInterrupt, "Training interrupted"):
+                fit(self.bundle, self.archive, output.as_posix(), replace(self.config, epochs=1), self.profile, "cpu")
+        self.assertEqual(list(output.iterdir()), [])
+        self.assertFalse(list(self.root.glob(".flawprint-*")))
+        for destination in (output, baseline):
+            fit(self.bundle, self.archive, destination.as_posix(), replace(self.config, epochs=1), self.profile, "cpu")
+        states = [torch.load(destination / "parameters.pt", map_location="cpu", weights_only=True) for destination in (output, baseline)]
+        for name in states[0]:
+            torch.testing.assert_close(states[0][name], states[1][name], rtol=0, atol=0)
+
     def test_checkpoint_publication_rejects_a_competing_output_owner(self) -> None:
         output = self.root / "contended"
         save = torch.save
@@ -930,6 +1128,31 @@ class NeuralTests(unittest.TestCase):
         self.assertEqual(result["image_supervised_samples"], len(indices(bundle, "train")))
         disabled = fit(bundle, self.archive, (self.root / "disabled").as_posix(), replace(self.config, epochs=1, auxiliary_weight=0), self.profile, "cpu")
         self.assertEqual(disabled["image_supervised_samples"], 0)
+
+    def test_reloaded_predictions_roundtrip_across_all_export_formats(self) -> None:
+        import deep
+        from engine.results import prediction_rows
+        physical, vectors, directory = self.root / "physical.npz", self.root / "vectors.npz", self.root / "exportmodel"
+        index = next(index for index, row in enumerate(self.bundle["rows"]) if row["split"] == "test")
+        text = 'Report, with "quotes"\nand context. ' + self.bundle["rows"][index]["text"]
+        for rows in (self.bundle["rows"], self.archive["rows"]):
+            rows[index]["text"] = text
+        fit(self.bundle, self.archive, directory.as_posix(), replace(self.config, epochs=1), self.profile, "cpu")
+        save_bundle(physical, self.bundle["values"], self.bundle["observed"], self.bundle["patches"], self.bundle["rows"], self.bundle["names"].tolist())
+        embeddings.save(vectors.as_posix(), self.archive)
+        expected = prediction_rows(predict(self.bundle, self.archive, directory.as_posix(), device="cpu", explain=True))
+        checksum = digest(directory / "model.json")
+        self.assertTrue(all(row["checkpoint_sha256"] == checksum for row in expected))
+        reports = []
+        for suffix in ("jsonl", "ndjson", "json", "csv", "tsv"):
+            output = self.root / ("predictions." + suffix)
+            arguments = ["deep.py", "predict", physical.as_posix(), vectors.as_posix(), "--model", directory.as_posix(), "--device", "cpu", "--explain", "--output", output.as_posix()]
+            with self.subTest(format=suffix), patch.object(sys, "argv", arguments), patch("builtins.print"):
+                deep.main()
+                self.assertEqual(prediction_rows(read_rows(output)), expected)
+                reports.append(read_json(output.with_name("predictions.report.json")))
+        self.assertTrue(all(report == reports[0] for report in reports))
+        self.assertFalse(list(self.root.glob(".flawprint-*")))
 
     def test_neural_cli_trains_and_predicts_from_aligned_caches(self) -> None:
         physical, vectors = self.root / "physical.npz", self.root / "vectors.npz"
