@@ -85,6 +85,40 @@ class NeuralTests(unittest.TestCase):
             self.assertFalse(row["abstain"])
             self.assertEqual(row["prediction"], int(row["fusion_risk"] >= 0))
 
+    def test_experiment_runs_and_summarizes_all_four_seed_tests(self) -> None:
+        import deep
+        from engine.metrics import evaluate
+        bundle, archive = self.source_data(("train", "validation", "test"))
+        physical, vectors = self.root / "physical.npz", self.root / "vectors.npz"
+        save_bundle(physical, bundle["values"], bundle["observed"], bundle["patches"], bundle["rows"], bundle["names"])
+        embeddings.save(vectors, archive)
+        args = SimpleNamespace(features=physical.as_posix(), embeddings=vectors.as_posix(), config="builtin:neural", profile_config="builtin:default", seeds=list(deep.SEEDS), dataset="weibo", mode="coupled", device="cpu", output=(self.root / "experiment").as_posix(), dry_run=False)
+        expected = [row for row in bundle["rows"] if row["split"] == "test"]
+        def launch(command, **kwargs):
+            output = Path(command[command.index("--output") + 1])
+            if command[3] == "train":
+                seed = int(command[command.index("--seed") + 1])
+                output.mkdir(parents=True)
+                write_json(output / "model.json", {"config": {"seed": seed}})
+            else:
+                model = command[command.index("--model") + 1]
+                seed = read_json(Path(model) / "model.json")["config"]["seed"]
+                rows = []
+                for index, row in enumerate(expected):
+                    prediction = 1 - row["label"] if index < deep.SEEDS.index(seed) else row["label"]
+                    rows.append(dict(row, prediction=prediction, fusion_risk=float(2 * prediction - 1)))
+                write_rows(output, rows)
+                write_json(output.with_name(output.stem + ".report.json"), evaluate(rows))
+        with patch("deep.subprocess.run", side_effect=launch) as process:
+            result = deep.run_experiment(args)
+        self.assertEqual(process.call_count, 8)
+        self.assertEqual(result["seeds"], list(deep.SEEDS))
+        means = [result["byseed"][str(seed)]["accuracy"] for seed in deep.SEEDS]
+        self.assertAlmostEqual(result["metrics"]["accuracy"]["mean"], sum(means) / 4)
+        self.assertTrue((Path(args.output) / "summary.json").is_file())
+        with self.assertRaisesRegex(ValueError, "fresh"):
+            deep.experiment_commands(args)
+
     def test_four_training_seeds_keep_the_same_frozen_partitions(self) -> None:
         bundle, archive = self.source_data(("train", "validation", "test"))
         before = copy.deepcopy(bundle["rows"])

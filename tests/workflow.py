@@ -23,6 +23,16 @@ from engine.provenance import conventions
 from engine.metrics import binary, group_bootstrap
 
 class WorkflowTests(unittest.TestCase):
+    def test_seed_summary_uses_four_equally_weighted_results(self) -> None:
+        from deep import SEEDS, seed_summary
+        records = [{"seed": seed, "metrics": {"macro_f1": value, "auc": None}, "protocol": {"test": "frozen"}} for seed, value in zip(SEEDS, (0.2, 0.4, 0.6, 0.8))]
+        result = seed_summary(records)
+        self.assertAlmostEqual(result["metrics"]["macro_f1"]["mean"], 0.5)
+        self.assertAlmostEqual(result["metrics"]["macro_f1"]["sample_std"], 0.2581988897471611)
+        self.assertIsNone(result["metrics"]["auc"]["mean"])
+        for values in (records[:-1], records + [records[0]], [{**row, "protocol": {}} if index == 1 else row for index, row in enumerate(records)]):
+            with self.assertRaises(ValueError):
+                seed_summary(values)
 
     def setUp(self) -> None:
         self.bundle = fixture(per_split=16)
