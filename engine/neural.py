@@ -66,6 +66,34 @@ def transport(current: torch.Tensor, reference: torch.Tensor, values: torch.Tens
         raise ValueError("Value transport overflowed; rescale the values")
     return result.masked_fill(~observed[:, None, :, None], 0)
 
+def sensitivity(reference: torch.Tensor, direction: torch.Tensor, values: torch.Tensor, observed: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    transport(reference, reference, values, observed)
+    if not isinstance(direction, torch.Tensor) or direction.shape != reference.shape or direction.dtype != reference.dtype or direction.device != reference.device:
+        raise ValueError("Transport sensitivity requires aligned floating logit changes")
+    pairs = observed[:, None, :, None] & observed[:, None, None, :]
+    direction = direction.masked_fill(~pairs, 0)
+    reference = reference.masked_fill(~pairs, 0)
+    values = values.masked_fill(~observed[:, None, :, None], 0)
+    if not torch.isfinite(direction).all():
+        raise ValueError("Observed logit changes must be finite")
+    first = observed.to(torch.int64).argmax(-1)
+    anchor = values.gather(2, first[:, None, None, None].expand(values.shape[0], values.shape[1], 1, values.shape[-1]))
+    origin = direction.gather(-1, first[:, None, None, None].expand(*direction.shape[:-1], 1))
+    # Center logits and values before computing their weighted covariance.
+    centered = (direction - origin).masked_fill(~pairs, 0)
+    centered = centered - (reference * centered).sum(-1, keepdim=True)
+    tangent = (reference * centered) @ (values - anchor)
+    distances = torch.linalg.vector_norm(values[:, :, :, None] - values[:, :, None, :], dim=-1)
+    diameter = distances.masked_fill(~pairs, 0).amax(dim=(-1, -2))
+    maximum = direction.masked_fill(~pairs, -torch.inf).amax(-1)
+    minimum = direction.masked_fill(~pairs, torch.inf).amin(-1)
+    span = (maximum - minimum).masked_fill(~observed[:, None], 0)
+    bound = diameter[:, :, None] * span.square() / 8
+    tangent = tangent.masked_fill(~observed[:, None, :, None], 0)
+    if not torch.isfinite(tangent).all() or not torch.isfinite(bound).all():
+        raise ValueError("Transport sensitivity overflowed; rescale logits and values")
+    return tangent, bound
+
 def potential(logits: torch.Tensor, observed: torch.Tensor, relation: torch.Tensor, mode: str) -> torch.Tensor:
     if not all(isinstance(value, torch.Tensor) for value in (logits, observed, relation)) or logits.ndim != 4 or logits.shape[-1] != logits.shape[-2] or not logits.is_floating_point() or relation.ndim != 3 or relation.dtype != logits.dtype or relation.device != logits.device or observed.dtype != torch.bool or observed.device != logits.device:
         raise ValueError("Attention potentials require square floating matrices and a Boolean node mask")
@@ -184,11 +212,19 @@ class ResidualBlock(nn.Module):
                 alternative = torch.softmax((original + reduced).masked_fill(~observed[:, None, None, :], -torch.inf), dim=-1)
                 pair_update = transport(weights, alternative, value, observed).transpose(1, 2).reshape(batch, length, dimension)
                 pair_update = torch.nn.functional.linear(pair_update, self.output.weight)
+                tangent, remainder = sensitivity(alternative, bias - reduced, value, observed)
+                tangent = tangent.transpose(1, 2).reshape(batch, length, dimension)
+                tangent = torch.nn.functional.linear(tangent, self.output.weight)
+                # Bound the projected remainder with each head's projection norm.
+                projection = torch.linalg.vector_norm(self.output.weight.reshape(dimension, self.heads, self.width), dim=(0, 2))
+                remainder = (remainder * projection[None, :, None]).sum(1)
                 change = (weights[:, :, :prefix] - alternative[:, :, :prefix]).abs().sum(-1) * queries[:, None]
                 energy = relation.square().sum((1, 2))
                 fraction = (relation - summary).square().sum((1, 2)) / energy.clamp_min(torch.finfo(relation.dtype).tiny)
                 measured.update(pair_relation_fraction=fraction.clamp(0, 1), pair_contrast_rms=(difference.square().sum((1, 2, 3)) / pairs).sqrt(), pair_attention_shift_tv=change.sum((1, 2)) / (2 * self.heads * queries.sum(-1).clamp_min(1)))
                 measured["pair_value_transport_rms"] = (pair_update[:, :prefix].square().sum((1, 2)) / updates).sqrt()
+                measured["pair_tangent_transport_rms"] = (tangent[:, :prefix].square().sum((1, 2)) / updates).sqrt()
+                measured["pair_transport_remainder_bound"] = ((remainder[:, :prefix].square() * queries).sum(1) / updates).sqrt()
             diagnostics.append(measured)
         mixed = (weights @ value).transpose(1, 2).reshape(batch, length, dimension)
         tokens = tokens + self.dropout(self.output(mixed))

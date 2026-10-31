@@ -25,7 +25,7 @@ from engine.storage import subset, write_rows, read_rows, read_json, save_bundle
 from engine.synthetic import fixture
 try:
     import torch
-    from engine.neural import NeuralConfig, ResidualAttention, ResidualBlock, potential, scramble, contrast, summarize, transport
+    from engine.neural import NeuralConfig, ResidualAttention, ResidualBlock, potential, scramble, contrast, summarize, transport, sensitivity
     from engine.learning import prepare, relation, fit, predict, standardize, logits, scored
 except ImportError:
     torch = None
@@ -1548,6 +1548,140 @@ class NeuralTests(unittest.TestCase):
         block(tokens, observed, relation, "coupled", measurements)
         self.assertGreater(float(measurements[0]["pair_attention_shift_tv"].detach()), 0)
         torch.testing.assert_close(measurements[0]["pair_value_transport_rms"], torch.zeros(1, dtype=torch.float64), rtol=0, atol=0)
+
+    def test_continuous_logit_transport_has_a_finite_remainder_bound(self) -> None:
+        torch.manual_seed(3047)
+        observed = torch.tensor([[True, True, False, True, True], [False, False, False, False, False]])
+        base = torch.randn(2, 2, 5, 5, dtype=torch.float64)
+        reference = torch.softmax(base.masked_fill(~observed[:, None, None, :], -1e20), -1)
+        direction = torch.randn_like(base)
+        values = torch.randn(2, 2, 5, 3, dtype=torch.float64)
+        tangent, bound = sensitivity(reference, direction, values, observed)
+        for strength in (-2., -.2, 0., .3, 1., 3.):
+            current = torch.softmax((base + strength * direction).masked_fill(~observed[:, None, None, :], -1e20), -1)
+            actual = transport(current, reference, values, observed)
+            error = torch.linalg.vector_norm(actual - strength * tangent, dim=-1)
+            self.assertTrue(torch.all(error <= strength ** 2 * bound + 1e-13))
+        shifted, shifted_bound = sensitivity(reference, direction + 17, values + 23, observed)
+        torch.testing.assert_close(shifted, tangent, atol=1e-13, rtol=1e-12)
+        torch.testing.assert_close(shifted_bound, bound, atol=1e-13, rtol=1e-12)
+        step = 1e-5
+        plus = torch.softmax((base + step * direction).masked_fill(~observed[:, None, None, :], -1e20), -1)
+        minus = torch.softmax((base - step * direction).masked_fill(~observed[:, None, None, :], -1e20), -1)
+        torch.testing.assert_close(transport(plus, minus, values, observed) / (2 * step), tangent, atol=1e-9, rtol=1e-8)
+
+    def test_distinct_continuous_logits_can_have_zero_tangent_and_nonzero_response(self) -> None:
+        observed = torch.ones(1, 4, dtype=torch.bool)
+        reference = torch.full((1, 1, 4, 4), .25, dtype=torch.float64)
+        delta = torch.tensor([-1.5, -.2, .6, 1.3], dtype=torch.float64)
+        centered = delta - delta.mean()
+        values = centered.square() - centered.square().mean()
+        values = values - (values @ centered) / (centered @ centered) * centered
+        values = values.reshape(1, 1, 4, 1)
+        direction = delta.expand_as(reference)
+        tangent, bound = sensitivity(reference, direction, values, observed)
+        self.assertEqual(len(delta.unique()), 4)
+        torch.testing.assert_close(tangent, torch.zeros_like(tangent), atol=1e-14, rtol=0)
+        current = torch.softmax(.3 * direction, -1)
+        actual = transport(current, reference, values, observed)
+        self.assertGreater(float(actual.abs().max()), .001)
+        self.assertTrue(torch.all(actual.abs().squeeze(-1) <= .3 ** 2 * bound + 1e-14))
+        for scale in (1e-6, 1e-3):
+            changed = values + scale * centered.reshape(1, 1, 4, 1)
+            slope, _ = sensitivity(reference, direction, changed, observed)
+            expected = scale * centered.square().mean()
+            torch.testing.assert_close(slope, torch.full_like(slope, expected), atol=1e-14, rtol=1e-10)
+
+    def test_transport_sensitivity_ignores_missing_nodes_and_rejects_bad_inputs(self) -> None:
+        observed = torch.tensor([[True, False, False], [False, False, False]])
+        reference = torch.zeros(2, 1, 3, 3, dtype=torch.float64)
+        reference[0, 0, 0, 0] = 1
+        values = torch.full((2, 1, 3, 2), float("nan"), dtype=torch.float64)
+        values[0, 0, 0] = 3
+        direction = torch.full_like(reference, float("inf"))
+        direction[0, 0, 0, 0] = 2
+        tangent, bound = sensitivity(reference, direction, values, observed)
+        torch.testing.assert_close(tangent, torch.zeros_like(tangent), atol=0, rtol=0)
+        torch.testing.assert_close(bound, torch.zeros_like(bound), atol=0, rtol=0)
+        for damaged in (direction.float(), direction[:, :, :2], None):
+            with self.assertRaises(ValueError):
+                sensitivity(reference, damaged, values, observed)
+        direction[0, 0, 0, 0] = float("nan")
+        with self.assertRaisesRegex(ValueError, "finite"):
+            sensitivity(reference, direction, values, observed)
+
+    def test_projected_pair_tangent_and_bound_match_the_same_layer_path(self) -> None:
+        torch.manual_seed(52)
+        block = ResidualBlock(self.config).double().eval()
+        tokens = torch.randn(2, 7, self.config.dimension, dtype=torch.float64)
+        observed = torch.ones(2, 7, dtype=torch.bool)
+        observed[1, 5:] = False
+        relation = torch.randn(2, 4, 4, dtype=torch.float64)
+        relation = (relation + relation.transpose(-1, -2)) / 10
+        measurements = []
+        expected = block(tokens, observed, relation, "coupled", measurements)
+        qkv = block.qkv(block.norm(tokens.masked_fill(~observed[:, :, None], 0))).reshape(2, 7, 3, block.heads, block.width).permute(2, 0, 3, 1, 4)
+        query, key, value = qkv.unbind(0)
+        base = query @ key.transpose(-1, -2) / math.sqrt(block.width)
+        relation = relation.masked_fill(~(observed[:, 3:, None] & observed[:, None, 3:]), 0)
+        strength = block.limit * torch.sigmoid(block.strength)
+        full = strength * potential(base, observed, relation, "coupled")
+        reduced = strength * potential(base, observed, summarize(relation, observed[:, 3:]), "coupled")
+        reference = torch.softmax((base + reduced).masked_fill(~observed[:, None, None, :], -torch.inf), -1)
+        current = torch.softmax((base + full).masked_fill(~observed[:, None, None, :], -torch.inf), -1)
+        tangent, _ = sensitivity(reference, full - reduced, value, observed)
+        error = transport(current, reference, value, observed) - tangent
+        error = torch.nn.functional.linear(error.transpose(1, 2).reshape(2, 7, self.config.dimension), block.output.weight)
+        measured_error = (error[:, :3].square().sum((1, 2)) / (3 * self.config.dimension)).sqrt()
+        self.assertTrue(torch.all(measured_error <= measurements[0]["pair_transport_remainder_bound"] + 1e-13))
+        torch.testing.assert_close(block(tokens, observed, relation, "coupled"), expected, atol=0, rtol=0)
+        with torch.no_grad():
+            block.output.weight.zero_()
+        measurements = []
+        block(tokens, observed, relation, "coupled", measurements)
+        for name in ("pair_tangent_transport_rms", "pair_transport_remainder_bound"):
+            torch.testing.assert_close(measurements[0][name], torch.zeros(2, dtype=torch.float64), atol=0, rtol=0)
+
+    def test_reference_mixture_changes_pair_direction_with_the_content_state_fixed(self) -> None:
+        observed = torch.ones(1, 3, dtype=torch.bool)
+        logits = torch.zeros(1, 1, 3, 3, dtype=torch.float64)
+        logits[0, 0, 0, 1:] = torch.tensor([.8, .2], dtype=torch.float64).log()
+        relations = []
+        for proportion in (0., .5, 1.):
+            coefficient = (1 - 2 * proportion) * .8
+            correlation = torch.tensor([[1., coefficient], [coefficient, 1.]], dtype=torch.float64)
+            raw = torch.eye(2, dtype=torch.float64) - torch.linalg.inv(correlation)
+            relations.append((raw / (1 + raw.norm()))[None])
+        biases = [potential(logits, observed, graph, "coupled") for graph in relations]
+        endpoint_contrasts = [bias[0, 0, 0, 1] - bias[0, 0, 0, 2] for bias in biases]
+        self.assertLess(float(endpoint_contrasts[0] * endpoint_contrasts[2]), 0)
+        torch.testing.assert_close(relations[1], torch.zeros_like(relations[1]), atol=0, rtol=0)
+        values = torch.tensor([0., 1., -1.], dtype=torch.float64).reshape(1, 1, 3, 1)
+        reference = torch.softmax(logits + biases[0], -1)
+        current = torch.softmax(logits + biases[2], -1)
+        tangent, bound = sensitivity(reference, biases[2] - biases[0], values, observed)
+        actual = transport(current, reference, values, observed)
+        self.assertTrue(torch.all((actual - tangent).abs().squeeze(-1) <= bound + 1e-13))
+
+    def test_shrunken_reference_changes_obey_the_relation_continuity_bound(self) -> None:
+        torch.manual_seed(3407)
+        for _ in range(12):
+            matrices = []
+            for _ in range(2):
+                raw = torch.randn(4, 4, dtype=torch.float64)
+                covariance = raw @ raw.T
+                diagonal = covariance.diag().sqrt()
+                matrices.append(.9 * covariance / diagonal[:, None] / diagonal[None] + .1 * torch.eye(4, dtype=torch.float64))
+            first, second = matrices
+            precision, changed = torch.linalg.inv(first), torch.linalg.inv(second)
+            difference = torch.linalg.matrix_norm(first - second)
+            self.assertLessEqual(float((precision - changed).norm()), 100 * float(difference) + 1e-12)
+            ranks = torch.randn(4, dtype=torch.float64)
+            relations = [torch.diag(ranks) @ (torch.eye(4, dtype=torch.float64) - inverse) @ torch.diag(ranks) for inverse in (precision, changed)]
+            normalized = [graph / (1 + graph.norm()) for graph in relations]
+            distance = torch.linalg.matrix_norm(normalized[0] - normalized[1])
+            self.assertLessEqual(float(distance), float((relations[0] - relations[1]).norm()) + 1e-12)
+            self.assertLessEqual(float(distance), float(ranks.abs().max().square() * 100 * difference) + 1e-12)
 
     def test_value_transport_rejects_invalid_observed_probabilities(self) -> None:
         weights = torch.full((1, 1, 3, 3), 1 / 3, dtype=torch.float64)

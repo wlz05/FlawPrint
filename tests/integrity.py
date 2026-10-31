@@ -660,7 +660,7 @@ class IntegrityTests(unittest.TestCase):
                         prediction_rows([{"id": "a", key: value}])
         with self.assertRaises(ValueError):
             prediction_rows([{"id": "a", "pair_contrast_rms": "-0.1"}])
-        for key in ("value_transport_rms", "pair_value_transport_rms"):
+        for key in ("value_transport_rms", "pair_value_transport_rms", "pair_tangent_transport_rms", "pair_transport_remainder_bound"):
             for value in (-.1, "-0.1", float("inf")):
                 with self.assertRaises(ValueError):
                     prediction_rows([{"id": "a", key: value}])
