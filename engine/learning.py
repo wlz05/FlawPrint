@@ -154,7 +154,7 @@ def logits(model: ResidualAttention, packet: dict, indices: list[int], device: s
                 raise ValueError("Neural inference requires one finite risk per selected sample")
             values.append(risk)
             if diagnostics is not None:
-                for name in ("attention_contrast_rms", "attention_shift_tv", "pair_relation_fraction", "pair_contrast_rms", "pair_attention_shift_tv"):
+                for name in ("attention_contrast_rms", "attention_shift_tv", "pair_relation_fraction", "pair_contrast_rms", "pair_attention_shift_tv", "value_transport_rms", "pair_value_transport_rms"):
                     if name in output:
                         if not isinstance(output[name], torch.Tensor):
                             raise ValueError("Neural diagnostics require tensors: " + name)
@@ -460,7 +460,7 @@ def predict(bundle: dict, archive: dict, directory: str, split: str = "test", de
             row["query_readout_delta"] = float(risks[index]) - float(uniform[index]) if uniform is not None else None
             row["summary_readout_risk"] = float(summarized[index]) if summarized is not None else None
             row["pair_readout_delta"] = float(risks[index]) - float(summarized[index]) if summarized is not None else None
-            for name in ("attention_contrast_rms", "attention_shift_tv", "pair_relation_fraction", "pair_contrast_rms", "pair_attention_shift_tv"):
+            for name in ("attention_contrast_rms", "attention_shift_tv", "pair_relation_fraction", "pair_contrast_rms", "pair_attention_shift_tv", "value_transport_rms", "pair_value_transport_rms"):
                 row[name] = float(measurements[name][index]) if name in measurements else None
             row["intervention_scope"] = "Fixed checkpoint and nodes; local attention contrasts and potential-off, uniform, and summary readouts"
     # Bind every returned prediction to one complete checkpoint snapshot.

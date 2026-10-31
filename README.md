@@ -1,6 +1,6 @@
 # FlawPrint: Cross-Domain Multimodal Fake News Detection via Copula Residuals of Physical Imperfection Traces
 
-**FlawPrint-CRA** preserves domain-referenced trace pairs until current content reads them into attention. An independent domain pool defines pairwise copula residuals. Each content query selects trace coordinates, and the residual matrix is lifted into content-dependent attention through `B = U Gbar U^T`.
+**FlawPrint-CRA** performs content-conditioned evidence transport in a frozen domain reference. It preserves pairwise trace relations until current queries read them into attention through `B = U Gbar U^T`; shared value vectors determine the resulting representation update.
 
 The deterministic FlawPrint baseline achieves **state-of-the-art performance on Weibo, Weibo21, and FineFake**. The content-conditioned CRA results are recorded separately. Experiment settings use a **single NVIDIA GeForce RTX 4090** and seeds **42, 52, 3047, and 3407**.
 
@@ -31,6 +31,8 @@ Independent pool --> Frozen ranks and domain copula      |
 3. **Define a domain reference.** Frozen empirical marginals establish rank coordinates. The copula precision matrix defines pairwise support relative to independent pairing.
 4. **Read relations through content.** Each attention head reuses its query/key scores to assign a distribution over available trace anchors. The lifted matrix `U Gbar U^T` supplies distinct content-to-content, content-to-trace, and trace-to-trace interaction conditions.
 5. **Learn the news decision.** Residual attention updates the nodes and the news head reads the class node. Source news labels train projections and interactions; separately observed manipulation labels supervise an optional image head.
+
+DRC (Domain-Referenced Coordinates) fixes the statistical comparison scale. PPE (Pair-Preserving Evidence) retains the trace-pair matrix. CET (Content-Conditioned Evidence Transport) maps that matrix through the current queries into attention and value updates. Encoders supply observations, and the unified news head learns their task use.
 
 The [core operation in step 4](engine/neural.py) keeps pair identities available during content interaction. The domain pool defines statistical trace compatibility, and source news labels train the final decision. Query/key scores read the complete relation matrix without a separate gating network.
 
@@ -259,6 +261,8 @@ python -B deep.py predict ./data/features.npz ./data/deep.npz --model ./models/n
 | `pair_relation_fraction` | Fraction of relation energy outside its diagonal-and-row-sum reconstruction, for coupled checkpoints |
 | `pair_contrast_rms` | Mean layer RMS of the effective pair-only bias on available class and content queries |
 | `pair_attention_shift_tv` | Mean layer attention total variation after removing only unsummarized pair information at the same layer state |
+| `value_transport_rms` | Layer-mean RMS of the projected content-query update versus the same layer without the reference potential |
+| `pair_value_transport_rms` | Layer-mean RMS of the projected content-query update after removing only unsummarized pair relations |
 | `potential_disabled_risk` / `potential_risk_delta` | Whole-model raw risk with the potential disabled / original minus disabled risk |
 | `uniform_readout_risk` / `query_readout_delta` | Whole-model risk with uniform content responsibilities / original minus uniform risk |
 | `summary_readout_risk` / `pair_readout_delta` | Whole-model risk with summary-reconstructed relations / original minus summary risk |
@@ -266,6 +270,8 @@ python -B deep.py predict ./data/features.npz ./data/deep.npz --model ./models/n
 Local measurements include the class node and available content queries, with all available keys; masked nodes are excluded from their denominators. A missing relation gives zero local change. The concat control has no attention measurements and exports missing values. Coupled checkpoints add three diagnostic forwards: potential off, uniform responsibility, and summary reconstruction. Uniform and summary checkpoints report zero for their corresponding self-intervention delta; other inapplicable readouts export missing values. Input nodes and weights stay fixed while hidden states update normally in each forward pass. Probabilities and prediction sets use the original model risk.
 
 The three pair measurements are available for coupled checkpoints. Local summary removal reuses the current Q/K/V tensors and masks; it does not launch another whole-model forward. Other modes export missing values for these fields. Compare these measurements by news ID with `pair_readout_delta` and the paired task outcomes: retained matrix energy, local attention use, and final correction measure different stages of the same readout.
+
+Nonconstant attention changes can have zero value transport. For one fixed query and head before output projection, the finite-strength criterion groups keys by equal potential changes: transport vanishes at every strength exactly when each group has the same baseline-weighted value mean. The diagnostics keep Q/K/V fixed, center out a shared value offset, and include the shared output projection. Full-model risk interventions are evaluated separately.
 
 Prediction files support JSONL, NDJSON, JSON, CSV, and TSV. The shared [prediction reader](engine/results.py) restores numeric diagnostics and missing values consistently across these formats, including summary risks and all pair measurements.
 

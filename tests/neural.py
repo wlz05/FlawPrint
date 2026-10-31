@@ -6,6 +6,7 @@ import copy
 from dataclasses import asdict, replace
 import os
 import json
+import math
 from pathlib import Path
 import shutil
 import subprocess
@@ -24,7 +25,7 @@ from engine.storage import subset, write_rows, read_rows, read_json, save_bundle
 from engine.synthetic import fixture
 try:
     import torch
-    from engine.neural import NeuralConfig, ResidualAttention, ResidualBlock, potential, scramble, contrast, summarize
+    from engine.neural import NeuralConfig, ResidualAttention, ResidualBlock, potential, scramble, contrast, summarize, transport
     from engine.learning import prepare, relation, fit, predict, standardize, logits, scored
 except ImportError:
     torch = None
@@ -1461,6 +1462,102 @@ class NeuralTests(unittest.TestCase):
         torch.testing.assert_close(outputs[1][:, :, :3, :3], outputs[2][:, :, :3, :3] / 4, atol=1e-14, rtol=0)
         torch.testing.assert_close(outputs[1][:, :, :3, 3:], outputs[2][:, :, :3, 3:] / 2, atol=1e-14, rtol=0)
         self.assertGreater(outputs[2][:, :, :3, :3].abs().max(), 0)
+
+    def test_value_transport_matches_finite_attention_updates_and_value_offsets(self) -> None:
+        torch.manual_seed(3407)
+        observed = torch.tensor([[True, False, True, True], [False, False, False, False]])
+        current, reference = [torch.softmax(torch.randn(2, 2, 4, 4, dtype=torch.float64).masked_fill(~observed[:, None, None, :], -1e20), -1) for _ in range(2)]
+        values = torch.randn(2, 2, 4, 3, dtype=torch.float64)
+        actual = transport(current, reference, values, observed)
+        clean = values.masked_fill(~observed[:, None, :, None], 0)
+        expected = ((current - reference) @ clean).masked_fill(~observed[:, None, :, None], 0)
+        torch.testing.assert_close(actual, expected, atol=1e-14, rtol=1e-13)
+        torch.testing.assert_close(transport(current, reference, values + 19, observed), actual, atol=1e-14, rtol=1e-13)
+        values[~observed[:, None, :, None].expand_as(values)] = float("nan")
+        torch.testing.assert_close(transport(current, reference, values, observed), actual, atol=1e-14, rtol=1e-13)
+        constant = torch.full_like(values, 17)
+        torch.testing.assert_close(transport(current, reference, constant, observed), torch.zeros_like(actual), rtol=0, atol=0)
+
+    def test_valid_copula_can_change_attention_without_transmitting_values(self) -> None:
+        graph = torch.tensor([[0., 1., -1., 0.], [1., 0., 0., -1.], [-1., 0., 0., 1.], [0., -1., 1., 0.]], dtype=torch.float64)
+        precision = torch.eye(4, dtype=torch.float64) - .2 * graph
+        inverse = torch.linalg.inv(precision)
+        scale = inverse.diag().mean()
+        correlation = inverse / scale
+        torch.testing.assert_close(correlation.diag(), torch.ones(4, dtype=torch.float64))
+        self.assertGreater(float(torch.linalg.eigvalsh(correlation).min()), 0)
+        relation = (torch.eye(4, dtype=torch.float64) - torch.linalg.inv(correlation))[None]
+        relation = relation / (1 + torch.linalg.matrix_norm(relation, keepdim=True))
+        observed = torch.ones(1, 5, dtype=torch.bool)
+        summary = summarize(relation, observed[:, 1:])
+        hidden = relation - summary
+        torch.testing.assert_close(hidden.sum(-1), torch.zeros(1, 4, dtype=torch.float64), atol=1e-14, rtol=0)
+        self.assertGreater(float(hidden.norm()), 0)
+        logits = torch.zeros(1, 1, 5, 5, dtype=torch.float64)
+        logits[0, 0, 0, 1:] = torch.tensor([.35, .25, .25, .15], dtype=torch.float64).log()
+        base = logits + potential(logits, observed, summary, "coupled")
+        direction = potential(logits, observed, relation, "coupled") - potential(logits, observed, summary, "coupled")
+        reference = torch.softmax(base, -1)
+        values = torch.zeros(1, 1, 5, 1, dtype=torch.float64)
+        values[0, 0, 0, 0] = 1
+        values[0, 0, 1, 0] = -reference[0, 0, 0, 0] / reference[0, 0, 0, 1]
+        for strength in (.1, .5, 1., 2.):
+            current = torch.softmax(base + strength * direction, -1)
+            self.assertGreater(float((current - reference)[0, 0, 0].abs().sum()), 0)
+            torch.testing.assert_close(transport(current, reference, values, observed)[0, 0, 0], torch.zeros(1, dtype=torch.float64), atol=1e-13, rtol=0)
+            changed = values.clone()
+            changed[0, 0, 2, 0] = 1
+            self.assertGreater(float(transport(current, reference, changed, observed)[0, 0, 0].abs()), 1e-6)
+
+    def test_zero_first_order_transport_does_not_imply_zero_finite_response(self) -> None:
+        observed = torch.ones(1, 3, dtype=torch.bool)
+        reference = torch.full((1, 1, 3, 3), 1 / 3, dtype=torch.float64)
+        direction = torch.tensor([-1., 0., 1.], dtype=torch.float64).expand_as(reference)
+        values = torch.tensor([1., -2., 1.], dtype=torch.float64).reshape(1, 1, 3, 1)
+        strength = torch.tensor(0., dtype=torch.float64, requires_grad=True)
+        output = transport(torch.softmax(strength * direction, -1), reference, values, observed)[0, 0, 0, 0]
+        derivative, = torch.autograd.grad(output, strength)
+        torch.testing.assert_close(derivative, torch.tensor(0., dtype=torch.float64), atol=1e-14, rtol=0)
+        current = torch.softmax(.5 * direction, -1)
+        expected = (2 * math.cosh(.5) - 2) / (2 * math.cosh(.5) + 1)
+        torch.testing.assert_close(transport(current, reference, values, observed)[0, 0, 0, 0], torch.tensor(expected, dtype=torch.float64))
+
+    def test_value_transport_obeys_the_value_diameter_bound(self) -> None:
+        torch.manual_seed(52)
+        observed = torch.ones(1, 5, dtype=torch.bool)
+        values = torch.randn(1, 2, 5, 4, dtype=torch.float64)
+        reference, current = [torch.softmax(torch.randn(1, 2, 5, 5, dtype=torch.float64), -1) for _ in range(2)]
+        diameter = torch.cdist(values[0], values[0]).amax((-1, -2))
+        bound = diameter[None, :, None] * (current - reference).abs().sum(-1) / 2
+        self.assertTrue(torch.all(transport(current, reference, values, observed).norm(dim=-1) <= bound + 1e-13))
+
+    def test_post_projection_transport_detects_a_value_null_update(self) -> None:
+        torch.manual_seed(3047)
+        block = ResidualBlock(self.config).double().eval()
+        tokens = torch.randn(1, 7, self.config.dimension, dtype=torch.float64)
+        observed = torch.ones(1, 7, dtype=torch.bool)
+        relation = torch.tensor([[[0., 1., -1., 0.], [1., 0., 0., -1.], [-1., 0., 0., 1.], [0., -1., 1., 0.]]], dtype=torch.float64) / 5
+        measurements = []
+        expected = block(tokens, observed, relation, "coupled", measurements)
+        self.assertGreater(float(measurements[0]["pair_attention_shift_tv"].detach()), 0)
+        self.assertGreater(float(measurements[0]["pair_value_transport_rms"].detach()), 0)
+        torch.testing.assert_close(block(tokens, observed, relation, "coupled"), expected, rtol=0, atol=0)
+        with torch.no_grad():
+            block.output.weight.zero_()
+        measurements = []
+        block(tokens, observed, relation, "coupled", measurements)
+        self.assertGreater(float(measurements[0]["pair_attention_shift_tv"].detach()), 0)
+        torch.testing.assert_close(measurements[0]["pair_value_transport_rms"], torch.zeros(1, dtype=torch.float64), rtol=0, atol=0)
+
+    def test_value_transport_rejects_invalid_observed_probabilities(self) -> None:
+        weights = torch.full((1, 1, 3, 3), 1 / 3, dtype=torch.float64)
+        values = torch.ones(1, 1, 3, 2, dtype=torch.float64)
+        observed = torch.ones(1, 3, dtype=torch.bool)
+        for damaged in (weights * 2, weights * -1, weights * float("nan")):
+            with self.assertRaises(ValueError):
+                transport(damaged, weights, values, observed)
+        with self.assertRaises(ValueError):
+            transport(weights, weights, values.float(), observed)
 
     def test_pair_diagnostics_separate_available_information_from_local_use(self) -> None:
         torch.manual_seed(42)

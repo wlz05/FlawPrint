@@ -660,6 +660,15 @@ class IntegrityTests(unittest.TestCase):
                         prediction_rows([{"id": "a", key: value}])
         with self.assertRaises(ValueError):
             prediction_rows([{"id": "a", "pair_contrast_rms": "-0.1"}])
+        for key in ("value_transport_rms", "pair_value_transport_rms"):
+            for value in (-.1, "-0.1", float("inf")):
+                with self.assertRaises(ValueError):
+                    prediction_rows([{"id": "a", key: value}])
+            rows = [{"id": "observed", key: .25}, {"id": "unknown", key: None}]
+            for suffix in ("csv", "jsonl"):
+                path = self.root / ("transport." + suffix)
+                write_rows(path, rows)
+                self.assertEqual(prediction_rows(read_rows(path)), rows)
 
     def test_csv_prediction_structures_use_strict_json(self) -> None:
         invalid = ('{"x":NaN}', '{"x":Infinity}', '{"x":1e999}', '{"x":1,"x":2}')

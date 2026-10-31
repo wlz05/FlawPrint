@@ -47,6 +47,25 @@ def contrast(values: torch.Tensor, observed: torch.Tensor) -> torch.Tensor:
     center = values.masked_fill(~keys, 0).sum(-1, keepdim=True) / count
     return (values - center).masked_fill(~(keys & observed[:, None, :, None]), 0)
 
+def transport(current: torch.Tensor, reference: torch.Tensor, values: torch.Tensor, observed: torch.Tensor) -> torch.Tensor:
+    if not all(isinstance(value, torch.Tensor) for value in (current, reference, values, observed)) or current.ndim != 4 or current.shape[-1] < 1 or current.shape[-2] != current.shape[-1] or reference.shape != current.shape or values.ndim != 4 or values.shape[:3] != current.shape[:3] or values.shape[-1] < 1:
+        raise ValueError("Value transport requires aligned attention and value tensors")
+    if not current.is_floating_point() or reference.dtype != current.dtype or values.dtype != current.dtype or reference.device != current.device or values.device != current.device or observed.device != current.device or observed.dtype != torch.bool or observed.shape != (current.shape[0], current.shape[-1]):
+        raise ValueError("Value transport requires shared floating types and Boolean node masks")
+    pairs = observed[:, None, :, None] & observed[:, None, None, :]
+    current, reference = current.masked_fill(~pairs, 0), reference.masked_fill(~pairs, 0)
+    values = values.masked_fill(~observed[:, None, :, None], 0)
+    expected = observed[:, None].expand(current.shape[:3]).to(current.dtype)
+    if not all(torch.isfinite(value).all() for value in (current, reference, values)) or any(torch.any(value < 0) or not torch.allclose(value.sum(-1), expected, atol=1e-5, rtol=1e-4) for value in (current, reference)):
+        raise ValueError("Value transport requires finite values and normalized attention")
+    # Remove a shared value offset before measuring evidence redistribution.
+    first = observed.to(torch.int64).argmax(-1)
+    anchor = values.gather(2, first[:, None, None, None].expand(values.shape[0], values.shape[1], 1, values.shape[-1]))
+    result = (current - reference) @ (values - anchor)
+    if not torch.isfinite(result).all():
+        raise ValueError("Value transport overflowed; rescale the values")
+    return result.masked_fill(~observed[:, None, :, None], 0)
+
 def potential(logits: torch.Tensor, observed: torch.Tensor, relation: torch.Tensor, mode: str) -> torch.Tensor:
     if not all(isinstance(value, torch.Tensor) for value in (logits, observed, relation)) or logits.ndim != 4 or logits.shape[-1] != logits.shape[-2] or not logits.is_floating_point() or relation.ndim != 3 or relation.dtype != logits.dtype or relation.device != logits.device or observed.dtype != torch.bool or observed.device != logits.device:
         raise ValueError("Attention potentials require square floating matrices and a Boolean node mask")
@@ -150,19 +169,26 @@ class ResidualBlock(nn.Module):
             pairs = (queries.sum(-1) * observed.sum(-1) * self.heads).clamp_min(1)
             rms = (centered[:, :, :prefix].square().sum((1, 2, 3)) / pairs).sqrt()
             plain = torch.softmax(original.masked_fill(~observed[:, None, None, :], -torch.inf), dim=-1)
+            transmitted = transport(weights, plain, value, observed).transpose(1, 2).reshape(batch, length, dimension)
+            transmitted = torch.nn.functional.linear(transmitted, self.output.weight)
+            updates = queries.sum(-1).clamp_min(1) * dimension
+            value_rms = (transmitted[:, :prefix].square().sum((1, 2)) / updates).sqrt()
             shifts = (weights[:, :, :prefix] - plain[:, :, :prefix]).abs().sum(-1) * queries[:, None]
             variation = shifts.sum((1, 2)) / (2 * self.heads * queries.sum(-1).clamp_min(1))
-            measured = {"attention_contrast_rms": rms, "attention_shift_tv": variation}
+            measured = {"attention_contrast_rms": rms, "attention_shift_tv": variation, "value_transport_rms": value_rms}
             if mode == "coupled":
                 summary = summarize(relation, observed[:, prefix:])
                 # Remove only pair information while keeping the current layer state fixed.
                 reduced = strength * potential(original, observed, summary, "coupled")
                 difference = contrast(bias - reduced, observed)[:, :, :prefix]
                 alternative = torch.softmax((original + reduced).masked_fill(~observed[:, None, None, :], -torch.inf), dim=-1)
+                pair_update = transport(weights, alternative, value, observed).transpose(1, 2).reshape(batch, length, dimension)
+                pair_update = torch.nn.functional.linear(pair_update, self.output.weight)
                 change = (weights[:, :, :prefix] - alternative[:, :, :prefix]).abs().sum(-1) * queries[:, None]
                 energy = relation.square().sum((1, 2))
                 fraction = (relation - summary).square().sum((1, 2)) / energy.clamp_min(torch.finfo(relation.dtype).tiny)
                 measured.update(pair_relation_fraction=fraction.clamp(0, 1), pair_contrast_rms=(difference.square().sum((1, 2, 3)) / pairs).sqrt(), pair_attention_shift_tv=change.sum((1, 2)) / (2 * self.heads * queries.sum(-1).clamp_min(1)))
+                measured["pair_value_transport_rms"] = (pair_update[:, :prefix].square().sum((1, 2)) / updates).sqrt()
             diagnostics.append(measured)
         mixed = (weights @ value).transpose(1, 2).reshape(batch, length, dimension)
         tokens = tokens + self.dropout(self.output(mixed))
