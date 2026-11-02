@@ -1,6 +1,6 @@
 # FlawPrint: Cross-Domain Multimodal Fake News Detection via Copula Residuals of Physical Imperfection Traces
 
-**FlawPrint-CRA** performs content-conditioned evidence transport in a frozen domain reference. It preserves pairwise trace relations until current queries read them into attention through `B = U Gbar U^T`; shared value vectors determine the resulting representation update.
+**FlawPrint-CRA** uses trace relations selected by the current news content to condition its multimodal interactions. A frozen domain reference defines the trace-pair matrix; current queries read it through `B = U Gbar U^T`, and shared value vectors carry the resulting content update.
 
 The deterministic FlawPrint baseline achieves **state-of-the-art performance on Weibo, Weibo21, and FineFake**. The content-conditioned CRA results are recorded separately. Experiment settings use a **single NVIDIA GeForce RTX 4090** and seeds **42, 52, 3047, and 3407**.
 
@@ -34,7 +34,7 @@ Independent pool --> Frozen ranks and domain copula      |
 
 DRC (Domain-Referenced Coordinates) fixes the statistical comparison scale. PPE (Pair-Preserving Evidence) retains the trace-pair matrix. CET (Content-Conditioned Evidence Transport) maps that matrix through the current queries into attention and value updates. Encoders supply observations, and the unified news head learns their task use.
 
-The [core operation in step 4](engine/neural.py) keeps pair identities available during content interaction. The domain pool defines statistical trace compatibility, and source news labels train the final decision. Query/key scores read the complete relation matrix without a separate gating network.
+The [core operation in step 4](engine/neural.py) makes trace relations part of the interaction rule. Each pair of content nodes selects trace coordinates through its current query/key scores; the domain-reference relations between those coordinates condition their attention. Source news labels train how these updates support the final decision.
 
 Pair information contributes through the current query's trace responsibilities. The component lost by diagonal and row summaries has zero row sums: a uniform query cancels its direct contribution, while content-specific responsibilities can turn it into relative attention preferences. The diagnostics below measure retained pair energy, its local use, and the resulting whole-model response separately.
 
