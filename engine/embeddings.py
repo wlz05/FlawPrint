@@ -13,8 +13,8 @@ import re
 from zipfile import BadZipFile
 from zlib import error as CompressionError
 import numpy as np
-from engine.data import normalize, missing
-from engine.storage import relative_path, digest, native, parse_json, atomic_stream
+from engine.data import normalize, missing, row_namespace
+from engine.storage import relative_path, digest, native, parse_json, atomic_stream, validate_bundle
 
 STREAMS = ("bert", "mae", "clip_text", "clip_image")
 TEXT_PATTERN = '[\uff0c\u3002 :,.\uff1b|-\u201c\u201d\u2014\u2014_/nbsp+&;@\u3001\u300a\u300b\uff5e\uff08\uff09())#O\uff01\uff1a\u3010\u3011]'
@@ -241,16 +241,24 @@ def load(path: str) -> dict:
     return archive
 
 def align(bundle: dict, archive: dict) -> tuple[dict, np.ndarray]:
+    validate_bundle(bundle)
     validate(archive)
-    mapping = {row["id"]: index for index, row in enumerate(archive["rows"])}
-    if set(mapping) != {row["id"] for row in bundle["rows"]}:
+    # Compare canonical metadata without rewriting either input cache.
+    physical, cached = normalize(bundle["rows"]), normalize(archive["rows"])
+    for original, canonical in ((bundle["rows"], physical), (archive["rows"], cached)):
+        if any(first["id"] != second["id"] for first, second in zip(original, canonical)):
+            raise ValueError("Cached identifiers must already use their canonical spelling")
+    mapping = {row["id"]: index for index, row in enumerate(cached)}
+    if set(mapping) != {row["id"] for row in physical}:
         raise ValueError("Deep and physical inputs must contain the same identities")
     order = []
-    for row in bundle["rows"]:
+    for row in physical:
         index = mapping[row["id"]]
-        other = archive["rows"][index]
-        if any(row.get(key) != other.get(key) for key in ("text", "image", "group", "domain", "split")):
+        other = cached[index]
+        if any(row.get(key) != other.get(key) for key in ("text", "image", "group", "domain", "split", "image_frame")):
             raise ValueError("Cached embeddings disagree with the physical input metadata")
+        if row_namespace(row) != row_namespace(other):
+            raise ValueError("Cached embeddings disagree with the benchmark contract")
         checksums = [None if missing(item.get("content_sha256")) else item["content_sha256"] for item in (row, other)]
         if any(value is not None for value in checksums) and (any(not isinstance(value, str) or re.fullmatch("[0-9a-f]{64}", value) is None for value in checksums) or checksums[0] != checksums[1]):
             raise ValueError("Deep and physical features describe different image bytes or lack matching SHA256 fingerprints")

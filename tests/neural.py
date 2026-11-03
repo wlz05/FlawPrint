@@ -737,6 +737,51 @@ class NeuralTests(unittest.TestCase):
         self.archive["rows"][0]["content_sha256"] = "a" * 64
         embeddings.align(self.bundle, self.archive)
 
+    def test_cache_alignment_requires_matching_frame_selection(self) -> None:
+        archive = copy.deepcopy(self.archive)
+        archive["rows"][0]["image_frame"] = 0
+        with self.assertRaisesRegex(ValueError, "metadata"):
+            embeddings.align(self.bundle, archive)
+        bundle = copy.deepcopy(self.bundle)
+        bundle["rows"][0]["image_frame"] = 0
+        embeddings.align(bundle, archive)
+        archive["rows"][0]["image_frame"] = 1
+        with self.assertRaises(ValueError):
+            embeddings.align(bundle, archive)
+
+    def test_cache_alignment_preserves_the_declared_benchmark_contract(self) -> None:
+        bundle = subset(self.bundle, [0])
+        bundle["rows"][0].update(id="finefake:0", group="finefake:0", split="train", source_ordinal=0, benchmark_protocol="finefake-paper-3407")
+        archive = dict(self.archive, rows=copy.deepcopy(bundle["rows"]), features={name: value[:1] for name, value in self.archive["features"].items()}, observed=self.archive["observed"][:1])
+        embeddings.align(bundle, archive)
+        archive["rows"][0].pop("benchmark_protocol")
+        with self.assertRaisesRegex(ValueError, "metadata|contract"):
+            embeddings.align(bundle, archive)
+        archive["rows"][0].update(benchmark_protocol="finefake-paper-3407", source_ordinal=1)
+        with self.assertRaises(ValueError):
+            embeddings.align(bundle, archive)
+
+    def test_cache_alignment_normalizes_portable_paths_without_mutating_inputs(self) -> None:
+        archive = copy.deepcopy(self.archive)
+        for row in archive["rows"]:
+            row["image"] = row["image"].replace("/", "\\")
+            if row["split"] == "validation":
+                row["split"] = "val"
+        before = copy.deepcopy(archive["rows"])
+        aligned, observed = embeddings.align(self.bundle, archive)
+        for name in embeddings.STREAMS:
+            np.testing.assert_array_equal(aligned[name], self.archive["features"][name])
+        np.testing.assert_array_equal(observed, self.archive["observed"])
+        self.assertEqual(archive["rows"], before)
+
+    def test_cache_alignment_rejects_duplicate_physical_rows_before_reindexing(self) -> None:
+        bundle = copy.deepcopy(self.bundle)
+        bundle["rows"][1] = copy.deepcopy(bundle["rows"][0])
+        indices = [index for index in range(len(self.archive["rows"])) if index != 1]
+        archive = dict(self.archive, rows=[self.archive["rows"][index] for index in indices], features={name: value[indices] for name, value in self.archive["features"].items()}, observed=self.archive["observed"][indices])
+        with self.assertRaisesRegex(ValueError, "identifiers|unique"):
+            embeddings.align(bundle, archive)
+
     def test_selected_epoch_restores_the_first_best_validation_checkpoint(self) -> None:
         bundle, archive = self.source_data(("train", "validation", "test"))
         states = []

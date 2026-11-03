@@ -201,6 +201,8 @@ Pooler loading checks the configuration and every parameter on CPU before moving
 
 Add `--forensic ./models/forensic` for a separately trained, Hugging Face-compatible forensic CLIP image encoder. This interface reads pooled image features. Every compared mode uses the same encoder set and cached sample identities. Image edits, JPEG compression, or resizing are followed by extraction of both physical and deep features.
 
+Physical and deep caches must agree on selected frames and the declared benchmark contract as well as sample IDs, content metadata, and image fingerprints. Cache alignment accepts equivalent relative slash styles and split aliases, validates physical row uniqueness before reindexing, and leaves both input archives unchanged.
+
 ## Train and Predict
 
 The [training pipeline](engine/learning.py) consumes the cached records with their supplied `train`, `validation`, and `test` roles. Encoders remain frozen. Each epoch shuffles training indices with the run seed and samples mini-batches of 64 records; a final smaller batch is retained. Training records fit the feature standardizers and source references, and train the projections, residual attention, and news head. After each epoch, validation Macro-F1 selects the checkpoint and controls early stopping with patience 5. The selected checkpoint is then used for the final test run.
