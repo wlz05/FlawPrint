@@ -6,6 +6,7 @@ import copy
 from dataclasses import asdict, replace
 import hashlib
 import io
+import json
 import os
 from pathlib import Path
 from pickle import UnpicklingError
@@ -15,7 +16,7 @@ import re
 import tempfile
 import numpy as np
 import torch
-from sklearn.model_selection import GroupKFold
+from sklearn.model_selection import GroupKFold, StratifiedGroupKFold
 from engine import embeddings
 from engine.conformal import calibrate_rows, apply_calibration, validate_labels
 from engine.data import audit_splits
@@ -27,8 +28,87 @@ from engine.provenance import source_digest
 from engine.storage import relative_path, subset, read_json, write_json, validate_bundle, digest
 from engine.traces import NAMES
 
+def agreement(features: dict, observed: np.ndarray) -> np.ndarray:
+    # Reuse stable shared-space normalization for cosine agreement.
+    return pairing(features, observed)[:, -2:]
+
+def pairing(features: dict, observed: np.ndarray) -> np.ndarray:
+    if not isinstance(features, dict) or not {"clip_text", "clip_image"}.issubset(features):
+        raise ValueError("Pairing requires both CLIP feature streams")
+    names = list(features)
+    first, second = (np.asarray(features[name], dtype=np.float64) for name in ("clip_text", "clip_image"))
+    if first.ndim != 2 or first.shape != second.shape or first.shape[1] < 1 or not isinstance(observed, np.ndarray) or observed.dtype != np.bool_ or observed.shape != (len(first), len(names)):
+        raise ValueError("Pairing requires aligned CLIP dimensions and Boolean masks")
+    flags = [observed[:, names.index(name)] for name in ("clip_text", "clip_image")]
+    vectors, available = [], []
+    for values, present in zip((first, second), flags):
+        values = np.where(present[:, None], values, 0)
+        if not np.isfinite(values).all():
+            raise ValueError("Observed CLIP pairing features must be finite")
+        scale = np.abs(values).max(-1, keepdims=True)
+        scaled = values / np.maximum(scale, np.finfo(np.float64).tiny)
+        norm = np.linalg.norm(scaled, axis=-1, keepdims=True)
+        vectors.append(scaled / np.maximum(norm, np.finfo(np.float64).tiny))
+        available.append(present & (scale[:, 0] > 0))
+    valid = available[0] & available[1]
+    # Retain shared-space pair structure before separate stream transforms.
+    product = vectors[0] * vectors[1]
+    difference = np.abs(vectors[0] - vectors[1])
+    payload = np.column_stack((product, difference, np.clip(product.sum(-1), -1, 1)))
+    payload[~valid] = 0
+    return np.column_stack((payload, valid)).astype(np.float32)
+
+def pairing_tensor(text: torch.Tensor, image: torch.Tensor, observed: torch.Tensor) -> torch.Tensor:
+    if not isinstance(text, torch.Tensor) or not isinstance(image, torch.Tensor) or not isinstance(observed, torch.Tensor) or text.ndim != 2 or text.shape[1] < 1 or image.shape != text.shape or not text.is_floating_point() or image.dtype != text.dtype or image.device != text.device or observed.dtype != torch.bool or observed.shape != (len(text), 2) or observed.device != text.device:
+        raise ValueError("Live pairing requires aligned CLIP tensors and Boolean masks")
+    vectors, available = [], []
+    for column, values in enumerate((text, image)):
+        values = values.double().masked_fill(~observed[:, column, None], 0)
+        if not torch.isfinite(values).all():
+            raise ValueError("Observed live CLIP features must be finite")
+        scale = values.abs().amax(-1, keepdim=True)
+        scaled = values / scale.clamp_min(torch.finfo(values.dtype).tiny)
+        norm = torch.linalg.vector_norm(scaled, dim=-1, keepdim=True)
+        vectors.append(scaled / norm.clamp_min(torch.finfo(values.dtype).tiny))
+        available.append(observed[:, column] & (scale[:, 0] > 0))
+    valid = available[0] & available[1]
+    product = vectors[0] * vectors[1]
+    payload = torch.cat((product, (vectors[0] - vectors[1]).abs(), product.sum(-1, keepdim=True).clamp(-1, 1)), dim=-1)
+    payload = payload.masked_fill(~valid[:, None], 0)
+    return torch.cat((payload, valid[:, None].to(payload.dtype)), dim=-1).to(text.dtype)
+
 def groups(rows: list[dict]) -> np.ndarray:
     return np.asarray(components(rows))
+
+def reference_folds(rows: list[dict], folds: int, seed: int, balanced: bool = False, min_samples: int = 20):
+    identifiers = groups(rows)
+    if not balanced:
+        return list(GroupKFold(folds).split(rows, groups=identifiers))
+    if any(row.get("split") != "train" for row in rows):
+        raise ValueError("Reference balancing requires training rows only")
+    labels = validate_labels(np.asarray([row.get("label") for row in rows]))
+    unique, inverse = np.unique(identifiers, return_inverse=True)
+    if folds == 2 and 2 <= len(unique) <= 16:
+        sizes = np.bincount(inverse)
+        positives = np.bincount(inverse, weights=labels)
+        total, positive = len(rows), labels.sum()
+        minimum = max(min_samples, int(np.ceil(total * .2)))
+        best, selected = None, None
+        # Preserve the source mixture without splitting related news groups.
+        for bits in range((1 << (len(unique) - 1)) - 1):
+            assignment = np.asarray([True] + [bool(bits & (1 << index)) for index in range(len(unique) - 1)])
+            count = int(sizes[assignment].sum())
+            if min(count, total - count) < minimum:
+                continue
+            first = positives[assignment].sum()
+            drift = max(abs(first / count - positive / total), abs((positive - first) / (total - count) - positive / total))
+            objective = (float(drift), abs(2 * count - total))
+            if best is None or objective < best:
+                best, selected = objective, assignment[inverse]
+        if selected is not None:
+            first, second = np.flatnonzero(selected), np.flatnonzero(~selected)
+            return [(first, second), (second, first)]
+    return list(StratifiedGroupKFold(folds, shuffle=True, random_state=seed).split(rows, labels, groups=identifiers))
 
 def relation(profile: DomainProfile, bundle: dict) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     if any(profile.overlap(bundle["rows"])):
@@ -52,13 +132,16 @@ def relation(profile: DomainProfile, bundle: dict) -> tuple[np.ndarray, np.ndarr
     ranks[~observed] = 0
     return ranks.astype(np.float32), graph.astype(np.float32), observed
 
-def prepare(bundle: dict, archive: dict, config: ProfileConfig, folds: int, use_reference: bool = True) -> tuple[dict, dict]:
+def prepare(bundle: dict, archive: dict, config: ProfileConfig, folds: int, use_reference: bool = True, use_alignment: bool = False, balanced: bool = False, use_pairing: bool = False) -> tuple[dict, dict]:
     validate_bundle(bundle)
     audit_splits(bundle["rows"])
     features, observed = embeddings.align(bundle, archive)
+    aligned = {"alignment": agreement(features, observed)} if use_alignment else {}
+    if use_pairing:
+        aligned["pairing"] = pairing(features, observed)
     if not use_reference:
         samples, dimension = len(bundle["rows"]), len(bundle["names"])
-        return {"features": features, "observed": observed, "ranks": np.zeros((samples, dimension), dtype=np.float32), "graph": np.zeros((samples, dimension, dimension), dtype=np.float32), "trace_observed": np.zeros((samples, dimension), dtype=bool)}, {}
+        return {**aligned, "features": features, "observed": observed, "ranks": np.zeros((samples, dimension), dtype=np.float32), "graph": np.zeros((samples, dimension, dimension), dtype=np.float32), "trace_observed": np.zeros((samples, dimension), dtype=bool)}, {}
     profiles = {}
 
     def fit_reference(indices: list[int], domain: str) -> DomainProfile | None:
@@ -97,13 +180,14 @@ def prepare(bundle: dict, archive: dict, config: ProfileConfig, folds: int, use_
         if len(np.unique(labels)) < folds:
             continue
         # Fit each training reference without its query groups.
-        for fit, query in GroupKFold(folds).split(training, groups=labels):
+        for fit, query in reference_folds([bundle["rows"][index] for index in training], folds, config.seed, balanced, config.min_samples):
             fitting_indices = [training[index] for index in fit]
             querying = [training[index] for index in query]
             reference = fit_reference(fitting_indices, domain)
             if reference is not None:
                 assign(querying, reference)
     packet = {"features": features, "observed": observed, "ranks": ranks, "graph": graph, "trace_observed": trace_mask}
+    packet.update(aligned)
     return packet, profiles
 
 def standardize(packet: dict, training: list[int], state: dict | None = None) -> tuple[dict, dict]:
@@ -135,6 +219,10 @@ def standardize(packet: dict, training: list[int], state: dict | None = None) ->
 def batch(packet: dict, indices: list[int], device: str) -> dict:
     output = {name: torch.as_tensor(packet[name][indices], device=device) for name in ("observed", "ranks", "graph", "trace_observed")}
     output["features"] = {name: torch.as_tensor(values[indices], device=device) for name, values in packet["features"].items()}
+    if "alignment" in packet:
+        output["alignment"] = torch.as_tensor(packet["alignment"][indices], device=device)
+    if "pairing" in packet:
+        output["pairing"] = torch.as_tensor(packet["pairing"][indices], device=device)
     return output
 
 def logits(model: ResidualAttention, packet: dict, indices: list[int], device: str, size: int, diagnostics: dict | None = None) -> np.ndarray:
@@ -303,7 +391,7 @@ def fit(bundle: dict, archive: dict, output: str, config: NeuralConfig, profile_
         torch.cuda.manual_seed_all(config.seed)
     torch.backends.cudnn.benchmark = False
     torch.backends.cudnn.deterministic = True
-    packet, profiles = prepare(bundle, archive, profile_config, config.folds, config.mode != "deep")
+    packet, profiles = prepare(bundle, archive, profile_config, config.folds, config.mode != "deep", config.aligned, config.balanced_reference, config.paired)
     rows = bundle["rows"]
     partitions = {role: [index for index, row in enumerate(rows) if row["split"] == role] for role in ("train", "validation", "calibration")}
     if any(not partitions[role] for role in ("train", "validation")):
@@ -332,7 +420,8 @@ def fit(bundle: dict, archive: dict, output: str, config: NeuralConfig, profile_
             optimizer.zero_grad(set_to_none=True)
             predicted = model(**batch(packet, indices, device))
             target = torch.as_tensor([rows[index]["label"] for index in indices], dtype=torch.float32, device=device)
-            loss = torch.nn.functional.binary_cross_entropy_with_logits(predicted["logit"], target)
+            smoothed = target * (1 - config.label_smoothing) + config.label_smoothing / 2
+            loss = torch.nn.functional.binary_cross_entropy_with_logits(predicted["logit"], smoothed)
             available = [position for position, index in enumerate(indices) if isinstance(rows[index].get("physical_manipulated"), (bool, np.bool_)) and rows[index].get("image")]
             if available and config.auxiliary_weight:
                 # Image supervision uses manipulation labels rather than news labels.
@@ -347,7 +436,8 @@ def fit(bundle: dict, archive: dict, output: str, config: NeuralConfig, profile_
             total += float(loss.detach()) * len(indices)
         risks = logits(model, packet, partitions["validation"], device, config.batch_size)
         validation = binary(labels["validation"], risks)
-        history.append({"epoch": epoch + 1, "loss": total / len(order), "validation_macro_f1": validation["macro_f1"], "image_supervised_samples": auxiliary_count})
+        history.append({"epoch": epoch + 1, "loss": total / len(order), "validation_macro_f1": validation["macro_f1"], "validation_accuracy": validation["accuracy"], "validation_auc": validation["auc"], "image_supervised_samples": auxiliary_count})
+        print(json.dumps({"stage": "training", "seed": config.seed, **history[-1]}, allow_nan=False), flush=True)
         if validation["macro_f1"] > best_score:
             best_score, patience = validation["macro_f1"], 0
             selected_epoch = epoch + 1
@@ -366,6 +456,11 @@ def fit(bundle: dict, archive: dict, output: str, config: NeuralConfig, profile_
     metadata["embedding_protocol"] = embeddings.protocol(archive)
     metadata["partition_counts"] = {role: sum(row["split"] == role for row in rows) for role in ("train", "validation", "calibration", "profile", "test")}
     metadata["partition_policy"] = "Preserve supplied sample identities and partition roles"
+    policies = {row.get("benchmark_protocol", "strict-content") for row in rows}
+    metadata["benchmark_protocols"] = sorted(policies)
+    if policies == {"finefake-paper-3407"}:
+        metadata["paper_content_overlap"] = {name: len(values) for name, values in audit_splits(rows)["leakage"].items()}
+    metadata["reference_partition_policy"] = "Source group partitions with class proportion preservation" if config.balanced_reference else "GroupKFold source partitions"
     metadata["selected_epoch"] = selected_epoch
     metadata["calibration_protocol"] = "independent_source_partitions" if state is not None else "uncalibrated"
     publish(destination, best, profiles, metadata, provenance)
@@ -399,9 +494,16 @@ def predict(bundle: dict, archive: dict, directory: str, split: str = "test", de
     rows = [bundle["rows"][index] for index in indices]
     if set(metadata["fit_identifiers"]) & {row["id"] for row in rows}:
         raise ValueError("Neural evaluation identities overlap fitting or calibration")
+    expected_protocols = set(metadata.get("benchmark_protocols", ["strict-content"]))
+    if {row.get("benchmark_protocol", "strict-content") for row in rows} != expected_protocols:
+        raise ValueError("Prediction rows must use the checkpoint benchmark protocol")
     ensure_disjoint(rows, metadata["fit_history"])
     selected = subset(bundle, indices)
     packet = {"features": {name: value[indices] for name, value in features.items()}, "observed": observed[indices], "ranks": np.zeros_like(selected["values"], dtype=np.float32), "graph": np.zeros((len(rows), len(bundle["names"]), len(bundle["names"])), dtype=np.float32), "trace_observed": np.zeros_like(selected["observed"])}
+    if config.aligned:
+        packet["alignment"] = agreement(packet["features"], packet["observed"])
+    if config.paired:
+        packet["pairing"] = pairing(packet["features"], packet["observed"])
     for domain in sorted({row["domain"] for row in rows}):
         reference = reference_domain or domain
         if reference not in metadata["profiles"]:

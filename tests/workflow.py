@@ -297,6 +297,113 @@ class WorkflowTests(unittest.TestCase):
     def test_repository_conventions_are_clean(self) -> None:
         self.assertTrue(conventions()["passed"])
 
+class OfficialTests(unittest.TestCase):
+    def test_small_frequency_tiles_stay_finite(self):
+        from engine.traces import pixel_traces
+        rng = np.random.default_rng(42)
+        for shape in ((8, 8, 3), (8, 19, 3), (32, 32, 3)):
+            for values in (np.zeros(shape), rng.random(shape)):
+                self.assertTrue(np.isfinite(pixel_traces(values)).all())
+
+    def test_noise_slope_matches_patch_definition(self):
+        from engine.traces import noise_slope
+        rng = np.random.default_rng(42)
+        for shape in ((8, 8), (16, 16), (57, 79), (192, 192)):
+            gray, residual = rng.random(shape), rng.normal(size=shape)
+            values = np.asarray([(gray[y:y+8, x:x+8].mean(), residual[y:y+8, x:x+8].var(), gray[y:y+8, x:x+8].var()) for y in range(0, shape[0]-7, 8) for x in range(0, shape[1]-7, 8)])
+            expected = 0.0
+            if len(values) >= 4:
+                values = values[values[:, 2] <= np.quantile(values[:, 2], 0.5)]
+                if len(values) >= 3 and np.ptp(values[:, 0]) >= 1e-8:
+                    expected = float(np.polyfit(values[:, 0], values[:, 1], 1)[0])
+            self.assertAlmostEqual(noise_slope(gray, residual), expected, places=11)
+
+    def test_parallel_trace_output_matches_serial(self):
+        from engine.traces import extract, TraceConfig
+        rows = [{"id": str(i), "image": "", "text": "Example caption " + str(i)} for i in range(4)]
+        serial = extract(rows, TraceConfig(), workers=1)
+        parallel = extract(rows, TraceConfig(), workers=2)
+        for first, second in zip(serial[:3], parallel[:3]):
+            np.testing.assert_array_equal(first, second)
+        self.assertEqual(serial[3], parallel[3])
+
+    def paper(self, ordinal, role):
+        return {"id": "finefake:" + str(ordinal), "source_ordinal": ordinal, "group": "finefake:" + str(ordinal), "split": role, "benchmark_protocol": "finefake-paper-3407", "text": "Shared published caption.", "image": "", "domain": "Politics", "label": 0}
+
+    def test_paper_protocol_reports_overlap_and_preserves_rows(self):
+        from engine.data import audit_splits
+        rows = [self.paper(0, "train"), self.paper(1, "test")]
+        report = audit_splits(rows)
+        self.assertEqual(len(report["leakage"]["text"]), 1)
+        self.assertEqual(report["benchmark_protocol"], "finefake-paper-3407")
+        self.assertEqual([row["split"] for row in rows], ["train", "test"])
+
+    def test_paper_history_preserves_within_role_exclusion(self):
+        from engine.lineage import collect, overlaps
+        history = collect([self.paper(0, "train")])
+        self.assertEqual(overlaps([self.paper(1, "test")], history), [False])
+        self.assertEqual(overlaps([self.paper(2, "train")], history), [True])
+        self.assertEqual(overlaps([self.paper(0, "test")], history), [True])
+
+    def test_paper_contract_rejects_unknown_and_mixed_policies(self):
+        from engine.data import audit_splits
+        first, second = self.paper(0, "train"), self.paper(1, "test")
+        second.pop("benchmark_protocol")
+        with self.assertRaises(ValueError):
+            audit_splits([first, second])
+        first["benchmark_protocol"] = "finefake-paper-42"
+        with self.assertRaises(ValueError):
+            audit_splits([first])
+        first = self.paper(0, "profile")
+        with self.assertRaises(ValueError):
+            audit_splits([first])
+
+    def test_strict_content_policy_still_rejects_shared_text(self):
+        from engine.data import audit_splits
+        rows = [self.paper(0, "train"), self.paper(1, "test")]
+        for row in rows:
+            row.pop("benchmark_protocol")
+        with self.assertRaises(ValueError):
+            audit_splits(rows)
+
+    def test_first_frame_and_physical_fallback_keep_news_images(self):
+        import tempfile
+        from pathlib import Path
+        from PIL import Image
+        from engine.traces import extract_one, TraceConfig
+        with tempfile.TemporaryDirectory(dir=".") as directory:
+            path = Path(directory).resolve().relative_to(Path.cwd().resolve()) / "animated.gif"
+            first = Image.new("RGB", (64, 64), "red")
+            second = Image.new("RGB", (64, 64), "blue")
+            first.save(path, save_all=True, append_images=[second], duration=100)
+            row = {"id": "news", "text": "A caption.", "image": path.as_posix(), "image_frame": 0}
+            values, observed, patches, metadata = extract_one(row, TraceConfig())
+            self.assertTrue(metadata["has_image"])
+            self.assertTrue(observed[:20].any())
+            row["physical_trace_disabled"] = True
+            values, observed, patches, metadata = extract_one(row, TraceConfig())
+            self.assertTrue(metadata["has_image"])
+            self.assertFalse(observed[:20].any())
+            self.assertTrue(observed[20:].all())
+            row["image_frame"] = True
+            with self.assertRaises(ValueError):
+                extract_one(row, TraceConfig())
+
+    def test_disabled_physical_traces_reject_stale_image_identity(self):
+        from engine.storage import digest
+        from engine.traces import extract_one, TraceConfig
+        with tempfile.TemporaryDirectory(dir="./tmp") as directory:
+            path = Path(directory).resolve().relative_to(Path.cwd().resolve()) / "narrow.png"
+            Image.new("RGB", (8, 64), "red").save(path)
+            row = {"id": "narrow", "text": "A caption.", "image": path.as_posix(), "physical_trace_disabled": True, "content_sha256": "0" * 64}
+            with self.assertRaisesRegex(ValueError, "checksum is stale"):
+                extract_one(row, TraceConfig())
+            row["content_sha256"] = digest(path)
+            _, observed, _, metadata = extract_one(row, TraceConfig())
+            self.assertEqual(metadata["content_sha256"], row["content_sha256"])
+            self.assertFalse(observed[:20].any())
+            self.assertTrue(metadata["has_image"])
+
 if __name__ == "__main__":
     unittest.main()
 

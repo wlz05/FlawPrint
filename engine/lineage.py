@@ -3,22 +3,29 @@
 
 from __future__ import annotations
 import os
+import hashlib
 import re
-from engine.data import identifier, missing, portable_image, text_fingerprint
+from engine.data import identifier, missing, portable_image, text_fingerprint, row_namespace
 from engine.storage import resolved
 
 FIELDS = ("group", "image", "content_sha256", "text_sha256")
 
 def evidence(row: dict, field: str) -> object:
     value = row.get(field)
-    if field != "text_sha256":
-        return value
-    fingerprint = text_fingerprint(row.get("text"))
-    if not missing(value):
-        if not isinstance(value, str) or re.fullmatch("[0-9a-f]{64}", value) is None or fingerprint is not None and value != fingerprint:
-            raise ValueError("Stored text fingerprints must match the news text")
-        return value
-    return fingerprint
+    if field == "text_sha256":
+        fingerprint = text_fingerprint(row.get("text"))
+        if not missing(value):
+            if not isinstance(value, str) or re.fullmatch("[0-9a-f]{64}", value) is None or fingerprint is not None and value != fingerprint:
+                raise ValueError("Stored text fingerprints must match the news text")
+        else:
+            value = fingerprint
+    namespace = row_namespace(row)
+    if namespace and field != "group" and not missing(value):
+        # Keep paper roles distinct while retaining within-role duplicate groups.
+        if field == "image":
+            return "benchmark/" + namespace + "/" + portable_image(value)
+        return hashlib.sha256((namespace + "|" + identifier(value)).encode("utf-8")).hexdigest()
+    return value
 
 def identity(field: str, value: object) -> str | None:
     if missing(value):

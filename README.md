@@ -71,6 +71,8 @@ FlawPrint/
 | GPU | Single NVIDIA GeForce RTX 4090 |
 | Seeds | 42, 52, 3047, 3407 |
 
+The server training environment uses Python 3.12.3, PyTorch 2.12.1+cu130, and Transformers 4.57.6. Keep the encoder checkpoints, processors, and preprocessing settings fixed when comparing runs.
+
 Install the [PyTorch build](https://pytorch.org/get-started/locally/) for your CUDA environment, then install the dependencies:
 
 ```bash
@@ -118,6 +120,8 @@ For a new machine, create its virtual environment and rerun the installation com
 
 Use these existing partition files for every run. Training seeds **42, 52, 3047, and 3407** change model initialization and training order; sample identities and partition membership stay fixed. FineFake's partition seed 3407 is separate from the training seed. The [experiment preset](engine/package.py) records the paths, label conventions, partition policy, and runtime settings.
 
+The released EANN Weibo ID dictionaries contain **5,415 training, 843 validation, and 1,465 test records**. Preserve their membership and event groups when preparing tables; event groups remain grouping variables. FineFake's **16,909 released rows** produce **10,145 training, 3,382 validation, and 3,382 test records** under the fixed paper partition. Keep each released row's ordinal before creating these files. The `finefake-paper-3407` contract records `id = finefake:<source_ordinal>`, `group = id`, and the existing partition role; canonical conversion retains this metadata.
+
 Weibo and Weibo21 annotations use **0 = real, 1 = fake**. FineFake annotations use **0 = fake, 1 = real**; conversion maps them to the common FlawPrint convention **0 = real, 1 = fake**. The seven FineFake domain slots include `Uncategorized`.
 
 ## Prepare Data
@@ -137,6 +141,9 @@ Run commands from the repository root. All image, model, and output paths are re
 | `label` | News-veracity label; absent from target profile rows |
 | `physical_manipulated` | Optional independently observed Boolean image attribute |
 | `content_sha256` | Image-byte fingerprint populated by extraction |
+| `image_frame` | Explicit `0` to use the first frame of an animated or multipage image |
+| `physical_trace_disabled` | Boolean disabling image trace coordinates while retaining the image for deep encoding |
+| `benchmark_protocol` / `source_ordinal` | FineFake paper partition contract and immutable released row ordinal |
 
 Do not infer `physical_manipulated` from news labels. Missing attributes remain unknown. The `schema`, `conversion`, and `labels` presets in [engine/package.py](engine/package.py) define the row contract and conversion rules.
 
@@ -168,11 +175,23 @@ Place complete Hugging Face checkpoints, tokenizer assets, and processor files i
 
 Each directory contains `config.json` and its weights, including every shard when an index file is present. BERT also needs its tokenizer assets; MAE needs its image processor; CLIP needs both its tokenizer and image processor. Copy the actual files into these local directories. Encoder extraction requires the original images, while cached training and prediction use the prepared NPZ archives.
 
+Chinese-CLIP text features use the projected class token. When an image has several frames, set `image_frame` explicitly in the manifest; extraction uses the same selected frame for physical and deep features. For images that cannot support the physical tile grid, set `physical_trace_disabled` to `true`. Their image content remains available to MAE and CLIP, and their image trace coordinates are masked.
+
 `deep.py` retains the BERT and MAE class-token vectors and both projected CLIP vectors. MAE uses all patches in fixed order. BERT and CLIP text are truncated to the smaller of the requested length, tokenizer limit, and checkpoint context. The archive records the requested and effective lengths, vector readouts, encoder hashes, availability masks, identities, and image checksums. Cache replacement is atomic; failed writes preserve an existing archive.
 
 ```bash
 python -B deep.py extract ./data/manifest.jsonl --bert ./models/bert --mae ./models/mae --clip ./models/clip --batch-size 64 --max-length 128 --device cuda:0 --output ./data/deep.npz
 ```
+
+Extraction also supports the following controls:
+
+| Option | Default | Alternative |
+|---|---|---|
+| `--text-processing` | `identity`: retain the original text | `eann`: released EANN cleaning, followed by lowercase conversion |
+| `--pooling` | `cls`: BERT and MAE class tokens | `summary`: concatenate class, observed-word or patch mean, and maximum vectors |
+| `--image-processing` | `model`: checkpoint MAE processor | `ddin`: bilinear resize of the short side to 256, center crop to 224, and ImageNet normalization |
+
+A local text checkpoint containing both `pooler.json` and `pooler.pt` restores its trained class-token and CNN readout automatically. The cache records the actual readout, preprocessing definition, and encoder identity. Training and prediction require matching feature protocols; regenerate caches together when changing these settings.
 
 Add `--forensic ./models/forensic` for a separately trained, Hugging Face-compatible forensic CLIP image encoder. This interface reads pooled image features. Every compared mode uses the same encoder set and cached sample identities. Image edits, JPEG compression, or resizing are followed by extraction of both physical and deep features.
 
@@ -181,6 +200,21 @@ Add `--forensic ./models/forensic` for a separately trained, Hugging Face-compat
 The [training pipeline](engine/learning.py) consumes the cached records with their supplied `train`, `validation`, and `test` roles. Encoders remain frozen. Each epoch shuffles training indices with the run seed and samples mini-batches of 64 records; a final smaller batch is retained. Training records fit the feature standardizers and source references, and train the projections, residual attention, and news head. After each epoch, validation Macro-F1 selects the checkpoint and controls early stopping with patience 5. The selected checkpoint is then used for the final test run.
 
 Validation ties retain the first best epoch. `selected_epoch` records that epoch in `model.json` and the training summary; saved parameters come from this selected state.
+
+Each epoch prints training loss and validation Macro-F1, Accuracy, and AUC. The optional settings below belong in the relative JSON supplied through `--config`; omitted settings retain the built-in defaults.
+
+| Setting | Default | Operation |
+|---|---|---|
+| `trace_dropout` | `0.0` | Mask a sample's trace channel during training with the specified probability |
+| `label_smoothing` | `0.0` | Smooth source training targets |
+| `aligned` | `false` | Preserve CLIP cosine similarity before separate stream normalization |
+| `paired` | `false` | Preserve CLIP coordinate products, absolute differences, and cosine similarity in a pair node |
+| `balanced_reference` | `false` | Preserve source class proportions while assigning intact groups to reference folds |
+| `content_query` | `false` | Initialize the classification query from available content nodes |
+| `field_only` | `false` | Use fixed trace anchors to condition attention over content values |
+| `unit_coordinates` | `false` | Normalize anchor-reading vectors by their Euclidean norm |
+
+These controls are saved with the selected model and restored during prediction. They do not change the formal train, validation, or test membership. The standard CRA configuration keeps them disabled.
 
 After interrupted training, rerun the command with the same caches, configuration, and seed using a new or still-empty model directory. Training begins at epoch 1. The complete selected checkpoint is published as one directory; a failed final rename restores a pre-existing empty destination.
 

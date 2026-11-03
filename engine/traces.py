@@ -3,7 +3,9 @@
 
 from __future__ import annotations
 from dataclasses import dataclass
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor
+from functools import partial
+from multiprocessing import get_context
 import re
 import unicodedata
 import numpy as np
@@ -37,18 +39,24 @@ def radial_slope(gray: np.ndarray) -> float:
     yy, xx = np.indices(gray.shape)
     radius = np.sqrt(((yy - gray.shape[0] / 2) / gray.shape[0]) ** 2 + ((xx - gray.shape[1] / 2) / gray.shape[1]) ** 2)
     edges = np.linspace(0.12, 0.48, 13)
-    means = [np.mean(power[(radius >= left) & (radius < right)]) for left, right in zip(edges[:-1], edges[1:])]
-    return float(np.polyfit(np.log((edges[:-1] + edges[1:]) / 2), np.log(np.maximum(means, 1e-12)), 1)[0])
+    bins = [power[(radius >= left) & (radius < right)] for left, right in zip(edges[:-1], edges[1:])]
+    available = np.asarray([len(values) > 0 for values in bins])
+    if available.sum() < 2:
+        return 0.0
+    # Fit only frequency bins supported by the raster.
+    means = np.asarray([values.mean() for values in bins if len(values)])
+    centers = ((edges[:-1] + edges[1:]) / 2)[available]
+    return float(np.polyfit(np.log(centers), np.log(np.maximum(means, 1e-12)), 1)[0])
 
 def noise_slope(gray: np.ndarray, residual: np.ndarray) -> float:
-    samples = []
-    for y in range(0, gray.shape[0] - 7, 8):
-        for x in range(0, gray.shape[1] - 7, 8):
-            patch = gray[y:y + 8, x:x + 8]
-            samples.append((patch.mean(), residual[y:y + 8, x:x + 8].var(), patch.var()))
-    if len(samples) < 4:
+    height, width = gray.shape[0] // 8 * 8, gray.shape[1] // 8 * 8
+    if height == 0 or width == 0:
         return 0.0
-    values = np.asarray(samples)
+    pixels = gray[:height, :width].reshape(height // 8, 8, width // 8, 8).transpose(0, 2, 1, 3)
+    noise = residual[:height, :width].reshape(height // 8, 8, width // 8, 8).transpose(0, 2, 1, 3)
+    values = np.stack((pixels.mean((2, 3)), noise.var((2, 3)), pixels.var((2, 3))), axis=-1).reshape(-1, 3)
+    if len(values) < 4:
+        return 0.0
     values = values[values[:, 2] <= np.quantile(values[:, 2], 0.5)]
     if len(values) < 3 or np.ptp(values[:, 0]) < 1e-8:
         return 0.0
@@ -101,18 +109,28 @@ def narrative_traces(text: str) -> np.ndarray:
 
 def extract_one(row: dict, config: TraceConfig) -> tuple[np.ndarray, np.ndarray, np.ndarray, dict]:
     config.validate()
-    if not row.get("image"):
+    if "image_frame" in row and (type(row["image_frame"]) is not int or row["image_frame"] != 0):
+        raise ValueError("Only first-frame image selection is supported")
+    if not isinstance(row.get("physical_trace_disabled", False), (bool, np.bool_)):
+        raise ValueError("Physical trace availability must be Boolean")
+    if not row.get("image") or row.get("physical_trace_disabled", False):
         values = np.r_[np.zeros(20), narrative_traces(row.get("text", ""))]
         observed = np.r_[np.zeros(20, dtype=bool), np.ones(6, dtype=bool)]
         patches = np.zeros((config.tile_grid ** 2, len(NAMES)))
-        return values, observed, patches, dict(row, has_image=False, physical_input_status="missing_image", trace_version="flawprint-traces-v1")
+        metadata = dict(row, has_image=bool(row.get("image")), physical_input_status="disabled_geometry" if row.get("image") else "missing_image", trace_version="flawprint-traces-v1")
+        if row.get("image"):
+            metadata["content_sha256"] = digest(relative_path(row["image"]))
+            if row.get("content_sha256") and row["content_sha256"] != metadata["content_sha256"]:
+                raise ValueError("The manifest image checksum is stale")
+        return values, observed, patches, metadata
     path = relative_path(row["image"])
     content_hash = digest(path)
     if row.get("content_sha256") and row["content_sha256"] != content_hash:
         raise ValueError("The manifest image checksum is stale")
     with Image.open(path) as image:
-        if getattr(image, "n_frames", 1) > 1:
+        if getattr(image, "n_frames", 1) > 1 and row.get("image_frame") != 0:
             raise ValueError("Animated or multipage inputs require an explicit still-image conversion")
+        image.seek(0)
         original_width, original_height = image.size
         if min(image.size) < config.min_side:
             raise ValueError(f"Image is too small: {row['id']}")
@@ -147,8 +165,14 @@ def extract(rows: list[dict], config: TraceConfig, workers: int = 1) -> tuple[np
     if not rows or isinstance(workers, bool) or not isinstance(workers, int) or workers < 1:
         raise ValueError("Provide samples and a positive worker count")
     config.validate()
-    with ThreadPoolExecutor(max_workers=workers) as executor:
-        result = list(executor.map(lambda row: extract_one(row, config), rows))
+    executor_type = ProcessPoolExecutor if workers > 1 else ThreadPoolExecutor
+    options = {"mp_context": get_context("spawn")} if workers > 1 else {}
+    with executor_type(max_workers=workers, **options) as executor:
+        result = []
+        for index, value in enumerate(executor.map(partial(extract_one, config=config), rows)):
+            result.append(value)
+            if len(rows) > 100 and ((index + 1) % 500 == 0 or index + 1 == len(rows)):
+                print("Trace extraction: " + str(index + 1) + "/" + str(len(rows)), flush=True)
     values, observed, patches, metadata = zip(*result)
     return np.asarray(values), np.asarray(observed), np.asarray(patches), list(metadata)
 

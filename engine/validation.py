@@ -83,20 +83,22 @@ def preflight(records: list[dict], check_images: bool = False, benchmark: bool =
                 continue
             path = relative_path(row["image"])
             try:
-                if path.as_posix() not in cache:
+                cache_key = (path.as_posix(), row.get("image_frame"), row.get("physical_trace_disabled", False))
+                if cache_key not in cache:
                     with Image.open(path) as image:
-                        if getattr(image, "n_frames", 1) > 1:
+                        if getattr(image, "n_frames", 1) > 1 and row.get("image_frame") != 0:
                             raise ValueError("Animated or multipage inputs require an explicit still-image conversion")
+                        image.seek(0)
                         width, height = image.size
                         image.load()
                         image_format = image.format
-                    if min(width, height) < config.min_side:
+                    if not row.get("physical_trace_disabled", False) and min(width, height) < config.min_side:
                         raise ValueError("Image is smaller than min-side")
                     scale = min(1.0, config.max_side / max(width, height))
-                    if int(min(width, height) * scale) < config.tile_grid * 8:
+                    if not row.get("physical_trace_disabled", False) and int(min(width, height) * scale) < config.tile_grid * 8:
                         raise ValueError("Resized image cannot support the tile grid")
-                    cache[path.as_posix()] = {"path": path.as_posix(), "width": width, "height": height, "format": image_format, "sha256": digest(path)}
-                information = cache[path.as_posix()]
+                    cache[cache_key] = {"path": path.as_posix(), "width": width, "height": height, "format": image_format, "sha256": digest(path)}
+                information = cache[cache_key]
                 if row.get("content_sha256") and row["content_sha256"] != information["sha256"]:
                     raise ValueError("The manifest image checksum is stale")
                 hashes[information["sha256"]].add(row["split"])
@@ -105,7 +107,8 @@ def preflight(records: list[dict], check_images: bool = False, benchmark: bool =
                 errors.append(f"Image for {row['id']}: {error}")
         leaking = [checksum for checksum, partitions in hashes.items() if len(partitions) > 1]
         if leaking:
-            errors.append(f"Image bytes cross splits under {len(leaking)} content hashes")
+            destination = warnings if audit is not None and audit.get("benchmark_protocol") == "finefake-paper-3407" else errors
+            destination.append(f"Image bytes cross splits under {len(leaking)} content hashes")
     return {"version": "FlawPrint preflight 1", "passed": not errors, "errors": errors, "warnings": warnings, "samples": len(rows), "counts": {key: dict(value) for key, value in sorted(counts.items())}, "missing_images": missing_images, "empty_text": empty_text, "semantic_scores": semantic, "audit": audit, "image_check_requested": check_images, "images": image_report, "benchmark_check_requested": benchmark, "minimum_profile_size": min_samples, "calibration_available": bool(splits["calibration"]), "label_contract": "zero-real-one-fake", "path_base": "process working directory"}
 
 # Author: Weiliang Zhu

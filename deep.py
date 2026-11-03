@@ -122,6 +122,9 @@ def arguments() -> argparse.Namespace:
     extraction.add_argument("--forensic", help="Optional local forensic CLIP checkpoint in Hugging Face format")
     extraction.add_argument("--batch-size", type=int, default=64)
     extraction.add_argument("--max-length", type=int, default=128)
+    extraction.add_argument("--text-processing", choices=("identity", "eann"), default="identity")
+    extraction.add_argument("--pooling", choices=("cls", "summary"), default="cls")
+    extraction.add_argument("--image-processing", choices=("model", "ddin"), default="model")
     extraction.add_argument("--output", default="./data/deep.npz")
     training = commands.add_parser("train")
     training.add_argument("features")
@@ -175,7 +178,14 @@ def main() -> None:
                 raise ValueError("Embedding output must remain outside encoder directories")
             rows = normalize(read_rows(args.manifest))
             protect_outputs([args.output], [row["image"] for row in rows if row["image"]])
-            archive = embeddings.extract(rows, directories, args.batch_size, args.device, args.max_length)
+            options = {}
+            if getattr(args, "text_processing", "identity") != "identity":
+                options["text_processing"] = args.text_processing
+            if getattr(args, "pooling", "cls") != "cls":
+                options["pooling"] = args.pooling
+            if getattr(args, "image_processing", "model") != "model":
+                options["image_processing"] = args.image_processing
+            archive = embeddings.extract(rows, directories, args.batch_size, args.device, args.max_length, **options)
             if any(digest(item["path"]) != item["sha256"] for item in fingerprints):
                 raise ValueError("An input changed during feature extraction")
             archive["provenance"].update(inputs=fingerprints, source_sha256=source_digest())

@@ -50,6 +50,497 @@ class NeuralTests(unittest.TestCase):
         self.profile = ProfileConfig(bootstrap=2, min_samples=4, seed=42)
         self.config = NeuralConfig(dimension=16, heads=2, layers=1, dropout=0.0, epochs=12, batch_size=12, learning_rate=0.003, patience=12, seed=42)
 
+    def test_local_text_pooling_excludes_padding_and_special_tokens(self):
+        from engine.neural import TextPool
+        model = TextPool(8, 4).eval()
+        hidden = torch.randn(2, 7, 8)
+        mask = torch.tensor([[False, True, True, True, True, True, False], [False, True, True, False, False, False, False]])
+        first = model(hidden, mask)
+        changed = hidden.clone()
+        changed[:, -1] = torch.nan
+        torch.testing.assert_close(first, model(changed, mask))
+        padded = torch.cat((hidden, torch.full((2, 5, 8), torch.nan)), dim=1)
+        padded_mask = torch.cat((mask, torch.zeros(2, 5, dtype=torch.bool)), dim=1)
+        torch.testing.assert_close(first, model(padded, padded_mask))
+        self.assertEqual(tuple(first.shape), (2, 20))
+
+    def test_local_text_pooling_handles_short_empty_context_and_gradients(self):
+        from engine.neural import TextPool
+        model = TextPool(8, 4)
+        hidden = torch.randn(2, 2, 8, requires_grad=True)
+        mask = torch.tensor([[False, True], [False, False]])
+        result = model(hidden, mask)
+        self.assertTrue(torch.isfinite(result).all())
+        torch.testing.assert_close(result[1, 8:], torch.zeros(12))
+        result.sum().backward()
+        self.assertTrue(torch.isfinite(hidden.grad).all())
+        self.assertGreater(float(model.filters[0].weight.grad.abs().sum()), 0)
+        hidden = hidden.detach();hidden[0, 1] = torch.nan
+        with self.assertRaises(ValueError):
+            model(hidden, mask)
+
+    def test_local_text_pooling_reload_reproduces_features(self):
+        from engine.neural import TextPool
+        model = TextPool(8, 4).eval()
+        root = self.root / "encoder";root.mkdir()
+        write_json(root / "pooler.json", dict(version=1, hidden_size=8, width=4))
+        torch.save(model.state_dict(), root / "pooler.pt")
+        hidden = torch.randn(2, 7, 8);mask = torch.ones(2, 7, dtype=torch.bool)
+        restored = embeddings.load_pooler(root)
+        self.assertFalse(restored.training)
+        torch.testing.assert_close(model(hidden, mask), restored(hidden, mask))
+        (root / "pooler.pt").unlink()
+        with self.assertRaises(ValueError):
+            embeddings.load_pooler(root)
+        (root / "pooler.json").unlink()
+        self.assertIsNone(embeddings.load_pooler(root))
+
+    def test_unit_coordinates_remove_double_averaging(self):
+        logits = torch.zeros(2, 2, 8, 8)
+        observed = torch.ones(2, 8, dtype=torch.bool)
+        graph = torch.eye(3).expand(2, -1, -1)
+        original = potential(logits, observed, graph, "coupled")
+        normalized = potential(logits, observed, graph, "coupled", unit=True)
+        torch.testing.assert_close(normalized[:, :, :5, :5], original[:, :, :5, :5] * 3)
+        torch.testing.assert_close(normalized[:, :, 5:, 5:], original[:, :, 5:, 5:])
+        torch.testing.assert_close(normalized[:, :, :5, 5:], original[:, :, :5, 5:] * math.sqrt(3))
+
+    def test_unit_coordinates_bound_and_missing_anchor_gradients(self):
+        logits = torch.randn(3, 2, 9, 9, requires_grad=True)
+        observed = torch.ones(3, 9, dtype=torch.bool)
+        observed[0, 5:] = False
+        observed[1, 7:] = False
+        graph = torch.randn(3, 4, 4)
+        graph = (graph + graph.transpose(-1, -2)) / 2
+        result = potential(logits, observed, graph, "coupled", unit=True)
+        mask = observed[:, 5:]
+        graph = graph.masked_fill(~(mask[:, :, None] & mask[:, None]), 0)
+        bound = torch.linalg.matrix_norm(graph, ord=2)
+        self.assertTrue(torch.all(result.abs().amax((1, 2, 3)) <= bound + 1e-6))
+        self.assertEqual(float(result[0].abs().sum().detach()), 0)
+        result.square().sum().backward()
+        self.assertTrue(torch.isfinite(logits.grad).all())
+        with self.assertRaises(ValueError):
+            potential(logits, observed, graph, "coupled", unit=1)
+
+    def test_unit_coordinates_preserve_field_fallback_and_explanations(self):
+        model, inputs = self.field_inputs()
+        config = replace(model.config, unit_coordinates=True)
+        current = ResidualAttention({name: value.shape[1] for name, value in self.archive["features"].items()}, 26, config).eval()
+        current.load_state_dict(model.state_dict())
+        inputs["graph"] = torch.zeros_like(inputs["graph"])
+        first = current(**inputs, explain=True)
+        inputs["ranks"] = inputs["ranks"] + 5
+        second = current(**inputs, explain=True)
+        torch.testing.assert_close(first["logit"], second["logit"], atol=0, rtol=0)
+        for value in second.values():
+            self.assertTrue(torch.isfinite(value).all())
+        with self.assertRaises(ValueError):
+            replace(config, unit_coordinates=True, mode="concat", field_only=False).validate()
+
+    def test_pairing_preserves_structure_beyond_cosine_and_scale(self):
+        from engine.learning import pairing
+        features = {"clip_text": np.array([[1., 0., 0.], [1., 0., 0.], [0., 0., 0.], [np.nan, 0., 0.]]), "clip_image": np.array([[0., 1., 0.], [0., 0., 1.], [0., 1., 0.], [0., 1., 0.]])}
+        mask = np.ones((4, 2), dtype=bool);mask[3, 0] = False
+        result = pairing(features, mask)
+        self.assertEqual(result.shape, (4, 8))
+        np.testing.assert_array_equal(result[:2, -2], np.zeros(2))
+        self.assertFalse(np.array_equal(result[0], result[1]))
+        np.testing.assert_array_equal(result[2:], np.zeros((2, 8)))
+        scaled = {"clip_text": features["clip_text"] * 1e250, "clip_image": features["clip_image"] * 1e-200}
+        np.testing.assert_array_equal(result, pairing(scaled, mask))
+        with self.assertRaises(ValueError):
+            pairing(features, mask.astype(float))
+
+    def test_pairing_survives_independent_source_normalization(self):
+        from engine.learning import pairing
+        packet, _ = prepare(self.bundle, self.archive, self.profile, 2, use_pairing=True)
+        expected = pairing(self.archive["features"], self.archive["observed"])
+        normalized, _ = standardize(packet, list(range(12)))
+        np.testing.assert_array_equal(packet["pairing"], expected)
+        np.testing.assert_array_equal(normalized["pairing"], expected)
+
+    def test_pairing_uses_the_same_masked_content_selection(self):
+        from engine.learning import batch
+        packet, _ = prepare(self.bundle, self.archive, self.profile, 2, use_pairing=True)
+        inputs = batch(packet, list(range(4)), "cpu")
+        config = replace(self.config, paired=True, content_query=True, field_only=True, unit_coordinates=True)
+        model = ResidualAttention({name: value.shape[1] for name, value in self.archive["features"].items()}, 26, config).eval()
+        first = model(**inputs, explain=True)
+        for value in first.values():
+            self.assertTrue(torch.isfinite(value).all())
+        order = torch.tensor([2, 0, 3, 1])
+        permuted = {key: {name: value[order] for name, value in item.items()} if isinstance(item, dict) else item[order] for key, item in inputs.items()}
+        torch.testing.assert_close(model(**permuted)["logit"], first["logit"][order])
+        inputs["observed"][0, 2] = False
+        with self.assertRaises(ValueError):
+            model(**inputs)
+
+    def test_pairing_fusion_reloads_without_changing_predictions(self):
+        bundle, archive = self.source_data(("train", "validation", "test"))
+        root = self.root / "paired"
+        fit(bundle, archive, root.as_posix(), replace(self.config, paired=True, content_query=True, epochs=2), self.profile, "cpu")
+        first = predict(bundle, archive, root.as_posix(), device="cpu")
+        self.assertEqual(first, predict(bundle, archive, root.as_posix(), device="cpu"))
+        self.assertTrue(read_json(root / "model.json")["config"]["paired"])
+
+    def test_ddin_mae_preprocessing_preserves_the_center_crop(self):
+        from PIL import Image
+        pixels = np.zeros((256, 512, 3), dtype=np.uint8)
+        pixels[:, :, 0] = np.arange(512, dtype=np.uint16)[None] % 256
+        pixels[:, :, 1] = np.arange(256, dtype=np.uint8)[:, None]
+        image = Image.fromarray(pixels)
+        result = embeddings.mae_pixels([image])
+        expected = torch.from_numpy(pixels[16:240, 144:368].copy()).permute(2, 0, 1).float() / 255
+        expected = (expected - torch.tensor([.485, .456, .406])[:, None, None]) / torch.tensor([.229, .224, .225])[:, None, None]
+        torch.testing.assert_close(result[0], expected, atol=0, rtol=0)
+        np.testing.assert_array_equal(np.asarray(image), pixels)
+
+    def test_ddin_mae_preprocessing_handles_portraits_and_tiny_images(self):
+        from PIL import Image
+        images = [Image.new("RGB", (3, 7), (255, 0, 0)), Image.new("L", (9, 2), 255)]
+        result = embeddings.mae_pixels(images)
+        self.assertEqual(tuple(result.shape), (2, 3, 224, 224))
+        self.assertTrue(torch.isfinite(result).all())
+        expected = (torch.tensor([1., 0., 0.]) - torch.tensor([.485, .456, .406])) / torch.tensor([.229, .224, .225])
+        torch.testing.assert_close(result[0, :, 50, 50], expected)
+        with self.assertRaises(ValueError):
+            embeddings.mae_pixels([])
+        with self.assertRaises(ValueError):
+            embeddings.mae_pixels([None])
+
+    def test_mae_preprocessing_is_bound_to_the_feature_protocol(self):
+        before = embeddings.protocol(self.archive)
+        changed = copy.deepcopy(self.archive)
+        changed["provenance"].update(image_processing="ddin", image_processing_sha256=embeddings.image_processing_hash("ddin"))
+        embeddings.validate(changed)
+        self.assertNotEqual(before, embeddings.protocol(changed))
+        changed["provenance"]["image_processing_sha256"] = "0" * 64
+        with self.assertRaises(ValueError):
+            embeddings.validate(changed)
+        with self.assertRaises(ValueError):
+            embeddings.image_processing_hash("unknown")
+
+    def test_linear_adapter_starts_identical_and_merges_without_drift(self):
+        from engine.neural import LinearAdapter
+        linear = torch.nn.Linear(8, 6)
+        adapter = LinearAdapter(linear, 2)
+        values = torch.randn(3, 8)
+        torch.testing.assert_close(adapter(values), linear(values), atol=0, rtol=0)
+        initial = linear.weight.detach().clone()
+        optimizer = torch.optim.SGD([p for p in adapter.parameters() if p.requires_grad], lr=.1)
+        for _ in range(2):
+            optimizer.zero_grad();adapter(values).square().mean().backward();optimizer.step()
+        self.assertGreater(float(adapter.down.weight.grad.abs().sum()), 0)
+        self.assertIsNone(linear.weight.grad)
+        torch.testing.assert_close(initial, linear.weight)
+        expected = adapter(values)
+        merged = adapter.merged()
+        torch.testing.assert_close(expected, merged(values), atol=0, rtol=0)
+        torch.testing.assert_close(expected, adapter.merged()(values), atol=0, rtol=0)
+        torch.testing.assert_close(expected, adapter(values), atol=0, rtol=0)
+
+    def test_clip_adapters_merge_into_a_native_checkpoint(self):
+        from transformers import CLIPConfig, CLIPModel
+        from engine.neural import adapt_linears, merge_linears, LinearAdapter
+        text = dict(vocab_size=16, hidden_size=16, intermediate_size=32, num_hidden_layers=2, num_attention_heads=2, max_position_embeddings=8, bos_token_id=0, eos_token_id=1, pad_token_id=1)
+        vision = dict(hidden_size=16, intermediate_size=32, num_hidden_layers=2, num_attention_heads=2, image_size=16, patch_size=8)
+        config = CLIPConfig(text_config=text, vision_config=vision, projection_dim=4)
+        model = CLIPModel(config).eval()
+        initial = set(model.state_dict())
+        names = adapt_linears(model, 1, 2)
+        self.assertEqual(len(names), 4)
+        self.assertTrue(all(isinstance(model.get_submodule(name), LinearAdapter) for name in names))
+        for layer in model.modules():
+            if isinstance(layer, LinearAdapter):
+                torch.nn.init.normal_(layer.up.weight, std=.01)
+        inputs = torch.tensor([[0, 4, 1], [0, 7, 1]])
+        expected = model.get_text_features(input_ids=inputs)
+        self.assertEqual(merge_linears(model), 4)
+        self.assertEqual(merge_linears(model), 0)
+        self.assertEqual(set(model.state_dict()), initial)
+        restored = CLIPModel(config).eval();restored.load_state_dict(model.state_dict())
+        torch.testing.assert_close(expected, restored.get_text_features(input_ids=inputs), atol=0, rtol=0)
+
+    def test_chinese_clip_adapters_preserve_native_text_loading(self):
+        from transformers import ChineseCLIPConfig, ChineseCLIPModel
+        from engine.neural import adapt_linears, merge_linears
+        text = dict(vocab_size=16, hidden_size=16, intermediate_size=32, num_hidden_layers=1, num_attention_heads=2, max_position_embeddings=8)
+        vision = dict(hidden_size=16, intermediate_size=32, num_hidden_layers=1, num_attention_heads=2, image_size=16, patch_size=8)
+        config = ChineseCLIPConfig(text_config=text, vision_config=vision, projection_dim=4)
+        model = ChineseCLIPModel(config).eval()
+        inputs = dict(input_ids=torch.tensor([[2, 7, 3], [2, 5, 3]]), attention_mask=torch.ones(2, 3, dtype=torch.long))
+        before = embeddings.cliptext(model, inputs)
+        names = adapt_linears(model, 1, 2)
+        self.assertEqual(len(names), 4)
+        torch.testing.assert_close(before, embeddings.cliptext(model, inputs), atol=0, rtol=0)
+        self.assertEqual(merge_linears(model), 4)
+        restored = ChineseCLIPModel(config).eval();restored.load_state_dict(model.state_dict())
+        torch.testing.assert_close(before, embeddings.cliptext(restored, inputs), atol=0, rtol=0)
+
+    def test_invalid_clip_adaptation_leaves_the_model_unchanged(self):
+        from engine.neural import LinearAdapter, adapt_linears
+        model = torch.nn.Linear(4, 4)
+        initial = model.weight.detach().clone()
+        with self.assertRaises(ValueError):
+            adapt_linears(model, 1, 2)
+        self.assertTrue(model.weight.requires_grad)
+        torch.testing.assert_close(initial, model.weight)
+        with self.assertRaises(ValueError):
+            LinearAdapter(model, 8)
+
+    def test_live_pairing_matches_cached_features_and_preserves_gradients(self):
+        from engine.learning import pairing, pairing_tensor
+        text = torch.randn(4, 5, requires_grad=True)
+        image = torch.randn(4, 5, requires_grad=True)
+        observed = torch.ones(4, 2, dtype=torch.bool);observed[1, 0] = False
+        with torch.no_grad():
+            text[1] = torch.nan;text[2] = 0
+        result = pairing_tensor(text, image, observed)
+        expected = pairing({"clip_text": text.detach().numpy(), "clip_image": image.detach().numpy()}, observed.numpy())
+        np.testing.assert_allclose(result.detach().numpy(), expected, rtol=1e-6, atol=1e-7)
+        result.square().sum().backward()
+        self.assertTrue(torch.isfinite(text.grad).all())
+        self.assertTrue(torch.isfinite(image.grad).all())
+        self.assertGreater(float(text.grad.abs().sum()), 0)
+
+    def field_inputs(self):
+        from engine.learning import batch
+        packet, _ = prepare(self.bundle, self.archive, self.profile, 2)
+        inputs = batch(packet, list(range(4)), "cpu")
+        config = replace(self.config, field_only=True, content_query=True, layers=2, bias_limit=8.0)
+        model = ResidualAttention({name: value.shape[1] for name, value in self.archive["features"].items()}, 26, config).eval()
+        return model, inputs
+
+    def test_field_routing_ignores_anchor_values_without_relations(self):
+        model, inputs = self.field_inputs()
+        inputs["graph"] = torch.zeros_like(inputs["graph"])
+        first = model(**inputs)["logit"]
+        inputs["ranks"] = inputs["ranks"] + 17
+        second = model(**inputs)["logit"]
+        inputs["trace_observed"] = torch.zeros_like(inputs["trace_observed"])
+        third = model(**inputs)["logit"]
+        torch.testing.assert_close(first, second, atol=0, rtol=0)
+        torch.testing.assert_close(first, third, atol=0, rtol=0)
+
+    def test_field_routing_transmits_relation_gradients(self):
+        model, inputs = self.field_inputs()
+        graph = torch.randn_like(inputs["graph"])
+        inputs["graph"] = ((graph + graph.transpose(-1, -2)) / 2).requires_grad_()
+        result = model(**inputs)
+        result["logit"].square().sum().backward()
+        self.assertTrue(torch.isfinite(inputs["graph"].grad).all())
+        self.assertGreater(float(inputs["graph"].grad.abs().sum()), 0)
+        self.assertGreater(float(model.trace_projection.weight.grad.abs().sum()), 0)
+
+    def test_field_routing_masks_missing_anchors_and_explains(self):
+        model, inputs = self.field_inputs()
+        inputs["trace_observed"][0] = False
+        inputs["ranks"][0] = torch.nan
+        inputs["graph"][0] = torch.nan
+        result = model(**inputs, explain=True)
+        for value in result.values():
+            self.assertTrue(torch.isfinite(value).all())
+        self.assertEqual(float(result["value_transport_rms"][0].detach()), 0)
+        order = torch.tensor([2, 0, 3, 1])
+        permuted = {key: {name: value[order] for name, value in item.items()} if isinstance(item, dict) else item[order] for key, item in inputs.items()}
+        torch.testing.assert_close(model(**permuted)["logit"], result["logit"][order])
+
+    def test_field_routing_reload_and_validation(self):
+        model, inputs = self.field_inputs()
+        restored = ResidualAttention({name: value.shape[1] for name, value in self.archive["features"].items()}, 26, model.config).eval()
+        restored.load_state_dict(model.state_dict())
+        torch.testing.assert_close(model(**inputs)["logit"], restored(**inputs)["logit"])
+        with self.assertRaises(ValueError):
+            replace(self.config, field_only=True, mode="concat").validate()
+        with self.assertRaises(ValueError):
+            replace(self.config, field_only=1).validate()
+
+    def test_chinese_clip_projects_unpooled_class_token(self):
+        from transformers import ChineseCLIPConfig, ChineseCLIPModel
+        text = {"vocab_size": 32, "hidden_size": 16, "intermediate_size": 32, "num_hidden_layers": 1, "num_attention_heads": 2, "max_position_embeddings": 16}
+        vision = {"hidden_size": 16, "intermediate_size": 32, "num_hidden_layers": 1, "num_attention_heads": 2, "image_size": 16, "patch_size": 8}
+        model = ChineseCLIPModel(ChineseCLIPConfig(text_config=text, vision_config=vision, projection_dim=8)).eval()
+        inputs = {"input_ids": torch.tensor([[2, 7, 3], [2, 9, 3]]), "attention_mask": torch.ones(2, 3, dtype=torch.long)}
+        with torch.inference_mode():
+            hidden = model.text_model(**inputs, return_dict=True)
+            self.assertIsNone(hidden.pooler_output)
+            actual = embeddings.cliptext(model, inputs)
+            expected = model.text_projection(hidden.last_hidden_state[:, 0])
+        self.assertEqual(tuple(actual.shape), (2, 8))
+        self.assertTrue(torch.isfinite(actual).all())
+        torch.testing.assert_close(actual, expected)
+
+    def test_trace_dropout_preserves_inputs_and_evaluation(self):
+        config = replace(self.config, trace_dropout=1.0, dropout=0.0)
+        model = ResidualAttention({name: value.shape[1] for name, value in self.archive["features"].items()}, 26, config)
+        packet, _ = prepare(self.bundle, self.archive, self.profile, 2)
+        from engine.learning import batch
+        inputs = batch(packet, list(range(4)), "cpu")
+        original = inputs["trace_observed"].clone()
+        model.train()
+        dropped = model(**inputs)["logit"]
+        absent = dict(inputs, trace_observed=torch.zeros_like(original))
+        torch.testing.assert_close(dropped, model(**absent)["logit"], rtol=0, atol=0)
+        torch.testing.assert_close(inputs["trace_observed"], original)
+        model.eval()
+        torch.testing.assert_close(model(**inputs)["logit"], model(**inputs)["logit"], rtol=0, atol=0)
+        self.assertFalse(torch.equal(model(**inputs)["logit"], model(**absent)["logit"]))
+
+    def test_regularization_rejects_invalid_configuration(self):
+        for name, value in (("trace_dropout", -0.1), ("trace_dropout", 1.1), ("trace_dropout", float("nan")), ("label_smoothing", -0.1), ("label_smoothing", 1.0), ("label_smoothing", True)):
+            with self.subTest(name=name, value=value), self.assertRaises(ValueError):
+                replace(self.config, **{name: value}).validate()
+
+    def test_news_label_smoothing_keeps_both_target_directions(self):
+        bundle, archive = self.source_data(("train", "validation", "test"))
+        original = torch.nn.functional.binary_cross_entropy_with_logits
+        targets = []
+        def capture(risks, target, *arguments, **options):
+            targets.extend(target.detach().cpu().tolist())
+            return original(risks, target, *arguments, **options)
+        with patch("engine.learning.torch.nn.functional.binary_cross_entropy_with_logits", side_effect=capture):
+            fit(bundle, archive, (self.root / "smoothing").as_posix(), replace(self.config, epochs=1, label_smoothing=.2, auxiliary_weight=0.), self.profile, "cpu")
+        self.assertEqual({round(value, 5) for value in targets}, {.1, .9})
+
+    def test_pretrained_agreement_preserves_geometry_and_missing_inputs(self):
+        from engine.learning import agreement
+        features = {"clip_text": np.array([[3., 0.], [1., 0.], [0., 0.]]), "clip_image": np.array([[6., 0.], [-5., 0.], [0., 1.]])}
+        mask = np.ones((3, 2), dtype=bool)
+        expected = np.array([[1., 1.], [-1., 1.], [0., 0.]], dtype=np.float32)
+        np.testing.assert_array_equal(agreement(features, mask), expected)
+        scaled = {name: value * 7 for name, value in features.items()}
+        np.testing.assert_array_equal(agreement(scaled, mask), expected)
+        mask[0, 1] = False
+        expected[0] = 0
+        np.testing.assert_array_equal(agreement(features, mask), expected)
+        with self.assertRaisesRegex(ValueError, "aligned"):
+            agreement(dict(features, clip_image=np.zeros((3, 4))), mask)
+
+    def test_aligned_fusion_reloads_without_changing_predictions(self):
+        bundle, archive = self.source_data(("train", "validation", "test"))
+        root = self.root / "aligned"
+        fit(bundle, archive, root.as_posix(), replace(self.config, aligned=True, epochs=2), self.profile, "cpu")
+        first = predict(bundle, archive, root.as_posix(), device="cpu")
+        second = predict(bundle, archive, root.as_posix(), device="cpu")
+        self.assertEqual(first, second)
+        self.assertTrue(read_json(root / "model.json")["config"]["aligned"])
+
+    def test_agreement_handles_extreme_scales_and_masked_nonfinite_values(self):
+        from engine.learning import agreement
+        features = {"clip_text": np.array([[1e300, 0.], [1e-300, 0.], [np.nan, np.inf]]), "clip_image": np.array([[1e300, 0.], [-1e-300, 0.], [np.inf, np.nan]])}
+        observed = np.array([[True, True], [True, True], [False, False]])
+        expected = np.array([[1., 1.], [-1., 1.], [0., 0.]], dtype=np.float32)
+        with np.errstate(over="raise", invalid="raise", divide="raise"):
+            np.testing.assert_array_equal(agreement(features, observed), expected)
+        with self.assertRaisesRegex(ValueError, "Boolean masks"):
+            agreement(features, observed.astype(float))
+
+    def test_eann_semantic_cleaning_matches_the_released_rule(self):
+        text = " Beauty and the Beast. "
+        self.assertEqual(embeddings.clean_text(text), text)
+        self.assertEqual(embeddings.clean_text(text, "eann"), "beautyadthebeat")
+        self.assertEqual(len(embeddings.processing_hash("eann")), 64)
+        with self.assertRaises(ValueError):
+            embeddings.clean_text(text, "unknown")
+
+    def test_preprocessing_policy_is_bound_to_the_embedding_protocol(self):
+        bundle, archive = self.source_data(("train", "validation", "test"))
+        root = self.root / "processing"
+        fit(bundle, archive, root.as_posix(), replace(self.config, epochs=1), self.profile, "cpu")
+        changed = copy.deepcopy(archive)
+        changed["provenance"].update(text_processing="eann", text_processing_sha256=embeddings.processing_hash("eann"))
+        embeddings.validate(changed)
+        self.assertNotEqual(embeddings.protocol(archive), embeddings.protocol(changed))
+        with self.assertRaisesRegex(ValueError, "preprocessing protocol changed"):
+            predict(bundle, changed, root.as_posix(), device="cpu")
+        changed["provenance"]["text_processing_sha256"] = "a" * 64
+        with self.assertRaisesRegex(ValueError, "preprocessing definition"):
+            embeddings.validate(changed)
+
+    def test_content_query_is_sample_local_and_mask_safe(self):
+        from engine.learning import batch
+        packet, _ = prepare(self.bundle, self.archive, self.profile, 2)
+        inputs = batch(packet, list(range(4)), "cpu")
+        dimensions = {name: value.shape[1] for name, value in self.archive["features"].items()}
+        plain = ResidualAttention(dimensions, 26, self.config).eval()
+        model = ResidualAttention(dimensions, 26, replace(self.config, content_query=True)).eval()
+        model.load_state_dict(plain.state_dict())
+        queries = []
+        hook = lambda module, arguments, output: queries.append(output[:, 0, :self.config.dimension].detach().clone())
+        handle = plain.blocks[0].qkv.register_forward_hook(hook)
+        plain(**inputs)
+        handle.remove()
+        handle = model.blocks[0].qkv.register_forward_hook(hook)
+        expected = model(**inputs)["logit"]
+        handle.remove()
+        torch.testing.assert_close(queries[0], queries[0][:1].expand_as(queries[0]))
+        self.assertFalse(torch.allclose(queries[1], queries[1][:1].expand_as(queries[1])))
+        order = torch.tensor([2, 0, 3, 1])
+        shuffled = {key: value[order] for key, value in inputs.items() if key != "features"}
+        shuffled["features"] = {key: value[order] for key, value in inputs["features"].items()}
+        torch.testing.assert_close(model(**shuffled)["logit"], expected[order])
+        absent = dict(inputs, observed=torch.zeros_like(inputs["observed"]), trace_observed=torch.zeros_like(inputs["trace_observed"]))
+        self.assertTrue(torch.isfinite(model(**absent)["logit"]).all())
+
+    def test_content_query_checkpoint_reloads(self):
+        bundle, archive = self.source_data(("train", "validation", "test"))
+        root = self.root / "content"
+        fit(bundle, archive, root.as_posix(), replace(self.config, content_query=True, epochs=1), self.profile, "cpu")
+        first = predict(bundle, archive, root.as_posix(), device="cpu")
+        self.assertEqual(first, predict(bundle, archive, root.as_posix(), device="cpu"))
+        self.assertTrue(read_json(root / "model.json")["config"]["content_query"])
+        with self.assertRaises(ValueError):
+            replace(self.config, content_query=1).validate()
+
+    def test_context_summary_ignores_padding_and_handles_empty_context(self):
+        hidden = torch.tensor([[[10., 20.], [1., 3.], [7., 9.], [100., 200.]], [[4., 5.], [float("nan"), float("inf")], [3., 5.], [0., 0.]]])
+        mask = torch.tensor([[False, True, True, False], [False, False, False, False]])
+        expected = torch.tensor([[10., 20., 4., 6., 7., 9.], [4., 5., 0., 0., 0., 0.]])
+        torch.testing.assert_close(embeddings.pool_summary(hidden, mask), expected)
+        with self.assertRaisesRegex(ValueError, "Boolean"):
+            embeddings.pool_summary(hidden, mask.float())
+        mask[1, 1] = True
+        with self.assertRaisesRegex(ValueError, "finite"):
+            embeddings.pool_summary(hidden, mask)
+
+    def test_reference_folds_preserve_source_mixtures_and_groups(self):
+        from engine.learning import reference_folds
+        rows = []
+        for group, (size, label) in enumerate(((60, 1), (40, 1), (30, 0), (20, 0))):
+            for index in range(size):
+                key = "group" + str(group) + ":" + str(index)
+                rows.append(dict(id=key, group=str(group), text=key, image="", domain="source", split="train", label=label))
+        folds = reference_folds(rows, 2, 42, True)
+        queries = []
+        for fitting, query in folds:
+            self.assertAlmostEqual(np.mean([rows[i]["label"] for i in fitting]), 2 / 3)
+            self.assertFalse({rows[i]["group"] for i in fitting} & {rows[i]["group"] for i in query})
+            queries.extend(query)
+        self.assertEqual(sorted(queries), list(range(len(rows))))
+        changed = copy.deepcopy(rows)
+        changed[0]["split"] = "test"
+        with self.assertRaisesRegex(ValueError, "training rows"):
+            reference_folds(changed, 2, 42, True)
+
+    def test_reference_balancing_does_not_use_test_labels(self):
+        bundle, archive = self.source_data(("train", "validation", "test"))
+        changed, vectors = copy.deepcopy(bundle), copy.deepcopy(archive)
+        for row in changed["rows"]:
+            if row["split"] == "test":
+                row["label"] = 1 - row["label"]
+        for row in vectors["rows"]:
+            if row["split"] == "test":
+                row["label"] = 1 - row["label"]
+        first, second = self.root / "balanced", self.root / "unchanged"
+        config = replace(self.config, epochs=1, balanced_reference=True)
+        fit(bundle, archive, first.as_posix(), config, self.profile, "cpu")
+        fit(changed, vectors, second.as_posix(), config, self.profile, "cpu")
+        original = torch.load(first / "parameters.pt", map_location="cpu", weights_only=True)
+        repeated = torch.load(second / "parameters.pt", map_location="cpu", weights_only=True)
+        for name in original:
+            torch.testing.assert_close(original[name], repeated[name], rtol=0, atol=0)
+
     def tearDown(self) -> None:
         self.temporary.cleanup()
         torch.set_num_threads(self.threads)
@@ -183,12 +674,13 @@ class NeuralTests(unittest.TestCase):
             states.append({name: value.detach().cpu().clone() for name, value in model.state_dict().items()})
             return logits(model, *arguments, **options)
         output = self.root / "selected"
-        with patch("engine.learning.logits", side_effect=observed), patch("engine.learning.binary", side_effect=[{"macro_f1": value} for value in (.8, .3, .8)]):
+        with patch("engine.learning.logits", side_effect=observed), patch("engine.learning.binary", side_effect=[{"macro_f1": value, "accuracy": accuracy, "auc": .9} for value, accuracy in zip((.8, .3, .8), (.2, .9, .95))]):
             result = fit(bundle, archive, output.as_posix(), replace(self.config, epochs=3, patience=2), self.profile, "cpu")
         metadata = read_json(output / "model.json")
         self.assertEqual(result["selected_epoch"], 1)
         self.assertEqual(metadata["selected_epoch"], 1)
         self.assertEqual(result["epochs"], 3)
+        self.assertEqual([item["validation_accuracy"] for item in metadata["history"]], [.2, .9, .95])
         self.assertTrue(any(not torch.equal(states[0][name], states[2][name]) for name in states[0]))
         restored = torch.load(output / "parameters.pt", map_location="cpu", weights_only=True)
         for name in restored:
@@ -1438,6 +1930,16 @@ class NeuralTests(unittest.TestCase):
         self.assertTrue(embeddings.protocol(first)["complete"])
         embeddings.save((self.root / "encoded.npz").as_posix(), first)
         self.assertEqual(embeddings.protocol(embeddings.load((self.root / "encoded.npz").as_posix())), embeddings.protocol(first))
+        from engine.neural import TextPool
+        pooler = TextPool(16, 4).eval()
+        write_json(directories["bert"] / "pooler.json", dict(version=1, hidden_size=16, width=4))
+        torch.save(pooler.state_dict(), directories["bert"] / "pooler.pt")
+        local = embeddings.extract(rows, paths, batch_size=2, device="cpu", max_length=12)
+        summary = embeddings.extract(rows, paths, batch_size=2, device="cpu", max_length=12, pooling="summary")
+        self.assertEqual(local["features"]["bert"].shape, (2, 28))
+        self.assertEqual(local["provenance"]["readout"]["bert"], "class_local_cnn")
+        np.testing.assert_allclose(local["features"]["bert"], summary["features"]["bert"], rtol=1e-6, atol=1e-7)
+        self.assertEqual(summary["features"]["mae"].shape, (2, 48))
         animated = self.root / "animated.gif"
         Image.new("RGB", (32, 32), (10, 20, 30)).save(animated, save_all=True, append_images=[Image.new("RGB", (32, 32), (100, 120, 140))], duration=100, loop=0)
         with self.assertRaisesRegex(ValueError, "Animated or multipage"):

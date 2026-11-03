@@ -82,6 +82,17 @@ def boolean(value: object) -> bool:
         return bool(value)
     raise ValueError("Boolean metadata must be true, false, zero, or one")
 
+def row_namespace(row: dict) -> str:
+    policy = row.get("benchmark_protocol")
+    if policy is None:
+        return ""
+    ordinal = row.get("source_ordinal")
+    if policy != "finefake-paper-3407" or type(ordinal) is not int or not 0 <= ordinal < 16909:
+        raise ValueError("Unsupported released benchmark contract")
+    if row.get("id") != "finefake:" + str(ordinal) or row.get("split") not in ("train", "validation", "test") or row.get("group") != row.get("id"):
+        raise ValueError("FineFake paper rows require immutable source identities and released roles")
+    return policy + "/" + row["split"]
+
 def normalize(rows: list[dict], image_root: str = ".", label_convention: str = "fake-one", domain_key: str = "domain") -> list[dict]:
     if label_convention not in ("fake-one", "real-one"):
         raise ValueError("Unknown label convention")
@@ -101,6 +112,10 @@ def normalize(rows: list[dict], image_root: str = ".", label_convention: str = "
         identifiers.add(sample_id)
         row["image"] = image
         row["has_image"] = bool(image)
+        if "image_frame" in row and (type(row["image_frame"]) is not int or row["image_frame"] != 0):
+            raise ValueError("Only an explicit first-frame selection is supported")
+        if "physical_trace_disabled" in row:
+            row["physical_trace_disabled"] = boolean(row["physical_trace_disabled"])
         row["id"] = sample_id
         row["platform"] = "unknown" if missing(row.get("platform")) else str(row["platform"]).strip()
         row["group"] = identifier(row.get("group", row.get("event_id"))) or sample_id
@@ -191,6 +206,9 @@ def partition(rows: list[dict], target_domains: list[str], seed: int = 42, profi
     return result
 
 def audit_splits(rows: list[dict], check_files: bool = False) -> dict:
+    namespaces = [row_namespace(row) for row in rows]
+    if any(namespaces) and not all(namespaces):
+        raise ValueError("Strict and paper-protocol rows cannot share a benchmark")
     fingerprints = image_fingerprints(rows, check_files)
     groups, images, contents, texts = (defaultdict(set) for _ in range(4))
     counts, paths = defaultdict(int), {}
@@ -210,6 +228,10 @@ def audit_splits(rows: list[dict], check_files: bool = False) -> dict:
         if row.get("content_sha256"):
             contents[str(row["content_sha256"])].add(split)
     leaks = {"groups": [key for key, splits in groups.items() if len(splits) > 1], "paths": [paths[key] for key, splits in images.items() if len(splits) > 1], "content": [key for key, splits in contents.items() if len(splits) > 1], "text": [key for key, splits in texts.items() if len(splits) > 1]}
+    if any(namespaces):
+        if leaks["groups"]:
+            raise ValueError("Released row identities overlap benchmark roles")
+        return {"counts": dict(counts), "samples": len(rows), "leakage": leaks, "benchmark_protocol": "finefake-paper-3407", "overlap_policy": "Preserve paper row partitions and report reused content; this is row-disjoint evaluation", "label_convention": "zero-real-one-fake"}
     if any(leaks.values()):
         raise ValueError(f"Cross-split leakage detected: {leaks}")
     return {"counts": dict(counts), "samples": len(rows), "leakage": leaks, "label_convention": "zero-real-one-fake"}

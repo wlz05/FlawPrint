@@ -158,7 +158,15 @@ PRESETS = {
         'seed': 42,
         'folds': 2,
         'auxiliary_weight': 0.1,
-        'mode': 'coupled'
+        'mode': 'coupled',
+        'trace_dropout': 0.0,
+        'label_smoothing': 0.0,
+        'aligned': False,
+        'content_query': False,
+        'balanced_reference': False,
+        'field_only': False,
+        'unit_coordinates': False,
+        'paired': False
     },
     'quick': {
         'shrinkage': 0.15,
