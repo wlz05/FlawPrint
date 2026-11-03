@@ -1711,6 +1711,205 @@ class NeuralTests(unittest.TestCase):
         for name in states[0]:
             torch.testing.assert_close(states[0][name], states[1][name], rtol=0, atol=0)
 
+    def test_training_state_resume_matches_uninterrupted_stochastic_training(self) -> None:
+        config = replace(self.config, epochs=3, patience=3, dropout=.2, trace_dropout=.25, paired=True)
+        state, output, baseline = self.root / "progress.pt", self.root / "resumed", self.root / "continuous"
+        fit(self.bundle, self.archive, baseline.as_posix(), config, self.profile, "cpu")
+        calls = []
+        def interrupted(*args, **kwargs):
+            calls.append(None)
+            if len(calls) == 2:
+                raise KeyboardInterrupt("Interrupted during the next epoch")
+            return logits(*args, **kwargs)
+        with patch("engine.learning.logits", side_effect=interrupted), self.assertRaises(KeyboardInterrupt):
+            fit(self.bundle, self.archive, output.as_posix(), config, self.profile, "cpu", state_path=state.as_posix())
+        self.assertEqual(torch.load(state, map_location="cpu", weights_only=True)["epoch"], 1)
+        self.assertFalse(output.exists())
+        fit(self.bundle, self.archive, output.as_posix(), config, self.profile, "cpu", state_path=state.as_posix(), resume=True)
+        first, second = [torch.load(path / "parameters.pt", map_location="cpu", weights_only=True) for path in (baseline, output)]
+        for name in first:
+            torch.testing.assert_close(first[name], second[name], rtol=0, atol=0)
+        expected, actual = [read_json(path / "model.json") for path in (baseline, output)]
+        self.assertEqual(actual["history"], expected["history"])
+        self.assertEqual(actual["selected_epoch"], expected["selected_epoch"])
+        self.assertEqual([row["fusion_risk"] for row in predict(self.bundle, self.archive, baseline.as_posix(), device="cpu")], [row["fusion_risk"] for row in predict(self.bundle, self.archive, output.as_posix(), device="cpu")])
+
+    def test_training_state_rejects_changed_protocol_and_unsafe_paths(self) -> None:
+        config = replace(self.config, epochs=1)
+        state = self.root / "progress.pt"
+        fit(self.bundle, self.archive, (self.root / "original").as_posix(), config, self.profile, "cpu", state_path=state.as_posix())
+        original = state.read_bytes()
+        changed = copy.deepcopy(self.archive)
+        changed["features"]["bert"][0, 0] += 1
+        cases = [(self.archive, replace(config, learning_rate=config.learning_rate * 2), self.profile), (changed, config, self.profile), (self.archive, config, replace(self.profile, shrinkage=.2))]
+        for index, (archive, settings, profile) in enumerate(cases):
+            with self.subTest(index=index), patch.object(ResidualAttention, "forward", side_effect=AssertionError("Training must not start")):
+                with self.assertRaisesRegex(ValueError, "protocol"):
+                    fit(self.bundle, archive, (self.root / ("changed" + str(index))).as_posix(), settings, profile, "cpu", state_path=state.as_posix(), resume=True)
+            self.assertEqual(state.read_bytes(), original)
+        with self.assertRaisesRegex(ValueError, "state"):
+            fit(self.bundle, self.archive, (self.root / "missing").as_posix(), config, self.profile, "cpu", resume=True)
+        with self.assertRaisesRegex(ValueError, "state"):
+            fit(self.bundle, self.archive, (self.root / "occupied").as_posix(), config, self.profile, "cpu", state_path=state.as_posix())
+        directory = self.root / "nested"
+        with self.assertRaisesRegex(ValueError, "outside"):
+            fit(self.bundle, self.archive, directory.as_posix(), config, self.profile, "cpu", state_path=(directory / "progress.pt").as_posix())
+        self.assertFalse(directory.exists())
+
+    def test_training_state_rejects_corrupt_tensors_history_and_optimizer(self) -> None:
+        config = replace(self.config, epochs=1)
+        state, output = self.root / "progress.pt", self.root / "original"
+        fit(self.bundle, self.archive, output.as_posix(), config, self.profile, "cpu", state_path=state.as_posix())
+        valid = torch.load(state, map_location="cpu", weights_only=True)
+        original = digest(output / "parameters.pt")
+        for kind in ("model", "best", "history", "optimizer", "moments", "numpy", "cuda", "rng"):
+            damaged = copy.deepcopy(valid)
+            if kind in ("model", "best"):
+                key = next(iter(damaged[kind]))
+                damaged[kind][key] = torch.full_like(damaged[kind][key], torch.nan)
+            elif kind == "history":
+                damaged["history"][0]["epoch"] = 4
+            elif kind == "optimizer":
+                damaged["optimizer"]["param_groups"][0]["lr"] = float("inf")
+            elif kind == "moments":
+                moment = next(iter(damaged["optimizer"]["state"].values()))
+                moment["exp_avg_sq"] = torch.full_like(moment["exp_avg_sq"], -1)
+            elif kind == "numpy":
+                damaged["numpy_rng"][1][0] = 2 ** 40
+            elif kind == "cuda":
+                damaged["cuda_rng"] = torch.zeros(8, dtype=torch.uint8)
+            else:
+                damaged["torch_rng"] = torch.zeros(2)
+            torch.save(damaged, state)
+            with self.subTest(kind=kind), self.assertRaises(ValueError):
+                fit(self.bundle, self.archive, (self.root / kind).as_posix(), config, self.profile, "cpu", state_path=state.as_posix(), resume=True)
+            self.assertEqual(digest(output / "parameters.pt"), original)
+
+    def test_failed_training_state_write_retains_the_previous_epoch(self) -> None:
+        config = replace(self.config, epochs=3, patience=3)
+        state, output = self.root / "progress.pt", self.root / "recovered"
+        save, observed = torch.save, []
+        def interrupted(value, target, *args, **kwargs):
+            if isinstance(value, dict) and value.get("version") == "flawprint-training-v1":
+                observed.append(value["epoch"])
+                if len(observed) == 2:
+                    target.write(b"partial state")
+                    raise OSError("State write failed")
+            return save(value, target, *args, **kwargs)
+        with patch("engine.learning.torch.save", side_effect=interrupted), self.assertRaisesRegex(OSError, "State write failed"):
+            fit(self.bundle, self.archive, output.as_posix(), config, self.profile, "cpu", state_path=state.as_posix())
+        self.assertEqual(torch.load(state, map_location="cpu", weights_only=True)["epoch"], 1)
+        self.assertFalse(list(self.root.glob(".flawprint-*")))
+        self.assertFalse(output.exists())
+        fit(self.bundle, self.archive, output.as_posix(), config, self.profile, "cpu", state_path=state.as_posix(), resume=True)
+        self.assertEqual(len(read_json(output / "model.json")["history"]), 3)
+
+    def test_training_state_preserves_early_stopping_and_first_best_selection(self) -> None:
+        config = replace(self.config, epochs=5, patience=2)
+        state, first, resumed = self.root / "progress.pt", self.root / "stopped", self.root / "resumed"
+        scores = [{"macro_f1": value, "accuracy": .5, "auc": .8} for value in (.8, .3, .8)]
+        with patch("engine.learning.binary", side_effect=scores):
+            fit(self.bundle, self.archive, first.as_posix(), config, self.profile, "cpu", state_path=state.as_posix())
+        with patch.object(torch.optim.AdamW, "step", side_effect=AssertionError("Early stopping must remain complete")):
+            result = fit(self.bundle, self.archive, resumed.as_posix(), config, self.profile, "cpu", state_path=state.as_posix(), resume=True)
+        self.assertEqual(result["epochs"], 3)
+        self.assertEqual(result["selected_epoch"], 1)
+        self.assertEqual(read_json(first / "model.json")["history"], read_json(resumed / "model.json")["history"])
+
+    def test_training_state_does_not_overwrite_a_competing_run(self) -> None:
+        state, output = self.root / "progress.pt", self.root / "contended"
+        def competing(*args, **kwargs):
+            result = logits(*args, **kwargs)
+            state.write_bytes(b"Another run owns this state")
+            return result
+        with patch("engine.learning.logits", side_effect=competing), self.assertRaisesRegex(ValueError, "state changed"):
+            fit(self.bundle, self.archive, output.as_posix(), replace(self.config, epochs=1), self.profile, "cpu", state_path=state.as_posix())
+        self.assertEqual(state.read_bytes(), b"Another run owns this state")
+        self.assertFalse(output.exists())
+
+    def test_training_state_can_resume_after_the_repository_moves(self) -> None:
+        from engine.provenance import source_files
+        original, moved = self.root / "first machine", self.root / "second machine"
+        original.mkdir()
+        for source in source_files():
+            target = original / source
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(source.read_bytes())
+        bundle, archive = self.source_data(("train", "validation", "test"))
+        physical, vectors = original / "data/physical.npz", original / "data/vectors.npz"
+        save_bundle(physical, bundle["values"], bundle["observed"], bundle["patches"], bundle["rows"], bundle["names"])
+        embeddings.save(vectors, archive)
+        write_json(original / "settings/neural.json", asdict(replace(self.config, epochs=3, patience=3, dropout=.2)))
+        write_json(original / "settings/profile.json", asdict(self.profile))
+        command = ["train", "data/physical.npz", "data/vectors.npz", "--config", "settings/neural.json", "--profile-config", "settings/profile.json", "--state", "outputs/progress.pt", "--output", "models/selected", "--device", "cpu"]
+        bootstrap = "import runpy, sys\nsys.modules['transformers'] = None\nimport engine.learning as learning\noriginal = learning.logits\ncalls = 0\ndef interrupted(*args, **kwargs):\n    global calls\n    calls += 1\n    if calls == 2:\n        raise KeyboardInterrupt('Simulated process interruption')\n    return original(*args, **kwargs)\nlearning.logits = interrupted\nsys.argv = ['deep.py'] + sys.argv[1:]\nrunpy.run_path('deep.py', run_name='__main__')"
+        environment = dict(os.environ, PYTHONDONTWRITEBYTECODE="1", OMP_NUM_THREADS="1", MKL_NUM_THREADS="1", OPENBLAS_NUM_THREADS="1", HF_HUB_OFFLINE="1")
+        result = subprocess.run([sys.executable, "-B", "-c", bootstrap, *command], cwd=original, env=environment, capture_output=True, text=True, timeout=90)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("Simulated process interruption", result.stderr)
+        self.assertTrue((original / "outputs/progress.pt").is_file())
+        shutil.copytree(original, moved)
+        self.assertTrue(original.resolve().is_relative_to(self.root.resolve()))
+        shutil.rmtree(original)
+        result = subprocess.run([sys.executable, "-B", "deep.py", *command, "--resume"], cwd=moved, env=environment, capture_output=True, text=True, timeout=90)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        metadata = read_json(moved / "models/selected/model.json")
+        self.assertEqual(metadata["training_state"]["resumed_from_epoch"], 1)
+        self.assertEqual(len(metadata["history"]), 3)
+        (moved / "outputs/progress.pt").unlink()
+        result = subprocess.run([sys.executable, "-B", "deep.py", "predict", "data/physical.npz", "data/vectors.npz", "--model", "models/selected", "--device", "cpu", "--output", "outputs/predictions.jsonl"], cwd=moved, env=environment, capture_output=True, text=True, timeout=90)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(len(read_rows(moved / "outputs/predictions.jsonl")), sum(row["split"] == "test" for row in bundle["rows"]))
+
+    def test_training_keeps_one_private_configuration_snapshot(self) -> None:
+        settings = replace(self.config, epochs=1)
+        expected = asdict(settings)
+        def changed(*args, **kwargs):
+            settings.seed, settings.epochs, settings.learning_rate = 3047, 9, 1.
+            return prepare(*args, **kwargs)
+        output = self.root / "frozenconfig"
+        with patch("engine.learning.prepare", side_effect=changed):
+            fit(self.bundle, self.archive, output.as_posix(), settings, self.profile, "cpu")
+        self.assertEqual(read_json(output / "model.json")["config"], expected)
+
+    def test_training_rejects_a_different_declared_source_before_fitting(self) -> None:
+        with patch("engine.learning.prepare", side_effect=AssertionError("Fitting must not start")):
+            with self.assertRaisesRegex(ValueError, "different source"):
+                fit(self.bundle, self.archive, (self.root / "wrongsource").as_posix(), self.config,
+                    self.profile, "cpu", {"inputs": [], "source_sha256": "invalid"})
+        self.assertFalse((self.root / "wrongsource").exists())
+
+    def test_source_changes_during_checkpoint_writes_never_publish_a_model(self) -> None:
+        from engine.provenance import source_digest
+        implementation, changed = source_digest(), []
+        original = torch.save
+        output = self.root / "changedsource"
+        def saving(*args, **kwargs):
+            original(*args, **kwargs)
+            changed.append(True)
+        with patch("engine.learning.source_digest", side_effect=lambda: "changed" if changed else implementation):
+            with patch("engine.learning.torch.save", side_effect=saving), self.assertRaisesRegex(ValueError, "source implementation changed"):
+                fit(self.bundle, self.archive, output.as_posix(), replace(self.config, epochs=1), self.profile, "cpu")
+        self.assertFalse(output.exists())
+        self.assertFalse(list(self.root.glob(".flawprint-*")))
+
+    def test_invalid_resume_randomness_is_rejected_before_restoring_live_weights(self) -> None:
+        from engine.learning import read_training
+        settings = replace(self.config, epochs=1)
+        state = self.root / "randomness.pt"
+        fit(self.bundle, self.archive, (self.root / "rngsource").as_posix(), settings,
+            self.profile, "cpu", state_path=state.as_posix())
+        saved = torch.load(state, map_location="cpu", weights_only=True)
+        saved["torch_rng"] = torch.zeros(2)
+        torch.save(saved, state)
+        model = ResidualAttention({name: values.shape[1] for name, values in self.archive["features"].items()},
+            len(self.bundle["names"]), settings)
+        optimizer = torch.optim.AdamW((value for value in model.parameters() if value.requires_grad),
+            lr=settings.learning_rate, weight_decay=settings.weight_decay)
+        with patch.object(model, "load_state_dict", side_effect=AssertionError("Live weights must remain untouched")):
+            with self.assertRaisesRegex(ValueError, "random generators"):
+                read_training(state, digest(state), saved["protocol"], model, optimizer, np.random.default_rng(42))
+
     def test_checkpoint_publication_rejects_a_competing_output_owner(self) -> None:
         output = self.root / "contended"
         save = torch.save
@@ -1852,9 +2051,17 @@ class NeuralTests(unittest.TestCase):
         write_json(profile, asdict(self.profile))
         model, output = self.root / "checkpoint", self.root / "predictions.jsonl"
         environment = dict(os.environ, OMP_NUM_THREADS="1", MKL_NUM_THREADS="1", PYTHONDONTWRITEBYTECODE="1")
-        command = [sys.executable, "-B", "deep.py", "train", physical.as_posix(), vectors.as_posix(), "--config", configuration.as_posix(), "--profile-config", profile.as_posix(), "--dataset", "Weibo21", "--device", "cpu", "--output", model.as_posix()]
+        state = self.root / "progress.pt"
+        command = [sys.executable, "-B", "deep.py", "train", physical.as_posix(), vectors.as_posix(), "--config", configuration.as_posix(), "--profile-config", profile.as_posix(), "--dataset", "Weibo21", "--device", "cpu", "--output", model.as_posix(), "--state", state.as_posix()]
         training = subprocess.run(command, capture_output=True, text=True, env=environment, timeout=60)
         self.assertEqual(training.returncode, 0, training.stderr)
+        resumed = self.root / "resumed"
+        restart = list(command)
+        restart[restart.index("--output") + 1] = resumed.as_posix()
+        result = subprocess.run(restart + ["--resume"], capture_output=True, text=True, env=environment, timeout=60)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(read_json(resumed / "model.json")["training_state"]["resumed_from_epoch"], 1)
+        self.assertEqual(read_json(resumed / "model.json")["history"], read_json(model / "model.json")["history"])
         prediction = subprocess.run([sys.executable, "-B", "deep.py", "predict", physical.as_posix(), vectors.as_posix(), "--model", model.as_posix(), "--device", "cpu", "--explain", "--output", output.as_posix()], capture_output=True, text=True, env=environment, timeout=60)
         self.assertEqual(prediction.returncode, 0, prediction.stderr)
         self.assertEqual(read_json(output.with_name("predictions.report.json"))["samples"], len(indices(self.bundle, "test")))

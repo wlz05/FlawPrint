@@ -146,6 +146,8 @@ def arguments() -> argparse.Namespace:
     training.add_argument("--mode", type=str.lower, choices=("coupled", "unbiased", "independent", "deep", "concat", "uniform", "broadcast", "diagonal", "shuffled", "summary"))
     training.add_argument("--dataset", type=str.lower, choices=("weibo", "weibo21", "finefake"))
     training.add_argument("--output", default="./models/neural")
+    training.add_argument("--state", help="Relative epoch checkpoint outside the selected model directory")
+    training.add_argument("--resume", action="store_true", help="Resume the matching completed epoch checkpoint")
     prediction = commands.add_parser("predict")
     prediction.add_argument("features")
     prediction.add_argument("embeddings")
@@ -175,7 +177,7 @@ def main() -> None:
             print(json.dumps(run_experiment(args), indent=2, allow_nan=False))
             return
         from engine import embeddings
-        for name in ("manifest", "features", "embeddings", "output", "model", "bert", "mae", "clip", "forensic", "config", "profile_config"):
+        for name in ("manifest", "features", "embeddings", "output", "model", "bert", "mae", "clip", "forensic", "config", "profile_config", "state"):
             value = getattr(args, name, None)
             if value is not None and not (name in ("config", "profile_config") and is_builtin(value)):
                 setattr(args, name, relative_path(value).as_posix())
@@ -213,7 +215,12 @@ def main() -> None:
                 config = replace(config, mode=args.mode)
             profile = replace(ProfileConfig(**configuration(args.profile_config)), seed=config.seed)
             provenance = {"inputs": fingerprints, "configurations": {"training": configuration_record(args.config), "profile": configuration_record(args.profile_config)}, "source_sha256": source_digest(), "dataset": args.dataset, "inputs_changed_during_training": False}
-            result = fit(load_bundle(args.features), embeddings.load(args.embeddings), args.output, config, profile, args.device, provenance)
+            options = {}
+            if getattr(args, "state", None) is not None:
+                options["state_path"] = args.state
+            if getattr(args, "resume", False):
+                options["resume"] = True
+            result = fit(load_bundle(args.features), embeddings.load(args.embeddings), args.output, config, profile, args.device, provenance, **options)
         else:
             from engine.learning import predict
             from engine.metrics import evaluate

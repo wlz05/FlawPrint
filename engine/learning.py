@@ -7,6 +7,7 @@ from dataclasses import asdict, replace
 import hashlib
 import io
 import json
+import math
 import os
 from pathlib import Path
 from pickle import UnpicklingError
@@ -25,7 +26,7 @@ from engine.metrics import binary
 from engine.neural import NeuralConfig, ResidualAttention, BIASED
 from engine.profile import DomainProfile, ProfileConfig
 from engine.provenance import source_digest
-from engine.storage import relative_path, subset, read_json, write_json, validate_bundle, digest
+from engine.storage import relative_path, resolved, subset, read_json, write_json, validate_bundle, digest, native, atomic_stream, protect_outputs
 from engine.traces import NAMES
 
 def agreement(features: dict, observed: np.ndarray) -> np.ndarray:
@@ -311,6 +312,10 @@ def parameters(model: ResidualAttention, path: Path, checksum: str) -> None:
         raise ValueError("Cannot decode neural checkpoint weights") from error
     if digest(path) != checksum:
         raise ValueError("The neural checkpoint weights changed while loading")
+    validate_parameters(model, stored)
+    model.load_state_dict(stored)
+
+def validate_parameters(model: ResidualAttention, stored: dict) -> None:
     expected = model.state_dict()
     if not isinstance(stored, dict) or set(stored) != set(expected):
         raise ValueError("Neural checkpoint parameter names do not match the model")
@@ -320,7 +325,116 @@ def parameters(model: ResidualAttention, path: Path, checksum: str) -> None:
             raise ValueError("Neural checkpoint parameter shape or type is invalid: " + name)
         if not torch.isfinite(value).all():
             raise ValueError("Neural checkpoint parameters must be finite: " + name)
-    model.load_state_dict(stored)
+
+def training_protocol(bundle: dict, archive: dict, config: NeuralConfig, profile_config: ProfileConfig, device: str, implementation: str) -> dict:
+    from engine.experiment import bundle_digest
+    validate_bundle(bundle)
+    embeddings.validate(archive)
+    metadata = {"rows": archive["rows"], "encoders": signature(archive), "protocol": embeddings.protocol(archive)}
+    checksum = hashlib.sha256(json.dumps(native(metadata), sort_keys=True, ensure_ascii=True, allow_nan=False).encode())
+    for name, values in [("observed", archive["observed"]), *archive["features"].items()]:
+        array = np.ascontiguousarray(values)
+        checksum.update(name.encode() + str(array.shape).encode() + array.dtype.str.encode())
+        checksum.update(array.tobytes())
+    runtime = {"torch": str(torch.__version__), "numpy": np.__version__, "device_type": torch.device(device).type, "default_dtype": str(torch.get_default_dtype()), "matmul_precision": torch.get_float32_matmul_precision(), "deterministic_algorithms": torch.are_deterministic_algorithms_enabled()}
+    return native({"source_sha256": implementation, "physical_sha256": bundle_digest(bundle), "embedding_sha256": checksum.hexdigest(), "config": asdict(config), "profile_config": asdict(profile_config), "runtime": runtime})
+
+def read_training(path: Path, checksum: str, protocol: dict, model: ResidualAttention, optimizer, rng) -> dict:
+    content = path.read_bytes()
+    if hashlib.sha256(content).hexdigest() != checksum:
+        raise ValueError("The training state changed while loading")
+    try:
+        stored = torch.load(io.BytesIO(content), map_location="cpu", weights_only=True)
+    except (EOFError, UnpicklingError, RuntimeError, ValueError, TypeError, KeyError, IndexError) as error:
+        raise ValueError("Cannot decode the training state") from error
+    required = {"version", "protocol", "epoch", "model", "optimizer", "best", "best_score", "selected_epoch", "waiting", "history", "rng", "python_rng", "numpy_rng", "torch_rng", "cuda_rng"}
+    if not isinstance(stored, dict) or set(stored) != required or stored["version"] != "flawprint-training-v1":
+        raise ValueError("The training state format is invalid")
+    if stored["protocol"] != protocol:
+        raise ValueError("The training state protocol differs from the current run")
+    epoch, selected, waiting = (stored[name] for name in ("epoch", "selected_epoch", "waiting"))
+    if any(type(value) is not int for value in (epoch, selected, waiting)) or not 1 <= selected <= epoch <= protocol["config"]["epochs"] or not 0 <= waiting <= protocol["config"]["patience"]:
+        raise ValueError("The training state epoch counters are invalid")
+    history = stored["history"]
+    if not isinstance(history, list) or len(history) != epoch:
+        raise ValueError("The training state history is incomplete")
+    for index, row in enumerate(history, 1):
+        if not isinstance(row, dict) or type(row.get("epoch")) is not int or row["epoch"] != index:
+            raise ValueError("The training state history has inconsistent epochs")
+        if type(row.get("image_supervised_samples")) is not int or row["image_supervised_samples"] < 0:
+            raise ValueError("The training state history has invalid supervision counts")
+        for name in ("loss", "validation_macro_f1", "validation_accuracy", "validation_auc"):
+            value = row.get(name)
+            if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or value < 0 or name != "loss" and value > 1:
+                raise ValueError("The training state history contains invalid metrics")
+    scores = [row["validation_macro_f1"] for row in history]
+    if isinstance(stored["best_score"], bool) or not isinstance(stored["best_score"], (int, float)) or stored["best_score"] != max(scores) or selected != scores.index(max(scores)) + 1 or waiting != epoch - selected:
+        raise ValueError("The training state selection history is inconsistent")
+    validate_parameters(model, stored["model"])
+    validate_parameters(model, stored["best"])
+    previous, expected = stored["optimizer"], optimizer.state_dict()
+    if not isinstance(previous, dict) or set(previous) != {"state", "param_groups"} or not isinstance(previous["state"], dict):
+        raise ValueError("The training state optimizer is invalid")
+    try:
+        actual_groups = json.dumps(native(previous["param_groups"]), sort_keys=True, allow_nan=False)
+        expected_groups = json.dumps(native(expected["param_groups"]), sort_keys=True, allow_nan=False)
+    except (ValueError, TypeError) as error:
+        raise ValueError("The training state optimizer settings are invalid") from error
+    if actual_groups != expected_groups:
+        raise ValueError("The training state optimizer settings changed")
+    identifiers = {key: parameter for saved, group in zip(expected["param_groups"], optimizer.param_groups) for key, parameter in zip(saved["params"], group["params"])}
+    if set(previous["state"]) - set(identifiers):
+        raise ValueError("The training state optimizer has unknown parameters")
+    for key, fields in previous["state"].items():
+        if not isinstance(fields, dict) or set(fields) != {"step", "exp_avg", "exp_avg_sq"}:
+            raise ValueError("The training state optimizer tensors are incomplete")
+        for name, value in fields.items():
+            if not isinstance(value, torch.Tensor) or not value.is_floating_point() or value.device.type != "cpu" or value.layout != torch.strided or not torch.isfinite(value).all():
+                raise ValueError("The training state optimizer tensors are invalid")
+            if name == "step":
+                if value.numel() != 1 or value.item() < 0 or value.item() != int(value.item()):
+                    raise ValueError("The training state optimizer step is invalid")
+            elif value.shape != identifiers[key].shape or value.dtype != identifiers[key].dtype:
+                raise ValueError("The training state optimizer tensor shape or type changed")
+            elif name == "exp_avg_sq" and torch.any(value < 0):
+                raise ValueError("The training state optimizer variance is negative")
+    numpy_rng = stored["numpy_rng"]
+    if not isinstance(numpy_rng, (tuple, list)) or len(numpy_rng) != 5:
+        raise ValueError("The training state NumPy random state is invalid")
+    algorithm, keys, position, gaussian, cached = numpy_rng
+    if algorithm != "MT19937" or not isinstance(keys, torch.Tensor) or keys.device.type != "cpu" or keys.layout != torch.strided or keys.dtype != torch.int64 or keys.shape != (624,) or torch.any(keys < 0) or torch.any(keys >= 2 ** 32) or type(position) is not int or not 0 <= position <= 624 or type(gaussian) is not int or gaussian not in (0, 1) or isinstance(cached, bool) or not isinstance(cached, (int, float)) or not math.isfinite(cached):
+        raise ValueError("The training state NumPy random state is invalid")
+    cuda_rng = stored["cuda_rng"]
+    if protocol["runtime"]["device_type"] == "cuda":
+        if not isinstance(cuda_rng, torch.Tensor) or cuda_rng.device.type != "cpu" or cuda_rng.dtype != torch.uint8 or cuda_rng.ndim != 1:
+            raise ValueError("The training state CUDA random state is invalid")
+    elif cuda_rng is not None:
+        raise ValueError("A CPU training state cannot contain CUDA random state")
+    # Check random states without mutating the running model or generators.
+    try:
+        candidate = copy.deepcopy(rng)
+        candidate.bit_generator.state = stored["rng"]
+        random.Random(0).setstate(stored["python_rng"])
+        np.random.RandomState(0).set_state((algorithm, keys.cpu().numpy().astype(np.uint32), position, gaussian, cached))
+        torch.Generator(device="cpu").set_state(stored["torch_rng"])
+        if cuda_rng is not None:
+            torch.Generator(device=next(model.parameters()).device).set_state(cuda_rng)
+    except (KeyError, TypeError, ValueError, RuntimeError, AttributeError) as error:
+        raise ValueError("The training state contains invalid random generators") from error
+    if digest(path) != checksum:
+        raise ValueError("The training state changed while loading")
+    try:
+        model.load_state_dict(stored["model"])
+        optimizer.load_state_dict(previous)
+        rng.bit_generator.state = stored["rng"]
+        random.setstate(stored["python_rng"])
+        np.random.set_state((algorithm, keys.cpu().numpy().astype(np.uint32), position, gaussian, cached))
+        torch.set_rng_state(stored["torch_rng"])
+        if stored["cuda_rng"] is not None:
+            torch.cuda.set_rng_state(stored["cuda_rng"], next(model.parameters()).device)
+    except (KeyError, TypeError, ValueError, RuntimeError, AttributeError) as error:
+        raise ValueError("The training state cannot restore optimizer or random states") from error
+    return stored
 
 def artifacts(root: Path, metadata: dict, checksum: str) -> dict[Path, str]:
     # Require the complete saved reference set after a model transfer.
@@ -340,6 +454,8 @@ def artifacts(root: Path, metadata: dict, checksum: str) -> dict[Path, str]:
     return files
 
 def publish(destination: Path, parameters: dict, profiles: dict, metadata: dict, provenance: dict | None = None) -> None:
+    if "source_sha256" in metadata and source_digest() != metadata["source_sha256"]:
+        raise ValueError("The source implementation changed before checkpoint publication")
     destination.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(dir=destination.parent, prefix=".flawprint-") as temporary:
         stage = relative_path(os.path.relpath(temporary))
@@ -357,6 +473,8 @@ def publish(destination: Path, parameters: dict, profiles: dict, metadata: dict,
             write_json(stage / "provenance.json", provenance)
             if any(digest(item["path"]) != item["sha256"] for item in provenance["inputs"]):
                 raise ValueError("An input changed during training; the checkpoint was not published")
+        if "source_sha256" in metadata and source_digest() != metadata["source_sha256"]:
+            raise ValueError("The source implementation changed before checkpoint publication")
         prepared = destination.exists()
         if prepared:
             if not destination.is_dir() or any(destination.iterdir()):
@@ -371,19 +489,45 @@ def publish(destination: Path, parameters: dict, profiles: dict, metadata: dict,
                 destination.mkdir(exist_ok=True)
             raise
 
-def fit(bundle: dict, archive: dict, output: str, config: NeuralConfig, profile_config: ProfileConfig, device: str = "cuda:0", provenance: dict | None = None) -> dict:
+def fit(bundle: dict, archive: dict, output: str, config: NeuralConfig, profile_config: ProfileConfig, device: str = "cuda:0", provenance: dict | None = None, state_path: str | None = None, resume: bool = False) -> dict:
+    if not isinstance(config, NeuralConfig) or not isinstance(profile_config, ProfileConfig):
+        raise ValueError("Training requires neural and reference configurations")
+    config, profile_config = copy.deepcopy(config), copy.deepcopy(profile_config)
     config.validate()
     profile_config.validate()
+    if type(resume) is not bool or resume and state_path is None:
+        raise ValueError("Resume requires a relative training state path")
+    implementation = source_digest()
     if provenance is not None:
         if not isinstance(provenance, dict) or not isinstance(provenance.get("inputs"), list) or any(not isinstance(item, dict) or not isinstance(item.get("path"), str) or not isinstance(item.get("sha256"), str) or re.fullmatch("[0-9a-f]{64}", item["sha256"]) is None for item in provenance["inputs"]):
             raise ValueError("Training provenance requires input paths and SHA256 strings")
         provenance = copy.deepcopy(provenance)
+        if "source_sha256" in provenance and provenance["source_sha256"] != implementation:
+            raise ValueError("Training provenance describes a different source implementation")
         if any(digest(item["path"]) != item["sha256"] for item in provenance["inputs"]):
             raise ValueError("A training input changed before fitting")
     destination = relative_path(output)
     if destination.exists() and (not destination.is_dir() or any(destination.iterdir())):
         raise ValueError("Choose a new or empty model output directory")
+    training_file = relative_path(state_path) if state_path is not None else None
+    state_checksum = None
+    if training_file is not None:
+        validate_bundle(bundle)
+        if training_file.suffix.lower() not in (".pt", ".pth"):
+            raise ValueError("A training state file must use the pt or pth extension")
+        if resolved(training_file).is_relative_to(resolved(destination)) or resolved(destination).is_relative_to(resolved(training_file)):
+            raise ValueError("The training state must remain outside the model directory")
+        inputs = [item["path"] for item in provenance["inputs"]] if provenance is not None else []
+        inputs.extend(row["image"] for row in bundle["rows"] if row.get("image"))
+        protect_outputs([training_file], inputs)
+        if resume:
+            if not training_file.is_file():
+                raise ValueError("A complete training state file is required for resume")
+            state_checksum = digest(training_file)
+        elif training_file.exists():
+            raise ValueError("Choose a fresh training state file or enable resume")
     device = embeddings.runtime(device)
+    protocol = training_protocol(bundle, archive, config, profile_config, device, implementation) if training_file is not None else None
     random.seed(config.seed)
     np.random.seed(config.seed)
     torch.manual_seed(config.seed)
@@ -411,7 +555,14 @@ def fit(bundle: dict, archive: dict, output: str, config: NeuralConfig, profile_
     model = ResidualAttention(dimensions, len(bundle["names"]), config).to(device)
     optimizer = torch.optim.AdamW((value for value in model.parameters() if value.requires_grad), lr=config.learning_rate, weight_decay=config.weight_decay)
     rng, history, best, best_score, patience, selected_epoch = np.random.default_rng(config.seed), [], None, -1.0, 0, 0
-    for epoch in range(config.epochs):
+    start_epoch = 0
+    if resume:
+        saved = read_training(training_file, state_checksum, protocol, model, optimizer, rng)
+        start_epoch, history, best, best_score, patience, selected_epoch = (saved[name] for name in ("epoch", "history", "best", "best_score", "waiting", "selected_epoch"))
+        print(json.dumps({"stage": "resuming", "seed": config.seed, "completed_epochs": start_epoch}), flush=True)
+    for epoch in range(start_epoch, config.epochs):
+        if patience >= config.patience:
+            break
         model.train()
         order = rng.permutation(partitions["train"]).tolist()
         total, auxiliary_count = 0.0, 0
@@ -437,13 +588,27 @@ def fit(bundle: dict, archive: dict, output: str, config: NeuralConfig, profile_
         risks = logits(model, packet, partitions["validation"], device, config.batch_size)
         validation = binary(labels["validation"], risks)
         history.append({"epoch": epoch + 1, "loss": total / len(order), "validation_macro_f1": validation["macro_f1"], "validation_accuracy": validation["accuracy"], "validation_auc": validation["auc"], "image_supervised_samples": auxiliary_count})
-        print(json.dumps({"stage": "training", "seed": config.seed, **history[-1]}, allow_nan=False), flush=True)
         if validation["macro_f1"] > best_score:
             best_score, patience = validation["macro_f1"], 0
             selected_epoch = epoch + 1
             best = {name: value.detach().cpu().clone() for name, value in model.state_dict().items()}
         else:
             patience += 1
+        if training_file is not None:
+            if source_digest() != implementation:
+                raise ValueError("The source implementation changed during training")
+            if (digest(training_file) if training_file.exists() else None) != state_checksum:
+                raise ValueError("The training state changed before publication")
+            optimizer_state = optimizer.state_dict()
+            optimizer_state["param_groups"] = native(optimizer_state["param_groups"])
+            algorithm, keys, position, gaussian, cached = np.random.get_state()
+            numpy_rng = (algorithm, torch.as_tensor(keys.astype(np.int64), dtype=torch.int64, device="cpu"), int(position), int(gaussian), float(cached))
+            snapshot = {"version": "flawprint-training-v1", "protocol": protocol, "epoch": epoch + 1, "model": {name: value.detach().cpu().clone() for name, value in model.state_dict().items()}, "optimizer": optimizer_state, "best": best, "best_score": float(best_score), "selected_epoch": selected_epoch, "waiting": patience, "history": native(history), "rng": rng.bit_generator.state, "python_rng": random.getstate(), "numpy_rng": numpy_rng, "torch_rng": torch.get_rng_state(), "cuda_rng": torch.cuda.get_rng_state(torch.device(device)) if torch.device(device).type == "cuda" else None}
+            # Commit complete epochs without replacing the previous state on failure.
+            with atomic_stream(training_file, binary=True) as stream:
+                torch.save(snapshot, stream)
+            state_checksum = digest(training_file)
+        print(json.dumps({"stage": "training", "seed": config.seed, **history[-1]}, allow_nan=False), flush=True)
         if patience >= config.patience:
             break
     model.load_state_dict(best)
@@ -451,7 +616,13 @@ def fit(bundle: dict, archive: dict, output: str, config: NeuralConfig, profile_
     calibration = scored(rows, partitions["calibration"], logits(model, packet, partitions["calibration"], device, config.batch_size))
     state = calibrate_rows(validation, calibration) if calibration else None
     fit_rows = [rows[index] for role in ("train", "validation", "calibration") for index in partitions[role]]
-    metadata = {"version": "flawprint-neural-v2", "relation_operator": "content-conditioned-reference-v2", "config": asdict(config), "dimensions": dimensions, "feature_order": list(dimensions), "trace_names": bundle["names"].tolist(), "normalizers": normalizers, "encoder_signature": signature(archive), "calibration": state, "fit_identifiers": [row["id"] for row in fit_rows], "fit_history": collect(fit_rows), "source_sha256": source_digest(), "selection_metric": "source validation macro F1", "trainable_parameters": sum(value.numel() for value in model.parameters() if value.requires_grad), "history": history, "best_validation_macro_f1": best_score, "backbones": "Frozen local feature encoders; trainable projectors, attention and heads", "target_labels_used_for_fitting": False}
+    if source_digest() != implementation:
+        raise ValueError("The source implementation changed during training")
+    metadata = {"version": "flawprint-neural-v2", "relation_operator": "content-conditioned-reference-v2", "config": asdict(config), "dimensions": dimensions, "feature_order": list(dimensions), "trace_names": bundle["names"].tolist(), "normalizers": normalizers, "encoder_signature": signature(archive), "calibration": state, "fit_identifiers": [row["id"] for row in fit_rows], "fit_history": collect(fit_rows), "source_sha256": implementation, "selection_metric": "source validation macro F1", "trainable_parameters": sum(value.numel() for value in model.parameters() if value.requires_grad), "history": history, "best_validation_macro_f1": best_score, "backbones": "Frozen local feature encoders; trainable projectors, attention and heads", "target_labels_used_for_fitting": False}
+    if training_file is not None:
+        if digest(training_file) != state_checksum:
+            raise ValueError("The training state changed before model publication")
+        metadata["training_state"] = {"path": training_file.as_posix(), "sha256": state_checksum, "resumed_from_epoch": start_epoch, "completed_epochs": len(history)}
     metadata["environment"] = {"python": platform.python_version(), "torch": str(torch.__version__), "numpy": np.__version__, "device": device, "cuda_runtime": torch.version.cuda, "gpu": torch.cuda.get_device_name(torch.device(device)) if torch.device(device).type == "cuda" else None}
     metadata["embedding_protocol"] = embeddings.protocol(archive)
     metadata["partition_counts"] = {role: sum(row["split"] == role for row in rows) for role in ("train", "validation", "calibration", "profile", "test")}

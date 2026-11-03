@@ -224,7 +224,14 @@ Each epoch prints training loss and validation Macro-F1, Accuracy, and AUC. The 
 
 These controls are saved with the selected model and restored during prediction. They do not change the formal train, validation, or test membership. The standard CRA configuration keeps them disabled.
 
-After interrupted training, rerun the command with the same caches, configuration, and seed using a new or still-empty model directory. Training begins at epoch 1. The complete selected checkpoint is published as one directory; a failed final rename restores a pre-existing empty destination.
+Use `--state` to save an atomic checkpoint after each complete epoch. The state contains current and selected weights, optimizer moments, validation history, early-stopping counters, and Python, NumPy, PyTorch, and CUDA random states. Add `--resume` to the same command after interruption. A partially completed epoch is rerun from the last saved boundary. Resumption requires matching caches, configuration, source code, and numerical runtime settings; it preserves validation-based model selection.
+
+Keep the `.pt` or `.pth` state file outside the selected model directory. A fresh run requires a new state file; resumption reads the existing file. Move the state, repository, caches, and configurations together when changing machines. Prediction uses the published model directory independently of the training-state file. Without `--state`, an interrupted run restarts at epoch 1. The complete selected checkpoint is published as one directory; a failed final rename restores a pre-existing empty destination.
+
+```bash
+python -B deep.py train ./data/features.npz ./data/deep.npz --dataset weibo --seed 42 --device cuda:0 --state ./outputs/neural42/progress.pt --output ./models/neural42
+python -B deep.py train ./data/features.npz ./data/deep.npz --dataset weibo --seed 42 --device cuda:0 --state ./outputs/neural42/progress.pt --resume --output ./models/neural42
+```
 
 ```bash
 python -B deep.py train ./data/features.npz ./data/deep.npz --dataset weibo --config builtin:neural --profile-config builtin:default --seed 42 --mode coupled --device cuda:0 --output ./models/neural42
