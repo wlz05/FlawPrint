@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 import ast
+from copy import deepcopy
 from dataclasses import asdict, dataclass, field
 from decimal import Decimal, InvalidOperation
 import json
@@ -147,9 +148,14 @@ def label_token(value: object) -> str:
     return token
 
 def convert_records(records: list[dict], config: Conversion, source: str = "") -> tuple[list[dict], dict]:
+    if not isinstance(config, Conversion):
+        raise ValueError("Conversion requires an explicit configuration")
     config.validate()
-    if not records:
-        raise ValueError("The input table is empty")
+    config = deepcopy(config)
+    if (not isinstance(records, list) or not records
+            or any(not isinstance(row, dict) or any(not isinstance(key, str) or not key.strip()
+                   for key in row) for row in records)):
+        raise ValueError("The input table requires nonempty rows with string column names")
     columns = resolve_columns(records, config)
     convention = config.labels or ("real-one" if config.dataset == "finefake" else "fake-one")
     rows, generated, excluded, expanded, discarded, removed_labels = [], 0, 0, 0, 0, 0
@@ -163,6 +169,8 @@ def convert_records(records: list[dict], config: Conversion, source: str = "") -
         if domain in config.exclude_domains:
             excluded += 1
             continue
+        if config.dataset in ("weibo", "weibo21", "finefake") and missing(value("domain")):
+            raise ValueError(f"Row {number} is missing its required domain")
         paths = [portable_image(path, config.image_root) for path in images(value("image"), config)]
         if not text.strip() and not any(paths):
             raise ValueError(f"Row {number} requires text or an image")
@@ -177,6 +185,8 @@ def convert_records(records: list[dict], config: Conversion, source: str = "") -
         group = identifier(value("group")) or raw_id
         split = config.split or config.split_map.get(str(value("split")).strip(), value("split"))
         raw_label = value("label", None)
+        if canonical_split(split) in ("train", "validation", "calibration") and missing(raw_label):
+            raise ValueError(f"Row {number} requires a news label for its {canonical_split(split)} role")
         profile_label = canonical_split(split) == "profile" and not missing(raw_label)
         if canonical_split(split) == "profile":
             # Reference rows discard annotations before label interpretation.
@@ -203,6 +213,8 @@ def convert_records(records: list[dict], config: Conversion, source: str = "") -
         for key in config.keep_columns:
             if key in protected or key in FIELDS:
                 raise ValueError("Retained columns cannot override canonical fields")
+            if key not in original:
+                raise ValueError(f"Row {number} is missing retained column: {key}")
             base[key] = original[key]
         selected = paths if config.image_policy == "all" else paths[:1]
         expanded += max(0, len(selected) - 1)

@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 import argparse
+from copy import deepcopy
 from pathlib import Path
 from engine.storage import digest, read_json, read_rows, relative_path, resolved, same_path, write_json, write_rows, protect_outputs, staged_outputs
 from engine.data import audit_splits, normalize
@@ -10,6 +11,11 @@ from engine.formats import Conversion, FIELDS, convert_records
 from engine.package import configuration, is_builtin
 
 def convert_files(inputs: list[str], config: Conversion, encoding: str = "utf-8-sig", delimiter: str | None = None, records_key: str | None = None, sheet: str | int = 0, trusted_pickle: bool = False, check_files: bool = False) -> tuple[list[dict], dict]:
+    if not isinstance(config, Conversion):
+        raise ValueError("Conversion requires an explicit configuration")
+    config.validate()
+    # Use one mapping snapshot across every source table.
+    config = deepcopy(config)
     paths = [relative_path(item) for item in inputs]
     if not paths or any(same_path(first, second) for index, first in enumerate(paths) for second in paths[index + 1:]):
         raise ValueError("Input files must be nonempty and distinct")

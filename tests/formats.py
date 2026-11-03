@@ -357,6 +357,51 @@ class FormatTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "Mapped column"):
             convert_records(self.records, Conversion(columns={"text": "missing"}))
 
+    def test_supervised_roles_require_labels_in_every_row(self) -> None:
+        for role in ("train", "validation", "calibration", "val", "cal"):
+            for value in (None, "", np.nan):
+                records = [{"id": "one", "text": "First report.", "label": 0, "split": role},
+                    {"id": "two", "text": "Second report.", "label": value, "split": role}]
+                with self.subTest(role=role, value=value), self.assertRaisesRegex(ValueError, "Row 2 requires a news label"):
+                    convert_records(records, Conversion())
+        for role in ("profile", "test", "unspecified"):
+            rows, _ = convert_records([{"text": "Unlabeled report.", "split": role}], Conversion())
+            self.assertNotIn("label", rows[0])
+
+    def test_dataset_domains_cannot_be_missing_below_an_existing_header(self) -> None:
+        for dataset in ("weibo", "weibo21", "finefake"):
+            records = [{"id": "one", "text": "First.", "domain": "science", "label": 0},
+                {"id": "two", "text": "Second.", "label": 1}]
+            with self.subTest(dataset=dataset), self.assertRaisesRegex(ValueError, "Row 2.*domain"):
+                convert_records(records, Conversion(dataset=dataset, labels="fake-one"))
+
+    def test_conversion_direct_inputs_fail_with_explicit_schema_errors(self) -> None:
+        for records in (None, {}, [], [None], [[1]], [{1: "text"}], [{"": "text"}]):
+            with self.subTest(records=records), self.assertRaises(ValueError):
+                convert_records(records, Conversion())
+        with self.assertRaises(ValueError):
+            convert_records(self.records, None)
+        with self.assertRaisesRegex(ValueError, "Row 2.*retained"):
+            convert_records([{"text": "First.", "extra": 1}, {"text": "Second."}],
+                Conversion(keep_columns=["extra"]))
+
+    def test_conversion_freezes_one_mapping_for_the_complete_input_batch(self) -> None:
+        paths = [self.root / "first.jsonl", self.root / "second.jsonl"]
+        config = Conversion(labels="fake-one", domain_map={"source": "science"})
+        for index, path in enumerate(paths):
+            write_rows(path, [{"id": str(index), "text": "Report " + str(index),
+                "label": 0, "domain": "source", "split": "train"}])
+        def changing(path, *options):
+            config.labels = "real-one"
+            config.domain_map["source"] = "politics"
+            return read_rows(path, *options)
+        with patch("convert.read_rows", side_effect=changing):
+            rows, report = convert_files([path.as_posix() for path in paths], config)
+        self.assertEqual([row["label"] for row in rows], [0, 0])
+        self.assertEqual({row["domain"] for row in rows}, {"science"})
+        self.assertEqual(report["configuration"]["labels"], "fake-one")
+        self.assertEqual(report["configuration"]["domain_map"], {"source": "science"})
+
     def test_ambiguous_aliases_require_a_mapping(self) -> None:
         records = [{"content": "one", "body": "two"}]
         with self.assertRaisesRegex(ValueError, "Ambiguous"):
