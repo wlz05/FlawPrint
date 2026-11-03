@@ -147,6 +147,8 @@ Run commands from the repository root. All image, model, and output paths are re
 
 Blank optional cells are treated as absent in CSV, TSV, Excel, and Parquet. Frame selectors and FineFake source ordinals retain integer values after conversion; Boolean selectors, fractional values, and out-of-range ordinals are rejected. The same metadata survives JSON and table round trips without changing sample IDs or partition roles.
 
+Dataset presets retain the declared frame, trace-availability, and FineFake partition fields automatically. Use `--keep-column` for additional custom metadata. Conversion validates the retained fields before publishing the manifest and keeps the preset's label direction.
+
 Do not infer `physical_manipulated` from news labels. Missing attributes remain unknown. The `schema`, `conversion`, and `labels` presets in [engine/package.py](engine/package.py) define the row contract and conversion rules.
 
 ```bash

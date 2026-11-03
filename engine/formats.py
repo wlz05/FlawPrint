@@ -196,7 +196,8 @@ def convert_records(records: list[dict], config: Conversion, source: str = "") -
             for key, item in original.items():
                 if key not in columns.values() and key not in protected:
                     base[key] = item
-        for key in ("semantic_logit", "physical_manipulated", "narrative_false", "patch_signs_valid_after_attack", "content_sha256"):
+        # Retain declared image and partition semantics for every dataset.
+        for key in ("semantic_logit", "physical_manipulated", "narrative_false", "patch_signs_valid_after_attack", "content_sha256", "image_frame", "physical_trace_disabled", "benchmark_protocol", "source_ordinal"):
             if key in original or key in columns:
                 base[key] = value(key) if key in columns else original[key]
         for key in config.keep_columns:

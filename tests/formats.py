@@ -381,6 +381,37 @@ class FormatTests(unittest.TestCase):
         self.assertEqual(rows[0]["scenario"], "real_photo_false_text")
         self.assertEqual(rows[0]["details"], {"version": 1})
 
+    def test_dataset_converters_retain_frame_and_trace_availability(self) -> None:
+        image = self.root / "animated.gif"
+        Image.new("RGB", (64, 64), "red").save(image, save_all=True, append_images=[Image.new("RGB", (64, 64), "blue")], duration=100)
+        for dataset in ("weibo", "weibo21", "finefake"):
+            for disabled in ("true", "false"):
+                with self.subTest(dataset=dataset, disabled=disabled):
+                    record = dict(self.records[0], image=image.as_posix(), image_frame="0", physical_trace_disabled=disabled)
+                    rows, _ = convert_records([record], Conversion(dataset=dataset, labels="fake-one"))
+                    self.assertEqual(rows[0]["image_frame"], 0)
+                    self.assertIs(rows[0]["physical_trace_disabled"], disabled == "true")
+                    _, observed, _, metadata = extract_one(rows[0], TraceConfig())
+                    self.assertTrue(metadata["has_image"])
+                    self.assertEqual(bool(observed[:20].any()), disabled == "false")
+
+    def test_finefake_preset_keeps_released_row_contract_and_label_direction(self) -> None:
+        from engine.package import configuration
+        records = [{"id": "finefake:" + str(index), "group": "finefake:" + str(index), "source_ordinal": index, "benchmark_protocol": "finefake-paper-3407", "text": "A repeated released caption.", "domain": "Science", "split": role, "label": index} for index, role in enumerate(("train", "test"))]
+        source = self.root / "released.csv"
+        write_rows(source, records)
+        rows, report = convert_files([source.as_posix()], Conversion(**configuration("builtin:finefake")))
+        self.assertEqual([row["id"] for row in rows], ["finefake:0", "finefake:1"])
+        self.assertEqual([row["source_ordinal"] for row in rows], [0, 1])
+        self.assertEqual([row["label"] for row in rows], [1, 0])
+        self.assertEqual([row["split"] for row in rows], ["train", "test"])
+        self.assertEqual(report["audit"]["benchmark_protocol"], "finefake-paper-3407")
+
+    def test_dataset_conversion_does_not_discard_invalid_frame_metadata(self) -> None:
+        for metadata in ({"image_frame": True}, {"image_frame": 1}, {"physical_trace_disabled": "maybe"}):
+            with self.subTest(metadata=metadata), self.assertRaises(ValueError):
+                convert_records([dict(self.records[0], **metadata)], Conversion(dataset="weibo"))
+
     def test_image_only_tables_keep_an_empty_text_field(self) -> None:
         rows, _ = convert_records([{"id": "photo", "image": "photo.jpg"}], Conversion())
         self.assertEqual(rows[0]["text"], "")
