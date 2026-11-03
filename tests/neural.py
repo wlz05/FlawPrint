@@ -105,6 +105,41 @@ class NeuralTests(unittest.TestCase):
         torch.testing.assert_close(normalized[:, :, 5:, 5:], original[:, :, 5:, 5:])
         torch.testing.assert_close(normalized[:, :, :5, 5:], original[:, :, :5, 5:] * math.sqrt(3))
 
+    def test_local_text_pooling_rejects_ambiguous_or_oversized_configuration(self):
+        root = self.root / "invalid pooling"
+        root.mkdir()
+        torch.save({}, root / "pooler.pt")
+        configurations = ('{"version":1,"hidden_size":8,"hidden_size":16,"width":4}', '{"version":1,"hidden_size":NaN,"width":4}', '{"version":1,"hidden_size":true,"width":4}', '{"version":1,"hidden_size":8,"width":false}', '{"version":1,"hidden_size":8192,"width":1}', '{"version":1,"hidden_size":8,"width":0}')
+        for content in configurations:
+            with self.subTest(content=content):
+                (root / "pooler.json").write_text(content, encoding="utf-8")
+                with patch("engine.neural.TextPool", side_effect=AssertionError("Invalid model allocation")):
+                    with self.assertRaises(ValueError):
+                        embeddings.load_pooler(root)
+
+    def test_local_text_pooling_validates_parameters_before_device_transfer(self):
+        from engine.neural import TextPool
+        root = self.root / "damaged pooling"
+        root.mkdir()
+        write_json(root / "pooler.json", dict(version=1, hidden_size=8, width=4))
+        valid = TextPool(8, 4).state_dict()
+        key = next(iter(valid))
+        cases = [dict(valid, extra=torch.zeros(1)), {name: value for name, value in valid.items() if name != key}, dict(valid, **{key: valid[key].double()}), dict(valid, **{key: torch.full_like(valid[key], torch.nan)}), dict(valid, **{key: valid[key][:-1]}), [valid[key]]]
+        for state in cases:
+            with self.subTest(state=type(state).__name__):
+                torch.save(state, root / "pooler.pt")
+                with patch.object(TextPool, "to", side_effect=AssertionError("Premature device transfer")):
+                    with self.assertRaisesRegex(ValueError, "pooling"):
+                        embeddings.load_pooler(root, "cuda:0")
+        (root / "pooler.pt").write_bytes(b"broken parameters")
+        with self.assertRaisesRegex(ValueError, "pooling"):
+            embeddings.load_pooler(root)
+        (root / "pooler.json").write_text(json.dumps(dict(version=1, hidden_size=8, width=4)), encoding="utf-8-sig")
+        torch.save(valid, root / "pooler.pt")
+        restored = embeddings.load_pooler(root)
+        self.assertFalse(restored.training)
+        self.assertTrue(all(not value.requires_grad for value in restored.parameters()))
+
     def test_unit_coordinates_bound_and_missing_anchor_gradients(self):
         logits = torch.randn(3, 2, 9, 9, requires_grad=True)
         observed = torch.ones(3, 9, dtype=torch.bool)

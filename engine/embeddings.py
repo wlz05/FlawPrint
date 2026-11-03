@@ -4,9 +4,11 @@
 from __future__ import annotations
 import hashlib
 import inspect
+import io
 import json
 from importlib.metadata import version
 from pathlib import Path, PureWindowsPath
+from pickle import UnpicklingError
 import re
 from zipfile import BadZipFile
 from zlib import error as CompressionError
@@ -85,12 +87,27 @@ def load_pooler(directory: str, device: str = "cpu"):
         return None
     if not config.is_file() or not parameters.is_file():
         raise ValueError("Local text pooling requires its configuration and parameters")
-    settings = json.loads(config.read_text(encoding="utf-8"))
+    settings = parse_json(config.read_text(encoding="utf-8-sig"))
     if not isinstance(settings, dict) or set(settings) != {"version", "hidden_size", "width"} or type(settings["version"]) is not int or settings["version"] != 1:
         raise ValueError("Unknown local text pooling configuration")
-    model = TextPool(settings["hidden_size"], settings["width"]).to(device)
-    model.load_state_dict(torch.load(parameters, map_location=device, weights_only=True))
-    return model.eval().requires_grad_(False)
+    sizes = (settings["hidden_size"], settings["width"])
+    if any(type(value) is not int or value < 1 for value in sizes) or sizes[0] + 3 * sizes[1] > 8192:
+        raise ValueError("Local text pooling dimensions exceed the feature contract")
+    model = TextPool(*sizes)
+    try:
+        stored = torch.load(io.BytesIO(parameters.read_bytes()), map_location="cpu", weights_only=True)
+    except (EOFError, UnpicklingError, RuntimeError, ValueError, TypeError, KeyError, IndexError) as error:
+        raise ValueError("Cannot decode local text pooling parameters") from error
+    expected = model.state_dict()
+    if not isinstance(stored, dict) or set(stored) != set(expected):
+        raise ValueError("Local text pooling parameter names do not match")
+    for name, value in stored.items():
+        target = expected[name]
+        if not isinstance(value, torch.Tensor) or value.device.type != "cpu" or value.layout != torch.strided or value.shape != target.shape or value.dtype != target.dtype or not torch.isfinite(value).all():
+            raise ValueError("Invalid local text pooling parameter: " + name)
+    # Validate the complete state before allocating accelerator memory.
+    model.load_state_dict(stored)
+    return model.to(device).eval().requires_grad_(False)
 
 def cliptext(model, inputs):
     if model.config.model_type == "chinese_clip":

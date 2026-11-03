@@ -195,6 +195,8 @@ Extraction also supports the following controls:
 
 A local text checkpoint containing both `pooler.json` and `pooler.pt` restores its trained class-token and CNN readout automatically. The cache records the actual readout, preprocessing definition, and encoder identity. Training and prediction require matching feature protocols; regenerate caches together when changing these settings.
 
+Pooler loading checks the configuration and every parameter on CPU before moving the model to the selected device. Duplicate configuration keys, unsupported dimensions, missing tensors, incompatible shapes or dtypes, and nonfinite weights produce an explicit error. UTF-8 files with a byte-order mark are supported.
+
 Add `--forensic ./models/forensic` for a separately trained, Hugging Face-compatible forensic CLIP image encoder. This interface reads pooled image features. Every compared mode uses the same encoder set and cached sample identities. Image edits, JPEG compression, or resizing are followed by extraction of both physical and deep features.
 
 ## Train and Predict
