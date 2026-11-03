@@ -13,7 +13,7 @@ import re
 from zipfile import BadZipFile
 from zlib import error as CompressionError
 import numpy as np
-from engine.data import normalize, missing, row_namespace
+from engine.data import normalize, missing, row_namespace, portable_image
 from engine.storage import relative_path, digest, native, parse_json, atomic_stream, validate_bundle
 
 STREAMS = ("bert", "mae", "clip_text", "clip_image")
@@ -186,6 +186,26 @@ def validate(archive: dict) -> None:
         raise ValueError("Each sample requires at least one observed deep stream")
     if not isinstance(archive.get("provenance"), dict):
         raise ValueError("Embedding provenance is required")
+    if "image_sha256" in archive["provenance"]:
+        fingerprints = archive["provenance"]["image_sha256"]
+        if not isinstance(fingerprints, dict):
+            raise ValueError("Embedding image provenance requires a path-to-SHA256 mapping")
+        images = {}
+        for path, checksum in fingerprints.items():
+            if not isinstance(path, str) or not path.strip() or not isinstance(checksum, str) or not re.fullmatch("[a-f0-9]{64}", checksum):
+                raise ValueError("Embedding image provenance has an invalid path or SHA256")
+            canonical = portable_image(path)
+            if not canonical or canonical in images and images[canonical] != checksum:
+                raise ValueError("Embedding image provenance contains conflicting path aliases")
+            images[canonical] = checksum
+        # Bind row metadata to the image bytes recorded during encoding.
+        for row in rows:
+            image = portable_image(row.get("image", ""))
+            checksum = row.get("content_sha256")
+            if image and (image not in images or checksum != images[image]):
+                raise ValueError("Embedding rows disagree with their recorded image provenance")
+            if not image and not missing(checksum):
+                raise ValueError("Text-only embedding rows cannot declare an image fingerprint")
     encoders = archive["provenance"].get("encoders", {})
     expected = {"bert", "mae", "clip"} | ({"forensic"} if "forensic" in names else set())
     if not isinstance(encoders, dict) or set(encoders) != expected or any(not isinstance(value, dict) or value.get("frozen") is not True or not re.fullmatch("[0-9a-f]{64}", str(value.get("sha256", ""))) for value in encoders.values()):

@@ -737,6 +737,53 @@ class NeuralTests(unittest.TestCase):
         self.archive["rows"][0]["content_sha256"] = "a" * 64
         embeddings.align(self.bundle, self.archive)
 
+    def test_embedding_rows_must_match_the_original_encoding_image_ledger(self) -> None:
+        archive = copy.deepcopy(self.archive)
+        archive["provenance"]["image_sha256"] = {}
+        for row in archive["rows"]:
+            row["content_sha256"] = "a" * 64
+            archive["provenance"]["image_sha256"][row["image"]] = "a" * 64
+        embeddings.validate(archive)
+        original = copy.deepcopy(archive)
+        archive["rows"][0]["content_sha256"] = "b" * 64
+        with self.assertRaisesRegex(ValueError, "image provenance"):
+            embeddings.validate(archive)
+        archive = copy.deepcopy(original)
+        archive["provenance"]["image_sha256"].pop(archive["rows"][0]["image"])
+        with self.assertRaisesRegex(ValueError, "image provenance"):
+            embeddings.validate(archive)
+
+    def test_image_ledger_path_aliases_are_portable_and_cannot_disagree(self) -> None:
+        archive = copy.deepcopy(self.archive)
+        for row in archive["rows"]:
+            row["content_sha256"] = "a" * 64
+        archive["provenance"]["image_sha256"] = {
+            row["image"].replace("/", "\\"): "a" * 64 for row in archive["rows"]}
+        embeddings.validate(archive)
+        archive["provenance"]["image_sha256"][archive["rows"][0]["image"]] = "b" * 64
+        with self.assertRaisesRegex(ValueError, "conflicting path aliases"):
+            embeddings.validate(archive)
+
+    def test_malformed_image_provenance_never_loads_as_a_valid_cache(self) -> None:
+        for ledger in (None, [], {"": "a" * 64}, {"images/a.jpg": "bad"},
+                {"/external/a.jpg": "a" * 64}, {"https://example.test/a.jpg": "a" * 64}):
+            archive = copy.deepcopy(self.archive)
+            archive["provenance"]["image_sha256"] = ledger
+            with self.subTest(ledger=ledger), self.assertRaises(ValueError):
+                embeddings.validate(archive)
+
+    def test_image_provenance_validation_does_not_require_original_images(self) -> None:
+        archive = copy.deepcopy(self.archive)
+        for row in archive["rows"]:
+            row["content_sha256"] = "a" * 64
+        archive["provenance"]["image_sha256"] = {row["image"]: "a" * 64 for row in archive["rows"]}
+        with patch("engine.embeddings.digest", side_effect=AssertionError("Cached validation must stay offline")):
+            embeddings.validate(archive)
+        path = self.root / "portable.npz"
+        embeddings.save(path.as_posix(), archive)
+        restored = embeddings.load(path.as_posix())
+        self.assertEqual(restored["provenance"]["image_sha256"], archive["provenance"]["image_sha256"])
+
     def test_cache_alignment_requires_matching_frame_selection(self) -> None:
         archive = copy.deepcopy(self.archive)
         archive["rows"][0]["image_frame"] = 0
