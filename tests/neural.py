@@ -625,7 +625,7 @@ class NeuralTests(unittest.TestCase):
             if command[3] == "train":
                 seed = int(command[command.index("--seed") + 1])
                 output.mkdir(parents=True)
-                write_json(output / "model.json", {"config": {"seed": seed}})
+                write_json(output / "model.json", {"config": {"seed": seed}, "source_sha256": deep.source_digest()})
             else:
                 model = command[command.index("--model") + 1]
                 seed = read_json(Path(model) / "model.json")["config"]["seed"]
@@ -642,8 +642,43 @@ class NeuralTests(unittest.TestCase):
         means = [result["byseed"][str(seed)]["accuracy"] for seed in deep.SEEDS]
         self.assertAlmostEqual(result["metrics"]["accuracy"]["mean"], sum(means) / 4)
         self.assertTrue((Path(args.output) / "summary.json").is_file())
+        self.assertEqual(result["protocol"]["source_sha256"], deep.source_digest())
         with self.assertRaisesRegex(ValueError, "fresh"):
             deep.experiment_commands(args)
+
+    def test_experiment_stops_on_source_changes_without_publishing_an_average(self) -> None:
+        import deep
+        from engine.metrics import evaluate
+        bundle, archive = self.source_data(("train", "validation", "test"))
+        physical, vectors = self.root / "physical.npz", self.root / "vectors.npz"
+        save_bundle(physical, bundle["values"], bundle["observed"], bundle["patches"], bundle["rows"], bundle["names"])
+        embeddings.save(vectors, archive)
+        predictions = [dict(row, prediction=row["label"], fusion_risk=float(2 * row["label"] - 1)) for row in bundle["rows"] if row["split"] == "test"]
+        for phase in ("training", "prediction", "between seeds", "checkpoint"):
+            with self.subTest(phase=phase):
+                state = {"source": "a" * 64}
+                args = SimpleNamespace(features=physical.as_posix(), embeddings=vectors.as_posix(), config="builtin:neural", profile_config="builtin:default", seeds=list(deep.SEEDS), dataset="weibo", mode="coupled", device="cpu", output=(self.root / phase).as_posix(), dry_run=False)
+                def launch(command, **kwargs):
+                    output = Path(command[command.index("--output") + 1])
+                    if command[3] == "train":
+                        output.mkdir(parents=True)
+                        seed = int(command[command.index("--seed") + 1])
+                        write_json(output / "model.json", {"config": {"seed": seed}, "source_sha256": "b" * 64 if phase == "checkpoint" else state["source"]})
+                        if phase == "training":
+                            state["source"] = "b" * 64
+                    else:
+                        write_rows(output, predictions)
+                        write_json(output.with_name(output.stem + ".report.json"), evaluate(predictions))
+                        if phase == "prediction":
+                            state["source"] = "b" * 64
+                def publish(path, value):
+                    write_json(path, value)
+                    if phase == "between seeds" and Path(path).name == "result.json":
+                        state["source"] = "b" * 64
+                with patch("deep.source_digest", side_effect=lambda: state["source"]), patch("deep.subprocess.run", side_effect=launch), patch("deep.write_json", side_effect=publish):
+                    with self.assertRaisesRegex(ValueError, "source|implementation"):
+                        deep.run_experiment(args)
+                self.assertFalse((Path(args.output) / "summary.json").exists())
 
     def test_four_training_seeds_keep_the_same_frozen_partitions(self) -> None:
         bundle, archive = self.source_data(("train", "validation", "test"))

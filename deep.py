@@ -77,7 +77,16 @@ def run_experiment(args):
     commands, inputs = experiment_commands(args)
     if args.dry_run:
         return {"seeds": list(args.seeds), "commands": [{"seed": seed, "train": train[1:], "predict": predict[1:]} for seed, train, predict in commands]}
+    # Keep every seed on the same executable source snapshot.
+    implementation = source_digest()
     fingerprints = {path.as_posix(): digest(path) for path in inputs}
+
+    def unchanged():
+        if source_digest() != implementation:
+            raise ValueError("The experiment source changed during the multi-seed run")
+        if any(digest(path) != checksum for path, checksum in fingerprints.items()):
+            raise ValueError("An experiment input changed during the multi-seed run")
+
     expected = load_bundle(args.features)
     expected = sorted((row["id"], row["label"], row["domain"]) for row in expected["rows"] if row["split"] == "test")
     if not expected:
@@ -87,27 +96,29 @@ def run_experiment(args):
     profile.pop("seed", None)
     if args.mode is not None:
         training["mode"] = args.mode
-    protocol = {"inputs": fingerprints, "training": training, "profile": profile, "dataset": args.dataset, "test_identities": expected}
+    protocol = {"inputs": fingerprints, "source_sha256": implementation, "training": training, "profile": profile, "dataset": args.dataset, "test_identities": expected}
     environment = dict(os.environ, PYTHONDONTWRITEBYTECODE="1")
     records = []
     for seed, train, predict in commands:
-        if any(digest(path) != checksum for path, checksum in fingerprints.items()):
-            raise ValueError("An experiment input changed between seeds")
+        unchanged()
         subprocess.run(train, check=True, env=environment)
+        unchanged()
         directory = relative_path(args.output) / ("seed" + str(seed))
         metadata = read_json(directory / "model" / "model.json")
-        if type(metadata.get("config", {}).get("seed")) is not int or metadata["config"]["seed"] != seed:
+        if not isinstance(metadata, dict) or not isinstance(metadata.get("config"), dict) or type(metadata["config"].get("seed")) is not int or metadata["config"]["seed"] != seed:
             raise ValueError("The selected checkpoint has a different training seed")
+        if metadata.get("source_sha256") != implementation:
+            raise ValueError("The selected checkpoint uses a different source implementation")
         subprocess.run(predict, check=True, env=environment)
+        unchanged()
         rows = read_rows(directory / "predictions.jsonl")
         if sorted((row.get("id"), row.get("label"), row.get("domain")) for row in rows) != expected:
             raise ValueError("All seeds must evaluate every frozen test identity exactly once")
-        if any(digest(path) != checksum for path, checksum in fingerprints.items()):
-            raise ValueError("An experiment input changed during a seed run")
         record = {"seed": seed, "protocol": protocol, "metrics": read_json(directory / "predictions.report.json")}
         seed_summary([record], [seed])
         write_json(directory / "result.json", record)
         records.append(record)
+    unchanged()
     result = seed_summary(records, args.seeds)
     write_json(relative_path(args.output) / "summary.json", result)
     return result

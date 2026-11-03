@@ -235,6 +235,8 @@ python -B deep.py experiment ./data/features.npz ./data/deep.npz --dataset weibo
 
 `experiment` defaults to these four seeds and runs each seed's training and selected-checkpoint test separately. `--dry-run` prints the commands. Each `seed<seed>/` directory contains the model, test predictions, the metric report, and `result.json`. `summary.json` stores individual seed metrics in `byseed` and metric means and sample standard deviations in `metrics`. The final mean is `(score42 + score52 + score3047 + score3407) / 4`; sample standard deviation uses denominator three. Metrics are calculated separately for each seed before averaging, with equal seed weights. Missing seeds or different input hashes or test identities prevent aggregation. A metric undefined for any seed retains an undefined overall mean. Use a fresh experiment directory for each dataset and model mode.
 
+The experiment fixes the Python source fingerprint before the first seed and checks it around every training and prediction run. Each selected checkpoint must carry that same fingerprint. Editing the implementation during the experiment stops the run before publishing a mixed-version average; completed seed records retain their original implementation identity.
+
 The single-run `train --seed` and `predict` commands remain available. Run the other experiment seeds with separate model directories:
 
 ```bash
