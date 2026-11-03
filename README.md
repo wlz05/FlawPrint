@@ -405,6 +405,12 @@ python -B main.py evaluate ./outputs/deterministic.jsonl --seed 42 --output ./ou
 
 `research.py channels` compares frozen semantic, physical, and forensic risks. `encode.py` supplies a local CLIP negative-similarity control. Neither command trains CRA.
 
+The alignment control accepts OpenAI CLIP and Chinese-CLIP checkpoints and uses their native text and image projections. `--max-length 128` is limited by the checkpoint context; `--text-processing eann` selects the same cleaning rule as feature extraction. Animated images require `image_frame: 0`. Exported rows record the encoder, image, implementation, and preprocessing identities. Changed inputs stop export before replacing an existing output.
+
+```bash
+python -B encode.py ./data/manifest.jsonl --model ./models/clip --max-length 128 --device cuda:0 --output ./outputs/clip.jsonl
+```
+
 ```bash
 python -B deep.py --help
 python -B research.py channels --help

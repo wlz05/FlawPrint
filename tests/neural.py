@@ -1838,6 +1838,98 @@ class NeuralTests(unittest.TestCase):
                     encode.main()
             self.assertEqual(output.read_bytes(), before)
 
+    def alignment_assets(self, family="chinese_clip"):
+        from PIL import Image
+        from transformers import CLIPConfig, CLIPModel, ChineseCLIPConfig, ChineseCLIPModel
+        directory = self.root / family
+        directory.mkdir()
+        text = dict(vocab_size=16, hidden_size=16, intermediate_size=32, num_hidden_layers=1, num_attention_heads=2, max_position_embeddings=8, pad_token_id=0, bos_token_id=2, eos_token_id=3)
+        vision = dict(hidden_size=16, intermediate_size=32, num_hidden_layers=1, num_attention_heads=2, image_size=16, patch_size=8)
+        configuration, model_type = (ChineseCLIPConfig, ChineseCLIPModel) if family == "chinese_clip" else (CLIPConfig, CLIPModel)
+        model = model_type(configuration(text_config=text, vision_config=vision, projection_dim=4)).eval()
+        model.save_pretrained(directory)
+        image = self.root / (family + ".png")
+        Image.new("RGB", (16, 16), "red").save(image)
+        class Processor:
+            tokenizer = SimpleNamespace(model_max_length=100000)
+            def __call__(self, text, images, **kwargs):
+                if kwargs.get("max_length") != 8 or kwargs.get("truncation") is not True:
+                    raise AssertionError("The checkpoint context was not respected")
+                pixels = torch.stack([torch.from_numpy(np.array(value.resize((16, 16)), copy=True)).permute(2, 0, 1).float() / 255 for value in images])
+                return {"input_ids": torch.tensor([[2, 7, 3]] * len(text)), "attention_mask": torch.ones(len(text), 3, dtype=torch.long), "pixel_values": pixels}
+        return directory, [{"id": "news", "image": image.as_posix(), "text": "A news caption."}], Processor(), model
+
+    def test_alignment_control_supports_native_clip_families_and_context_limits(self):
+        import encode
+        from PIL import Image
+        for family in ("clip", "chinese_clip"):
+            with self.subTest(family=family):
+                directory, rows, processor, model = self.alignment_assets(family)
+                with patch("transformers.AutoProcessor.from_pretrained", return_value=processor):
+                    result = encode.alignment(rows, directory, device="cpu", max_length=128)
+                with Image.open(rows[0]["image"]) as image:
+                    inputs = processor(text=[rows[0]["text"]], images=[image.convert("RGB")], truncation=True, max_length=8)
+                with torch.inference_mode():
+                    text = {key: value for key, value in inputs.items() if key != "pixel_values"}
+                    first = model.text_projection(model.text_model(**text).last_hidden_state[:, 0]) if family == "chinese_clip" else model.get_text_features(**text)
+                    second = model.get_image_features(pixel_values=inputs["pixel_values"])
+                    first, second = [getattr(value, "pooler_output", value).double() for value in (first, second)]
+                    expected = torch.nn.functional.cosine_similarity(first, second).item()
+                self.assertAlmostEqual(result[0]["alignment_cosine"], expected, places=6)
+                self.assertAlmostEqual(result[0]["logit"], -expected, places=6)
+                self.assertEqual(result[0]["text_context"], 8)
+                self.assertEqual(result[0]["encoder_sha256"], embeddings.checkpoint_digest(directory))
+                self.assertEqual(result[0]["content_sha256"], digest(rows[0]["image"]))
+
+    def test_alignment_control_requires_explicit_frames_and_current_image_bytes(self):
+        import encode
+        from PIL import Image
+        directory, rows, processor, _ = self.alignment_assets()
+        image = self.root / "animated.gif"
+        Image.new("RGB", (16, 16), "red").save(image, save_all=True, append_images=[Image.new("RGB", (16, 16), "blue")], duration=100)
+        animated = [dict(rows[0], image=image.as_posix())]
+        with patch("transformers.AutoProcessor.from_pretrained", return_value=processor):
+            with self.assertRaisesRegex(ValueError, "Animated or multipage"):
+                encode.alignment(animated, directory)
+            selected = encode.alignment([dict(animated[0], image_frame=0)], directory)
+            still = encode.alignment(rows, directory)
+            self.assertAlmostEqual(selected[0]["alignment_cosine"], still[0]["alignment_cosine"], places=6)
+            with self.assertRaisesRegex(ValueError, "checksum is stale"):
+                encode.alignment([dict(rows[0], content_sha256="0" * 64)], directory)
+
+    def test_alignment_control_preserves_outputs_when_inputs_change(self):
+        import encode
+        from PIL import Image
+        directory, rows, processor, _ = self.alignment_assets()
+        manifest, output = self.root / "manifest.jsonl", self.root / "alignment.jsonl"
+        write_rows(manifest, rows)
+        write_rows(output, [{"id": "previous"}])
+        existing = output.read_bytes()
+        arguments = ["encode.py", manifest.as_posix(), "--model", directory.as_posix(), "--output", output.as_posix(), "--device", "cpu"]
+        for kind, target in (("image", Path(rows[0]["image"])), ("encoder", directory / "config.json"), ("manifest", manifest)):
+            with self.subTest(kind=kind):
+                original = target.read_bytes()
+                def changing(*args, **kwargs):
+                    result = processor(*args, **kwargs)
+                    target.write_bytes(original + b" ")
+                    return result
+                try:
+                    with patch.object(sys, "argv", arguments), patch("transformers.AutoProcessor.from_pretrained", return_value=changing):
+                        changing.tokenizer = processor.tokenizer
+                        with self.assertRaises(SystemExit):
+                            encode.main()
+                    self.assertEqual(output.read_bytes(), existing)
+                finally:
+                    target.write_bytes(original)
+
+    def test_alignment_control_rejects_invalid_projection_vectors(self):
+        import encode
+        directory, rows, processor, _ = self.alignment_assets()
+        for value in (torch.zeros(1, 4), torch.full((1, 4), torch.nan), torch.zeros(4)):
+            with self.subTest(shape=tuple(value.shape)), patch("transformers.AutoProcessor.from_pretrained", return_value=processor), patch("engine.embeddings.cliptext", return_value=value):
+                with self.assertRaises(ValueError):
+                    encode.alignment(rows, directory)
+
     def test_failed_metric_validation_preserves_existing_prediction_files(self) -> None:
         import deep
         physical, vectors, output = self.root / "physical.npz", self.root / "vectors.npz", self.root / "predictions.jsonl"
