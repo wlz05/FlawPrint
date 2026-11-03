@@ -199,6 +199,8 @@ A local text checkpoint containing both `pooler.json` and `pooler.pt` restores i
 
 Pooler loading checks the configuration and every parameter on CPU before moving the model to the selected device. Duplicate configuration keys, unsupported dimensions, missing tensors, incompatible shapes or dtypes, and nonfinite weights produce an explicit error. UTF-8 files with a byte-order mark are supported.
 
+Selected models and text poolers restore float32 parameters on CPU before transfer to the requested device. Loading is independent of process-wide default dtype and device settings and preserves the caller's random state.
+
 Add `--forensic ./models/forensic` for a separately trained, Hugging Face-compatible forensic CLIP image encoder. This interface reads pooled image features. Every compared mode uses the same encoder set and cached sample identities. Image edits, JPEG compression, or resizing are followed by extraction of both physical and deep features.
 
 Physical and deep caches must agree on selected frames and the declared benchmark contract as well as sample IDs, content metadata, and image fingerprints. Cache alignment accepts equivalent relative slash styles and split aliases, validates physical row uniqueness before reindexing, and leaves both input archives unchanged.
@@ -229,9 +231,16 @@ Use `--state` to save an atomic checkpoint after each complete epoch. The state 
 Keep the `.pt` or `.pth` state file outside the selected model directory. A fresh run requires a new state file; resumption reads the existing file. Move the state, repository, caches, and configurations together when changing machines. Prediction uses the published model directory independently of the training-state file. Without `--state`, an interrupted run restarts at epoch 1. The complete selected checkpoint is published as one directory; a failed final rename restores a pre-existing empty destination.
 
 ```bash
-python -B deep.py train ./data/features.npz ./data/deep.npz --dataset weibo --seed 42 --device cuda:0 --state ./outputs/neural42/progress.pt --output ./models/neural42
-python -B deep.py train ./data/features.npz ./data/deep.npz --dataset weibo --seed 42 --device cuda:0 --state ./outputs/neural42/progress.pt --resume --output ./models/neural42
+python -B deep.py train ./data/features.npz ./data/deep.npz --dataset weibo --seed 42 --device cuda:0 --state ./outputs/resumable42/progress.pt --output ./models/resumable42
 ```
+
+After an interruption, resume the saved run with:
+
+```bash
+python -B deep.py train ./data/features.npz ./data/deep.npz --dataset weibo --seed 42 --device cuda:0 --state ./outputs/resumable42/progress.pt --resume --output ./models/resumable42
+```
+
+For the standard run without an epoch-state file:
 
 ```bash
 python -B deep.py train ./data/features.npz ./data/deep.npz --dataset weibo --config builtin:neural --profile-config builtin:default --seed 42 --mode coupled --device cuda:0 --output ./models/neural42

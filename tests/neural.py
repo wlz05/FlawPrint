@@ -95,6 +95,45 @@ class NeuralTests(unittest.TestCase):
         (root / "pooler.json").unlink()
         self.assertIsNone(embeddings.load_pooler(root))
 
+    def test_pooler_reload_ignores_default_dtype_and_device_without_consuming_rng(self):
+        from engine.neural import TextPool
+        directory = self.root / "pooler"
+        directory.mkdir()
+        model = TextPool(8, 4).eval()
+        write_json(directory / "pooler.json", dict(version=1, hidden_size=8, width=4))
+        torch.save(model.state_dict(), directory / "pooler.pt")
+        hidden, observed = torch.randn(2, 7, 8), torch.ones(2, 7, dtype=torch.bool)
+        expected = model(hidden, observed)
+        torch.manual_seed(52)
+        before = torch.get_rng_state().clone()
+        previous = torch.get_default_dtype()
+        try:
+            torch.set_default_dtype(torch.float64)
+            with torch.device("meta"):
+                restored = embeddings.load_pooler(directory, "cpu")
+                actual = restored(hidden, observed)
+        finally:
+            torch.set_default_dtype(previous)
+        torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+        self.assertTrue(all(value.device.type == "cpu" and value.dtype == torch.float32 for value in restored.parameters()))
+        self.assertTrue(torch.equal(torch.get_rng_state(), before))
+
+    def test_neural_reload_ignores_default_dtype_and_device_without_consuming_rng(self):
+        directory = self.root / "selected"
+        fit(self.bundle, self.archive, directory.as_posix(), replace(self.config, epochs=1), self.profile, "cpu")
+        expected = predict(self.bundle, self.archive, directory.as_posix(), device="cpu")
+        torch.manual_seed(3047)
+        before = torch.get_rng_state().clone()
+        previous = torch.get_default_dtype()
+        try:
+            torch.set_default_dtype(torch.float64)
+            with torch.device("meta"):
+                actual = predict(self.bundle, self.archive, directory.as_posix(), device="cpu")
+        finally:
+            torch.set_default_dtype(previous)
+        self.assertEqual(actual, expected)
+        self.assertTrue(torch.equal(torch.get_rng_state(), before))
+
     def test_unit_coordinates_remove_double_averaging(self):
         logits = torch.zeros(2, 2, 8, 8)
         observed = torch.ones(2, 8, dtype=torch.bool)
@@ -1062,6 +1101,67 @@ class NeuralTests(unittest.TestCase):
                         predict(self.bundle, self.archive, directory.as_posix(), device="cpu")
         write_json(directory / "model.json", original)
         self.assertTrue(predict(self.bundle, self.archive, directory.as_posix(), device="cpu"))
+
+    def test_invalid_checkpoint_normalizers_fail_before_loading_references(self) -> None:
+        directory = self.root / "normalizers"
+        fit(self.bundle, self.archive, directory.as_posix(), replace(self.config, epochs=1), self.profile, "cpu")
+        original = read_json(directory / "model.json")
+        cases = [dict(original, normalizers={})]
+        for key, value in (("center", [0.]), ("scale", [1.]),
+                ("scale", [0.] * original["dimensions"]["bert"]),
+                ("center", [True] * original["dimensions"]["bert"]), ("scale", None)):
+            damaged = copy.deepcopy(original)
+            damaged["normalizers"]["bert"][key] = value
+            cases.append(damaged)
+        for metadata in cases:
+            write_json(directory / "model.json", metadata)
+            with patch.object(DomainProfile, "load", side_effect=AssertionError("Reference loading must not start")):
+                with self.assertRaisesRegex(ValueError, "normalizer"):
+                    predict(self.bundle, self.archive, directory.as_posix(), device="cpu")
+
+    def test_unused_reference_files_are_checked_for_domain_and_feature_identity(self) -> None:
+        directory = self.root / "unusedreference"
+        fit(self.bundle, self.archive, directory.as_posix(), replace(self.config, epochs=1), self.profile, "cpu")
+        original = read_json(directory / "model.json")
+        reference = next(iter(original["profiles"]))
+        saved = read_json(directory / original["profiles"][reference])
+        extra = directory / "profiles" / "unused.json"
+        for change in ("domain", "columns", "names"):
+            document = copy.deepcopy(saved)
+            document["domain"] = "unused"
+            if change == "domain":
+                document["domain"] = "wrong"
+            elif change == "columns":
+                document["columns"][0] = len(original["trace_names"]) + 1
+            else:
+                document["names"][0] = "unrelated_trace"
+            write_json(extra, document)
+            metadata = copy.deepcopy(original)
+            metadata["profiles"]["unused"] = "profiles/unused.json"
+            metadata["profile_sha256"]["unused"] = digest(extra)
+            write_json(directory / "model.json", metadata)
+            with self.subTest(change=change), patch.object(ResidualAttention, "forward", side_effect=AssertionError("Inference must not start")):
+                with self.assertRaisesRegex(ValueError, "reference.*domain|reference.*schema"):
+                    predict(self.bundle, self.archive, directory.as_posix(), device="cpu", reference_domain=reference)
+
+    def test_reference_reload_decodes_each_saved_profile_once(self) -> None:
+        directory = self.root / "sharedreference"
+        fit(self.bundle, self.archive, directory.as_posix(), replace(self.config, epochs=1), self.profile, "cpu")
+        metadata = read_json(directory / "model.json")
+        reference = next(iter(metadata["profiles"]))
+        original, calls = DomainProfile.load, []
+        def loading(path, *args):
+            calls.append(Path(path).as_posix())
+            return original(path, *args)
+        with patch.object(DomainProfile, "load", side_effect=loading):
+            predictions = predict(self.bundle, self.archive, directory.as_posix(), device="cpu", reference_domain=reference)
+        self.assertEqual(sorted(calls), sorted((directory / name).as_posix() for name in metadata["profiles"].values()))
+        self.assertTrue(all(row["reference_domain"] == reference for row in predictions))
+
+    def test_explicit_reference_names_are_not_coerced_to_default_selection(self) -> None:
+        for reference in ("", " ", False, [], 1):
+            with self.subTest(reference=reference), self.assertRaisesRegex(ValueError, "reference domain"):
+                predict(self.bundle, self.archive, "missing", device="cpu", reference_domain=reference)
 
     def test_checkpoint_rejects_corrupt_or_nonfinite_weights_before_inference(self) -> None:
         directory = self.root / "weights"

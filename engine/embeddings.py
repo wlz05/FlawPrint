@@ -93,7 +93,9 @@ def load_pooler(directory: str, device: str = "cpu"):
     sizes = (settings["hidden_size"], settings["width"])
     if any(type(value) is not int or value < 1 for value in sizes) or sizes[0] + 3 * sizes[1] > 8192:
         raise ValueError("Local text pooling dimensions exceed the feature contract")
-    model = TextPool(*sizes)
+    # Load saved float32 parameters independently of global tensor defaults.
+    with torch.random.fork_rng(devices=[]), torch.device("cpu"):
+        model = TextPool(*sizes).float()
     try:
         stored = torch.load(io.BytesIO(parameters.read_bytes()), map_location="cpu", weights_only=True)
     except (EOFError, UnpicklingError, RuntimeError, ValueError, TypeError, KeyError, IndexError) as error:

@@ -281,6 +281,17 @@ def checkpoint(metadata: dict) -> NeuralConfig:
     order, dimensions, names = (metadata[name] for name in ("feature_order", "dimensions", "trace_names"))
     if order not in (list(embeddings.STREAMS), list(embeddings.STREAMS) + ["forensic"]) or set(dimensions) != set(order) or any(isinstance(value, bool) or not isinstance(value, int) or not 0 < value <= 8192 for value in dimensions.values()):
         raise ValueError("Neural checkpoint streams or dimensions are invalid")
+    if set(metadata["normalizers"]) != set(order):
+        raise ValueError("Neural checkpoint normalizers must cover every stream")
+    for name in order:
+        normalizer = metadata["normalizers"][name]
+        if not isinstance(normalizer, dict) or set(normalizer) != {"center", "scale"}:
+            raise ValueError("Neural checkpoint normalizers require a center and scale")
+        center, scale = (np.asarray(normalizer[key]) for key in ("center", "scale"))
+        if (center.shape != (dimensions[name],) or scale.shape != center.shape
+                or center.dtype.kind not in "fiu" or scale.dtype.kind not in "fiu"
+                or not np.isfinite(center).all() or not np.isfinite(scale).all() or np.any(scale <= 0)):
+            raise ValueError("Neural checkpoint normalizer dimensions or values are invalid")
     if not isinstance(names, list) or len(names) < 2 or any(not isinstance(name, str) or not name.strip() for name in names) or len(set(names)) != len(names):
         raise ValueError("Neural checkpoint trace names must be unique nonempty strings")
     identifiers = metadata["fit_identifiers"]
@@ -639,6 +650,8 @@ def fit(bundle: dict, archive: dict, output: str, config: NeuralConfig, profile_
     return {"output": output, "epochs": len(history), "selected_epoch": selected_epoch, "best_validation_macro_f1": best_score, "trainable_parameters": metadata["trainable_parameters"], "image_supervised_samples": image_samples, "calibration_samples": len(partitions["calibration"])}
 
 def predict(bundle: dict, archive: dict, directory: str, split: str = "test", device: str = "cuda:0", reference_domain: str | None = None, explain: bool = False) -> list[dict]:
+    if reference_domain is not None and (not isinstance(reference_domain, str) or not reference_domain.strip()):
+        raise ValueError("An explicit reference domain must be a nonempty name")
     validate_bundle(bundle)
     embeddings.validate(archive)
     device = embeddings.runtime(device)
@@ -669,6 +682,20 @@ def predict(bundle: dict, archive: dict, directory: str, split: str = "test", de
     if {row.get("benchmark_protocol", "strict-content") for row in rows} != expected_protocols:
         raise ValueError("Prediction rows must use the checkpoint benchmark protocol")
     ensure_disjoint(rows, metadata["fit_history"])
+    references = {}
+    # Validate the complete reference set before any model execution.
+    for reference, filename in metadata["profiles"].items():
+        path = root / relative_path(filename)
+        checksum = metadata["profile_sha256"][reference]
+        profile = DomainProfile.load(path.as_posix(), checksum)
+        if digest(path) != checksum:
+            raise ValueError("The saved physical reference changed while loading")
+        if profile.domain != reference:
+            raise ValueError("The saved physical reference domain does not match its checkpoint key")
+        if (max(profile.columns) >= len(metadata["trace_names"])
+                or [metadata["trace_names"][column] for column in profile.columns] != profile.names):
+            raise ValueError("The saved physical reference feature schema differs from the checkpoint")
+        references[reference] = profile
     selected = subset(bundle, indices)
     packet = {"features": {name: value[indices] for name, value in features.items()}, "observed": observed[indices], "ranks": np.zeros_like(selected["values"], dtype=np.float32), "graph": np.zeros((len(rows), len(bundle["names"]), len(bundle["names"])), dtype=np.float32), "trace_observed": np.zeros_like(selected["observed"])}
     if config.aligned:
@@ -681,14 +708,7 @@ def predict(bundle: dict, archive: dict, directory: str, split: str = "test", de
             if reference_domain is not None:
                 raise ValueError("The explicitly requested reference is not saved")
             continue
-        path = root / relative_path(metadata["profiles"][reference])
-        if not path.resolve().is_relative_to(root.resolve()) or digest(path) != metadata["profile_sha256"][reference]:
-            raise ValueError("The saved physical reference changed")
-        profile = DomainProfile.load(path.as_posix(), metadata["profile_sha256"][reference])
-        if digest(path) != metadata["profile_sha256"][reference]:
-            raise ValueError("The saved physical reference changed while loading")
-        if profile.domain != reference:
-            raise ValueError("The saved physical reference domain does not match its checkpoint key")
+        profile = references[reference]
         selected_indices = [index for index, row in enumerate(rows) if row["domain"] == domain]
         ranks, graph, mask = relation(profile, subset(selected, selected_indices))
         packet["ranks"][selected_indices], packet["graph"][selected_indices], packet["trace_observed"][selected_indices] = ranks, graph, mask
@@ -696,7 +716,9 @@ def predict(bundle: dict, archive: dict, directory: str, split: str = "test", de
     if metadata["version"] == "flawprint-neural-v1" and config.mode == "coupled":
         config = replace(config, mode="broadcast")
     dimensions = {name: metadata["dimensions"][name] for name in metadata["feature_order"]}
-    model = ResidualAttention(dimensions, len(metadata["trace_names"]), config)
+    # Preserve caller randomness while restoring the saved float32 model.
+    with torch.random.fork_rng(devices=[]), torch.device("cpu"):
+        model = ResidualAttention(dimensions, len(metadata["trace_names"]), config).float()
     parameters(model, root / "parameters.pt", metadata["weights_sha256"])
     model.to(device)
     measurements = {} if explain else None
