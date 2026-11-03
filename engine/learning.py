@@ -686,9 +686,9 @@ def predict(bundle: dict, archive: dict, directory: str, split: str = "test", de
     # Validate the complete reference set before any model execution.
     for reference, filename in metadata["profiles"].items():
         path = root / relative_path(filename)
-        checksum = metadata["profile_sha256"][reference]
-        profile = DomainProfile.load(path.as_posix(), checksum)
-        if digest(path) != checksum:
+        reference_checksum = metadata["profile_sha256"][reference]
+        profile = DomainProfile.load(path.as_posix(), reference_checksum)
+        if digest(path) != reference_checksum:
             raise ValueError("The saved physical reference changed while loading")
         if profile.domain != reference:
             raise ValueError("The saved physical reference domain does not match its checkpoint key")
