@@ -61,6 +61,51 @@ class FormatTests(unittest.TestCase):
         write_rows(path, self.records)
         self.assertEqual(json.loads(path.read_text()), self.records)
 
+    def test_optional_manifest_cells_roundtrip_across_table_formats(self) -> None:
+        records = copy.deepcopy(self.records)
+        records[0].update(image="images/animated.gif", image_frame=0, physical_trace_disabled=True)
+        records[1].update(image_frame=None, physical_trace_disabled=None, benchmark_protocol=None)
+        expected = normalize(records)
+        keys = ("id", "image", "image_frame", "physical_trace_disabled", "benchmark_protocol", "split")
+        for suffix in ("json", "jsonl", "csv", "tsv"):
+            with self.subTest(suffix=suffix):
+                path = self.root / ("optional." + suffix)
+                write_rows(path, records)
+                loaded = normalize(read_rows(path))
+                self.assertEqual(loaded, expected)
+                converted, _ = convert_files([path.as_posix()], Conversion(dataset="canonical"))
+                self.assertEqual([{key: row.get(key) for key in keys} for row in converted], [{key: row.get(key) for key in keys} for row in expected])
+
+    def test_paper_ordinals_survive_csv_and_nullable_parquet_columns(self) -> None:
+        records = [{"id": "finefake:" + str(index), "group": "finefake:" + str(index), "source_ordinal": index, "benchmark_protocol": "finefake-paper-3407", "split": role, "text": "News " + str(index), "domain": "Science", "label": index} for index, role in enumerate(("train", "test"))]
+        records[0].update(image_frame=0, physical_trace_disabled=True)
+        expected = normalize(records)
+        paths = [self.root / "paper.csv"]
+        write_rows(paths[0], records)
+        if importlib.util.find_spec("pyarrow") is not None:
+            import pandas as pd
+            path = self.root / "paper.parquet"
+            pd.DataFrame(records).to_parquet(path, index=False, engine="pyarrow")
+            paths.append(path)
+        for path in paths:
+            with self.subTest(suffix=path.suffix):
+                rows, report = convert_files([path.as_posix()], Conversion(dataset="canonical"))
+                self.assertEqual([row["source_ordinal"] for row in rows], [0, 1])
+                self.assertEqual([row["split"] for row in rows], ["train", "test"])
+                self.assertEqual(report["audit"]["benchmark_protocol"], "finefake-paper-3407")
+                for row, original in zip(rows, expected):
+                    self.assertEqual(row.get("image_frame"), original.get("image_frame"))
+                    self.assertEqual(row.get("physical_trace_disabled"), original.get("physical_trace_disabled"))
+
+    def test_optional_integer_cells_reject_boolean_fractional_and_invalid_values(self) -> None:
+        for frame in (True, False, 1, -1, "0.5", "false", [], {}):
+            with self.subTest(frame=frame), self.assertRaises(ValueError):
+                normalize([dict(self.records[0], image_frame=frame)])
+        row = dict(self.records[0], id="finefake:0", group="finefake:0", benchmark_protocol="finefake-paper-3407")
+        for ordinal in (True, -1, 16909, "0.5", "Infinity", "1e999999", [], {}):
+            with self.subTest(ordinal=ordinal), self.assertRaises(ValueError):
+                normalize([dict(row, source_ordinal=ordinal)])
+
     def test_json_wrapper_requires_an_explicit_key(self) -> None:
         path = self.write("data.json", json.dumps({"records": self.records}))
         with self.assertRaises(ValueError):

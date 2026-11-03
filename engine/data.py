@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 from collections import defaultdict
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 import hashlib
 import json
@@ -93,6 +94,18 @@ def row_namespace(row: dict) -> str:
         raise ValueError("FineFake paper rows require immutable source identities and released roles")
     return policy + "/" + row["split"]
 
+def ordinal(value: object, maximum: int, field: str) -> int:
+    message = "Metadata field " + field + " requires an integer between zero and " + str(maximum)
+    if isinstance(value, (bool, np.bool_)) or not isinstance(value, (str, int, float, np.integer, np.floating, Decimal)):
+        raise ValueError(message)
+    try:
+        number = Decimal(str(value).strip())
+    except InvalidOperation as error:
+        raise ValueError(message) from error
+    if not number.is_finite() or not 0 <= number <= maximum or number != number.to_integral_value():
+        raise ValueError(message)
+    return int(number)
+
 def normalize(rows: list[dict], image_root: str = ".", label_convention: str = "fake-one", domain_key: str = "domain") -> list[dict]:
     if label_convention not in ("fake-one", "real-one"):
         raise ValueError("Unknown label convention")
@@ -112,10 +125,18 @@ def normalize(rows: list[dict], image_root: str = ".", label_convention: str = "
         identifiers.add(sample_id)
         row["image"] = image
         row["has_image"] = bool(image)
-        if "image_frame" in row and (type(row["image_frame"]) is not int or row["image_frame"] != 0):
-            raise ValueError("Only an explicit first-frame selection is supported")
+        # Normalize optional table cells before checking their contracts.
+        for key in ("image_frame", "physical_trace_disabled", "benchmark_protocol", "source_ordinal"):
+            if key in row and missing(row[key]):
+                row.pop(key)
+        if "image_frame" in row:
+            row["image_frame"] = ordinal(row["image_frame"], 0, "image_frame")
         if "physical_trace_disabled" in row:
             row["physical_trace_disabled"] = boolean(row["physical_trace_disabled"])
+        if isinstance(row.get("benchmark_protocol"), str):
+            row["benchmark_protocol"] = row["benchmark_protocol"].strip()
+        if row.get("benchmark_protocol") == "finefake-paper-3407" and "source_ordinal" in row:
+            row["source_ordinal"] = ordinal(row["source_ordinal"], 16908, "source_ordinal")
         row["id"] = sample_id
         row["platform"] = "unknown" if missing(row.get("platform")) else str(row["platform"]).strip()
         row["group"] = identifier(row.get("group", row.get("event_id"))) or sample_id
