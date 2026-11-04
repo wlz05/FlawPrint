@@ -762,6 +762,22 @@ class FormatTests(unittest.TestCase):
         module.write_text("value = 2\n", encoding="utf-8")
         self.assertNotEqual(source_digest(root.as_posix()), original)
 
+    def test_source_identity_normalizes_only_physical_line_endings(self) -> None:
+        root = self.root / "portable source"
+        root.mkdir()
+        module = root / "model.py"
+        content = b'value = 1\ntext = "literal\\r\\n"\n'
+        module.write_bytes(content)
+        expected = source_digest(root.as_posix())
+        for ending in (b"\r\n", b"\r", b"\n"):
+            module.write_bytes(content.replace(b"\n", ending))
+            with self.subTest(ending=ending):
+                self.assertEqual(source_digest(root.as_posix()), expected)
+        module.write_bytes(content.replace(b"literal\\r\\n", b"literal\\n"))
+        self.assertNotEqual(source_digest(root.as_posix()), expected)
+        module.write_bytes(content.replace(b"value = 1", b"value = 2"))
+        self.assertNotEqual(source_digest(root.as_posix()), expected)
+
     def test_dataset_names_are_case_insensitive_in_api_and_cli(self) -> None:
         for name in ("WeIbO", "WEIBO21", "FineFake"):
             with self.subTest(dataset=name):

@@ -652,6 +652,22 @@ class IntegrityTests(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     prediction_rows([{"id": "a", key: value}])
 
+    def test_prediction_metadata_roundtrips_across_all_export_formats(self) -> None:
+        rows = [dict(id="finefake:0", group="finefake:0", domain="source", split="test", image="images/a.jpg", benchmark_protocol="finefake-paper-3407", source_ordinal=0, image_frame=0, physical_trace_disabled=True, label=1, fusion_risk=.5)]
+        rows.append(dict(id="finefake:1", group="finefake:1", domain="source", split="test", image="images/b.jpg", benchmark_protocol="finefake-paper-3407", source_ordinal=1, image_frame=0, physical_trace_disabled=False, label=0, fusion_risk=-.5))
+        expected = prediction_rows(rows)
+        for suffix in ("jsonl", "ndjson", "json", "csv", "tsv"):
+            path = self.root / ("metadata." + suffix)
+            write_rows(path, rows)
+            with self.subTest(format=suffix):
+                restored = prediction_rows(read_rows(path))
+                self.assertEqual(restored, expected)
+                self.assertIs(type(restored[0]["image_frame"]), int)
+                self.assertIs(type(restored[0]["source_ordinal"]), int)
+                self.assertIs(restored[0]["physical_trace_disabled"], True)
+                self.assertIs(restored[1]["physical_trace_disabled"], False)
+        self.assertEqual(prediction_rows([dict(id="unknown", source_ordinal=None, image_frame="", physical_trace_disabled=None)]), [dict(id="unknown")])
+
     def test_prediction_diagnostic_ranges_reject_corrupt_exports(self) -> None:
         for key in ("observed_fraction", "sign_conflict_ratio", "pair_relation_fraction", "pair_attention_shift_tv"):
             for value in (-0.1, 1.1, "-0.1", "1.1"):

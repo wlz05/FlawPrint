@@ -20,7 +20,7 @@ import torch
 from sklearn.model_selection import GroupKFold, StratifiedGroupKFold
 from engine import embeddings
 from engine.conformal import calibrate_rows, apply_calibration, validate_labels
-from engine.data import audit_splits
+from engine.data import audit_splits, SPLITS, SPLIT_ALIASES
 from engine.lineage import collect, ensure_disjoint, components
 from engine.metrics import binary
 from engine.neural import NeuralConfig, ResidualAttention, BIASED
@@ -133,8 +133,12 @@ def relation(profile: DomainProfile, bundle: dict) -> tuple[np.ndarray, np.ndarr
     ranks[~observed] = 0
     return ranks.astype(np.float32), graph.astype(np.float32), observed
 
-def prepare(bundle: dict, archive: dict, config: ProfileConfig, folds: int, use_reference: bool = True, use_alignment: bool = False, balanced: bool = False, use_pairing: bool = False) -> tuple[dict, dict]:
+def canonical_bundle(bundle: dict) -> dict:
     validate_bundle(bundle)
+    return dict(bundle, rows=embeddings.canonical_rows(bundle["rows"]))
+
+def prepare(bundle: dict, archive: dict, config: ProfileConfig, folds: int, use_reference: bool = True, use_alignment: bool = False, balanced: bool = False, use_pairing: bool = False) -> tuple[dict, dict]:
+    bundle = canonical_bundle(bundle)
     audit_splits(bundle["rows"])
     features, observed = embeddings.align(bundle, archive)
     aligned = {"alignment": agreement(features, observed)} if use_alignment else {}
@@ -339,11 +343,12 @@ def validate_parameters(model: ResidualAttention, stored: dict) -> None:
 
 def training_protocol(bundle: dict, archive: dict, config: NeuralConfig, profile_config: ProfileConfig, device: str, implementation: str) -> dict:
     from engine.experiment import bundle_digest
-    validate_bundle(bundle)
-    embeddings.validate(archive)
-    metadata = {"rows": archive["rows"], "encoders": signature(archive), "protocol": embeddings.protocol(archive)}
+    bundle = canonical_bundle(bundle)
+    features, observed = embeddings.align(bundle, archive)
+    metadata = {"rows": sorted(embeddings.canonical_rows(archive["rows"]), key=lambda row: row["id"]), "encoders": signature(archive), "protocol": embeddings.protocol(archive)}
     checksum = hashlib.sha256(json.dumps(native(metadata), sort_keys=True, ensure_ascii=True, allow_nan=False).encode())
-    for name, values in [("observed", archive["observed"]), *archive["features"].items()]:
+    # Bind resume identity to aligned vectors rather than archive row order.
+    for name, values in [("observed", observed), *features.items()]:
         array = np.ascontiguousarray(values)
         checksum.update(name.encode() + str(array.shape).encode() + array.dtype.str.encode())
         checksum.update(array.tobytes())
@@ -508,6 +513,7 @@ def fit(bundle: dict, archive: dict, output: str, config: NeuralConfig, profile_
     profile_config.validate()
     if type(resume) is not bool or resume and state_path is None:
         raise ValueError("Resume requires a relative training state path")
+    bundle = canonical_bundle(bundle)
     implementation = source_digest()
     if provenance is not None:
         if not isinstance(provenance, dict) or not isinstance(provenance.get("inputs"), list) or any(not isinstance(item, dict) or not isinstance(item.get("path"), str) or not isinstance(item.get("sha256"), str) or re.fullmatch("[0-9a-f]{64}", item["sha256"]) is None for item in provenance["inputs"]):
@@ -652,7 +658,13 @@ def fit(bundle: dict, archive: dict, output: str, config: NeuralConfig, profile_
 def predict(bundle: dict, archive: dict, directory: str, split: str = "test", device: str = "cuda:0", reference_domain: str | None = None, explain: bool = False) -> list[dict]:
     if reference_domain is not None and (not isinstance(reference_domain, str) or not reference_domain.strip()):
         raise ValueError("An explicit reference domain must be a nonempty name")
-    validate_bundle(bundle)
+    if not isinstance(split, str):
+        raise ValueError("The prediction split must be a canonical role or supported alias")
+    split = split.strip().casefold()
+    split = SPLIT_ALIASES.get(split, split)
+    if split not in SPLITS:
+        raise ValueError("The prediction split must be a canonical role or supported alias")
+    bundle = canonical_bundle(bundle)
     embeddings.validate(archive)
     device = embeddings.runtime(device)
     root = relative_path(directory)

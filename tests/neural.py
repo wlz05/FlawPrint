@@ -21,7 +21,7 @@ from engine import embeddings
 from engine.copula import score
 from engine.experiment import indices
 from engine.profile import DomainProfile, ProfileConfig
-from engine.storage import subset, write_rows, read_rows, read_json, save_bundle, write_json, digest
+from engine.storage import subset, write_rows, read_rows, read_json, save_bundle, load_bundle, write_json, digest
 from engine.synthetic import fixture
 try:
     import torch
@@ -1856,6 +1856,48 @@ class NeuralTests(unittest.TestCase):
             fit(self.bundle, self.archive, directory.as_posix(), config, self.profile, "cpu", state_path=(directory / "progress.pt").as_posix())
         self.assertFalse(directory.exists())
 
+    def test_portable_cache_metadata_and_order_preserve_interrupted_training(self) -> None:
+        bundle, archive = self.source_data(("train", "validation", "test"))
+        settings = replace(self.config, epochs=3, patience=3, dropout=.2, trace_dropout=.25)
+        state, baseline, resumed = self.root / "progress.pt", self.root / "continuous", self.root / "resumed"
+        fit(bundle, archive, baseline.as_posix(), settings, self.profile, "cpu")
+        calls = []
+        def interrupted(*args, **kwargs):
+            calls.append(None)
+            if len(calls) == 2:
+                raise KeyboardInterrupt("Interrupted after a saved epoch")
+            return logits(*args, **kwargs)
+        with patch("engine.learning.logits", side_effect=interrupted), self.assertRaises(KeyboardInterrupt):
+            fit(bundle, archive, resumed.as_posix(), settings, self.profile, "cpu", state_path=state.as_posix())
+        physical, cached = copy.deepcopy(bundle), copy.deepcopy(archive)
+        aliases = {"train": " Training ", "validation": " VAL ", "test": " Testing "}
+        for rows in (physical["rows"], cached["rows"]):
+            for row in rows:
+                row["split"] = aliases[row["split"]]
+                row["image"] = row["image"].replace("/", "\\")
+        order = np.arange(len(cached["rows"]))[::-1]
+        cached["rows"] = [cached["rows"][index] for index in order]
+        cached["features"] = {name: value[order] for name, value in cached["features"].items()}
+        cached["observed"] = cached["observed"][order]
+        paths = self.root / "relocated inputs"
+        save_bundle(paths / "traces.npz", physical["values"], physical["observed"], physical["patches"], physical["rows"], physical["names"])
+        embeddings.save(paths / "content.npz", cached)
+        physical, cached = load_bundle(paths / "traces.npz"), embeddings.load(paths / "content.npz")
+        original_rows = copy.deepcopy((physical["rows"], cached["rows"]))
+        result = fit(physical, cached, resumed.as_posix(), settings, self.profile, "cpu", state_path=state.as_posix(), resume=True)
+        expected, actual = [read_json(path / "model.json") for path in (baseline, resumed)]
+        self.assertEqual(result["selected_epoch"], expected["selected_epoch"])
+        self.assertEqual(actual["history"], expected["history"])
+        parameters = [torch.load(path / "parameters.pt", map_location="cpu", weights_only=True) for path in (baseline, resumed)]
+        for name in parameters[0]:
+            torch.testing.assert_close(parameters[0][name], parameters[1][name], rtol=0, atol=0)
+        expected_rows = predict(bundle, archive, resumed.as_posix(), device="cpu")
+        self.assertEqual(predict(physical, cached, resumed.as_posix(), split=" Testing ", device="cpu"), expected_rows)
+        self.assertEqual((physical["rows"], cached["rows"]), original_rows)
+        for path, expected_cache in ((paths / "traces.npz", physical), (paths / "content.npz", cached)):
+            restored = load_bundle(path) if path.name == "traces.npz" else embeddings.load(path)
+            self.assertEqual(restored["rows"], expected_cache["rows"])
+
     def test_training_state_rejects_corrupt_tensors_history_and_optimizer(self) -> None:
         config = replace(self.config, epochs=1)
         state, output = self.root / "progress.pt", self.root / "original"
@@ -1951,6 +1993,9 @@ class NeuralTests(unittest.TestCase):
         shutil.copytree(original, moved)
         self.assertTrue(original.resolve().is_relative_to(self.root.resolve()))
         shutil.rmtree(original)
+        for source in source_files(moved.as_posix()):
+            content = source.read_bytes().replace(b"\r\n", b"\n").replace(b"\r", b"\n")
+            source.write_bytes(content.replace(b"\n", b"\r\n"))
         result = subprocess.run([sys.executable, "-B", "deep.py", *command, "--resume"], cwd=moved, env=environment, capture_output=True, text=True, timeout=90)
         self.assertEqual(result.returncode, 0, result.stderr)
         metadata = read_json(moved / "models/selected/model.json")
@@ -2125,6 +2170,7 @@ class NeuralTests(unittest.TestCase):
         text = 'Report, with "quotes"\nand context. ' + self.bundle["rows"][index]["text"]
         for rows in (self.bundle["rows"], self.archive["rows"]):
             rows[index]["text"] = text
+            rows[index].update(image_frame=0, physical_trace_disabled=False)
         fit(self.bundle, self.archive, directory.as_posix(), replace(self.config, epochs=1), self.profile, "cpu")
         save_bundle(physical, self.bundle["values"], self.bundle["observed"], self.bundle["patches"], self.bundle["rows"], self.bundle["names"].tolist())
         embeddings.save(vectors.as_posix(), self.archive)

@@ -4,11 +4,11 @@
 from __future__ import annotations
 import math
 import numpy as np
-from engine.data import boolean, identifier, missing, portable_image, SPLITS, SPLIT_ALIASES
+from engine.data import boolean, identifier, missing, ordinal, portable_image, SPLITS, SPLIT_ALIASES
 from engine.storage import parse_json
 
 NUMBERS = ("label", "prediction", "probability", "fusion_risk", "physical_risk", "physical_evidence", "copula_risk", "copula_score", "semantic_logit", "sign_score", "sign_conflict_ratio", "observed_fraction", "potential_disabled_risk", "potential_risk_delta", "uniform_readout_risk", "query_readout_delta", "summary_readout_risk", "pair_readout_delta", "attention_contrast_rms", "attention_shift_tv", "pair_relation_fraction", "pair_contrast_rms", "pair_attention_shift_tv", "value_transport_rms", "pair_value_transport_rms", "pair_tangent_transport_rms", "pair_transport_remainder_bound")
-BOOLEANS = ("abstain", "probability_calibrated", "profile_overlap", "physical_available", "has_image", "patch_signs_valid_after_attack", "physical_manipulated", "narrative_false", "physical_reference_available", "embedding_protocol_verified")
+BOOLEANS = ("abstain", "probability_calibrated", "profile_overlap", "physical_available", "has_image", "physical_trace_disabled", "patch_signs_valid_after_attack", "physical_manipulated", "narrative_false", "physical_reference_available", "embedding_protocol_verified")
 STRUCTURES = {"prediction_set": list, "physical_gate_reasons": list, "physical_power_screen": dict, "routing_policy": dict, "copula_explanation": dict, "sign_explanation": list}
 
 def numeric(value: object, key: str) -> float:
@@ -59,6 +59,12 @@ def prediction_rows(records: list[dict]) -> list[dict]:
                 row["split"] = SPLIT_ALIASES.get(value, value)
                 if row["split"] not in (*SPLITS, "unspecified"):
                     raise ValueError("Unknown prediction split")
+        for key, maximum in (("image_frame", 0), ("source_ordinal", 16908)):
+            if key in row:
+                if missing(row[key]):
+                    row.pop(key)
+                else:
+                    row[key] = ordinal(row[key], maximum, key)
         for key in NUMBERS:
             if key not in row:
                 continue

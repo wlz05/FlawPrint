@@ -49,7 +49,9 @@ def source_digest(root: str = ".") -> str:
     checksum = hashlib.sha256()
     for path in source_files(root):
         checksum.update(path.relative_to(relative_path(root)).as_posix().encode("utf-8") + b"\x00")
-        checksum.update(path.read_bytes() + b"\x00")
+        # Match Python's physical newline handling across operating systems.
+        content = path.read_bytes().replace(b"\r\n", b"\n").replace(b"\r", b"\n")
+        checksum.update(content + b"\x00")
     return checksum.hexdigest()
 
 def manuscript_title(manuscript: str | None = None) -> str:

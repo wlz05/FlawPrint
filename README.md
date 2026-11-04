@@ -205,6 +205,8 @@ Add `--forensic ./models/forensic` for a separately trained, Hugging Face-compat
 
 Physical and deep caches must agree on selected frames and the declared benchmark contract as well as sample IDs, content metadata, and image fingerprints. Cache alignment accepts equivalent relative slash styles and split aliases, validates physical row uniqueness before reindexing, and leaves both input archives unchanged.
 
+Training and prediction use the same canonical metadata for sample selection and saved references. For example, `val` selects the supplied validation rows and `--split testing` selects the supplied test rows. These spelling conversions preserve sample membership and order.
+
 ## Train and Predict
 
 The [training pipeline](engine/learning.py) consumes the cached records with their supplied `train`, `validation`, and `test` roles. Encoders remain frozen. Each epoch shuffles training indices with the run seed and samples mini-batches of 64 records; a final smaller batch is retained. Training records fit the feature standardizers and source references, and train the projections, residual attention, and news head. After each epoch, validation Macro-F1 selects the checkpoint and controls early stopping with patience 5. The selected checkpoint is then used for the final test run.
@@ -227,6 +229,8 @@ Each epoch prints training loss and validation Macro-F1, Accuracy, and AUC. The 
 These controls are saved with the selected model and restored during prediction. They do not change the formal train, validation, or test membership. The standard CRA configuration keeps them disabled.
 
 Use `--state` to save an atomic checkpoint after each complete epoch. The state contains current and selected weights, optimizer moments, validation history, early-stopping counters, and Python, NumPy, PyTorch, and CUDA random states. Add `--resume` to the same command after interruption. A partially completed epoch is rerun from the last saved boundary. Resumption requires matching caches, configuration, source code, and numerical runtime settings; it preserves validation-based model selection.
+
+Resumption aligns deep-cache vectors by sample ID before checking their identity. Equivalent relative slash styles, split aliases, and deep-cache row order can differ after transfer. LF and CRLF source files share the same implementation identity, while code changes produce a different fingerprint. Physical row order, feature values, sample identities, partition membership, and encoder preprocessing remain fixed.
 
 Keep the `.pt` or `.pth` state file outside the selected model directory. A fresh run requires a new state file; resumption reads the existing file. Move the state, repository, caches, and configurations together when changing machines. Prediction uses the published model directory independently of the training-state file. Without `--state`, an interrupted run restarts at epoch 1. The complete selected checkpoint is published as one directory; a failed final rename restores a pre-existing empty destination.
 
@@ -347,7 +351,7 @@ Equal-potential groups provide a separate exact control: transport is zero at ev
 
 The saved reference defines trace compatibility; the trained news head determines its task use. To evaluate reference composition, retain the same weights and test IDs, rebuild independent pools at matched sizes, and report the complete-model predictions alongside local transport. `--reference-domain` selects a reference already saved with the checkpoint; its files and hashes remain bound to that model. Source-reference transfer and independent target-pool evaluation are separate settings. Composition labels serve only offline pool construction and evaluation. Confidence filtering is a separate reference-admission control, with retention and within-class selection changes reported together. [LSA](https://arxiv.org/html/2606.15169v1) and [JMLR label-shift inference](https://www.jmlr.org/papers/v27/25-2717.html) study prior adjustment under specified distribution assumptions; reference replacement here also changes the network's trace inputs.
 
-Prediction files support JSONL, NDJSON, JSON, CSV, and TSV. The shared [prediction reader](engine/results.py) restores numeric diagnostics and missing values consistently across these formats, including summary risks and all pair measurements.
+Prediction files support JSONL, NDJSON, JSON, CSV, and TSV. The shared [prediction reader](engine/results.py) restores numeric diagnostics and missing values consistently across these formats, including summary risks and all pair measurements. Frame indices and FineFake source ordinals reload as integers, and physical-channel availability flags reload as Booleans.
 
 Missing or null labels use the unlabeled prediction flow. Use a fresh prediction output path for unlabeled queries when a report already exists at the corresponding `.report.json` path. The command checks this before writing, preserving the existing predictions and report.
 

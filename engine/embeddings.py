@@ -262,14 +262,17 @@ def load(path: str) -> dict:
         raise ValueError("Invalid embedding archive: " + str(error)) from error
     return archive
 
+def canonical_rows(rows: list[dict]) -> list[dict]:
+    canonical = normalize(rows)
+    if any(first["id"] != second["id"] for first, second in zip(rows, canonical)):
+        raise ValueError("Cached identifiers must already use their canonical spelling")
+    return canonical
+
 def align(bundle: dict, archive: dict) -> tuple[dict, np.ndarray]:
     validate_bundle(bundle)
     validate(archive)
     # Compare canonical metadata without rewriting either input cache.
-    physical, cached = normalize(bundle["rows"]), normalize(archive["rows"])
-    for original, canonical in ((bundle["rows"], physical), (archive["rows"], cached)):
-        if any(first["id"] != second["id"] for first, second in zip(original, canonical)):
-            raise ValueError("Cached identifiers must already use their canonical spelling")
+    physical, cached = canonical_rows(bundle["rows"]), canonical_rows(archive["rows"])
     mapping = {row["id"]: index for index, row in enumerate(cached)}
     if set(mapping) != {row["id"] for row in physical}:
         raise ValueError("Deep and physical inputs must contain the same identities")
