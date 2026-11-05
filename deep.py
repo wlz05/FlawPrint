@@ -5,9 +5,7 @@ from __future__ import annotations
 import argparse
 from dataclasses import replace
 import json
-import math
 import os
-import statistics
 import subprocess
 import sys
 from PIL.Image import DecompressionBombError
@@ -15,37 +13,7 @@ from engine.storage import relative_path, resolved, same_path, read_json, write_
 from engine.data import normalize, missing
 from engine.provenance import source_digest
 from engine.package import configuration, configuration_record, is_builtin
-
-SEEDS = (42, 52, 3047, 3407)
-
-def seed_summary(records, seeds=SEEDS):
-    seeds = list(seeds)
-    if not seeds or len(set(seeds)) != len(seeds) or any(type(seed) is not int or not 0 <= seed < 2 ** 32 for seed in seeds):
-        raise ValueError("Seeds must be distinct unsigned 32-bit integers")
-    if any(not isinstance(row, dict) or type(row.get("seed")) is not int or "metrics" not in row or not isinstance(row.get("protocol"), dict) for row in records):
-        raise ValueError("Every seed result needs metrics and an experiment protocol")
-    if len(records) != len(seeds) or {row["seed"] for row in records} != set(seeds):
-        raise ValueError("Missing or duplicate seed results; partial averages are forbidden")
-    if any(row["protocol"] != records[0]["protocol"] for row in records):
-        raise ValueError("All seeds must use the same inputs and experiment settings")
-    def flatten(value, prefix=""):
-        result = {}
-        if isinstance(value, dict):
-            for key, item in value.items():
-                result.update(flatten(item, prefix + ("." if prefix else "") + str(key)))
-        elif value is None or isinstance(value, (int, float)) and not isinstance(value, bool):
-            if value is not None and not math.isfinite(value):
-                raise ValueError("Seed metrics must be finite or explicitly undefined")
-            result[prefix] = value
-        return result
-    byseed = {str(row["seed"]): row["metrics"] for row in records}
-    flat = {seed: flatten(byseed[str(seed)]) for seed in seeds}
-    metrics = {}
-    for key in sorted(set().union(*(value.keys() for value in flat.values()))):
-        values = [flat[seed].get(key) for seed in seeds]
-        undefined = [seed for seed, value in zip(seeds, values) if value is None]
-        metrics[key] = {"mean": statistics.mean(values) if not undefined else None, "sample_std": statistics.stdev(values) if not undefined and len(values) > 1 else None, "undefined_seeds": undefined}
-    return {"seeds": seeds, "seed_count": len(seeds), "byseed": byseed, "metrics": metrics, "protocol": records[0]["protocol"], "aggregation": "Compute each seed's test metrics first, then take their equally weighted arithmetic mean."}
+from engine.results import SEEDS, seed_summary
 
 def experiment_commands(args):
     seeds = list(args.seeds)

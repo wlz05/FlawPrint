@@ -3,17 +3,18 @@
 
 from __future__ import annotations
 import copy
-from dataclasses import replace
+from dataclasses import asdict, replace
 from pathlib import Path, PurePosixPath, PureWindowsPath
 import tempfile
 import unittest
+from types import SimpleNamespace
 from unittest.mock import patch
 import numpy as np
 from PIL import Image
 from engine.storage import relative_path, save_bundle, load_bundle, subset
 from engine.data import normalize, partition, audit_splits, join_predictions, text_fingerprint
 from engine.traces import NAMES, TraceConfig, extract_one
-from engine.storage import read_json
+from engine.storage import read_json, write_json
 from engine.synthetic import fixture
 from engine.profile import DomainProfile, ProfileConfig
 from engine.conformal import Platt, calibrate_rows, apply_calibration, fuse
@@ -47,6 +48,141 @@ class WorkflowTests(unittest.TestCase):
     def profile(self, domain: str = "target_gamma") -> DomainProfile:
         split = "profile" if domain.startswith("target") else "train"
         return DomainProfile.fit(subset(self.bundle, indices(self.bundle, split, domain)), domain, self.config)
+
+    def benchmark_args(self, name="seedgrid", seeds=None):
+        features, config = self.root / "features.npz", self.root / "benchmark.json"
+        save_bundle(features, self.bundle["values"], self.bundle["observed"], self.bundle["patches"], self.bundle["rows"], self.bundle["names"])
+        write_json(config, asdict(replace(self.config, bootstrap=2)))
+        return SimpleNamespace(features=features.as_posix(), config=config.as_posix(), output=(self.root / name).as_posix(), seeds=[42, 52, 3047, 3407] if seeds is None else seeds, dataset="weibo", alpha=0.1, bootstrap=2, ablations=False)
+
+    def benchmark_stub(self, bundle, output, config, alpha, bootstraps, ablations):
+        score = {42: 0.2, 52: 0.4, 3047: 0.6, 3407: 0.8}[config.seed]
+        result = {"methods": {"control": {"accuracy": score, "auc": None, "bootstrap": {"lower": score - 0.1, "upper": score + 0.1}}}, "skipped": {}, "config": asdict(config)}
+        write_json(Path(output) / "report.json", result)
+        write_json(Path(output) / "provenance.json", {"configuration": asdict(config)})
+        return result
+
+    def test_benchmark_four_seed_outputs_average_individual_metrics(self):
+        from main import command_benchmark
+        from engine.results import SEEDS, seed_summary
+        from deep import seed_summary as neural_summary
+        self.assertIs(seed_summary, neural_summary)
+        args = self.benchmark_args()
+        with patch("main.benchmark", side_effect=self.benchmark_stub) as runner:
+            result = command_benchmark(args)
+        self.assertEqual([call.args[2].seed for call in runner.call_args_list], list(SEEDS))
+        summary = read_json(Path(args.output) / "summary.json")
+        self.assertEqual(result["seed_count"], 4)
+        self.assertEqual(summary["seeds"], list(SEEDS))
+        self.assertAlmostEqual(summary["metrics"]["control.accuracy"]["mean"], 0.5)
+        self.assertIsNone(summary["metrics"]["control.auc"]["mean"])
+        self.assertFalse(any("bootstrap" in key for key in summary["metrics"]))
+        self.assertNotIn("seed", summary["protocol"]["profile"])
+        for seed in SEEDS:
+            directory = Path(args.output) / ("seed" + str(seed))
+            report = read_json(directory / "report.json")
+            self.assertEqual(report["config"]["seed"], seed)
+            self.assertEqual(summary["byseed"][str(seed)]["control"]["accuracy"], report["methods"]["control"]["accuracy"])
+            self.assertTrue((directory / "result.json").is_file())
+            self.assertIn("sha256", read_json(directory / "provenance.json")["input"])
+
+    def test_benchmark_single_seed_is_declared_without_a_four_seed_claim(self):
+        from main import command_benchmark
+        args = self.benchmark_args(seeds=[52])
+        with patch("main.benchmark", side_effect=self.benchmark_stub):
+            command_benchmark(args)
+        summary = read_json(Path(args.output) / "summary.json")
+        self.assertEqual((summary["seeds"], summary["seed_count"]), ([52], 1))
+        self.assertAlmostEqual(summary["metrics"]["control.accuracy"]["mean"], 0.4)
+        self.assertIsNone(summary["metrics"]["control.accuracy"]["sample_std"])
+
+    def test_benchmark_rejects_invalid_seed_grids_before_execution(self):
+        from main import command_benchmark
+        for seeds in ([], [42, 42], [17], [True]):
+            with self.subTest(seeds=seeds), patch("main.benchmark") as runner:
+                args = self.benchmark_args(seeds=seeds)
+                with self.assertRaisesRegex(ValueError, "distinct seeds"):
+                    command_benchmark(args)
+                runner.assert_not_called()
+                self.assertFalse(Path(args.output).exists())
+
+    def test_benchmark_interruption_keeps_completed_seeds_without_a_mean(self):
+        from main import command_benchmark
+        args = self.benchmark_args()
+        def interrupted(bundle, output, config, *rest):
+            if config.seed == 3047:
+                raise OSError("Interrupted fixture")
+            return self.benchmark_stub(bundle, output, config, *rest)
+        with patch("main.benchmark", side_effect=interrupted), self.assertRaises(OSError):
+            command_benchmark(args)
+        for seed in (42, 52):
+            self.assertTrue((Path(args.output) / ("seed" + str(seed)) / "result.json").is_file())
+        self.assertFalse((Path(args.output) / "summary.json").exists())
+
+    def test_benchmark_stops_when_features_or_configuration_change(self):
+        from main import command_benchmark
+        for field in ("features", "config"):
+            args = self.benchmark_args(name=field)
+            def changed(*values):
+                result = self.benchmark_stub(*values)
+                path = Path(getattr(args, field))
+                path.write_bytes(path.read_bytes() + b" ")
+                return result
+            with self.subTest(field=field), patch("main.benchmark", side_effect=changed), self.assertRaisesRegex(ValueError, "input changed"):
+                command_benchmark(args)
+            self.assertFalse((Path(args.output) / "summary.json").exists())
+
+    def test_benchmark_stops_when_source_changes(self):
+        from main import command_benchmark
+        args = self.benchmark_args()
+        state = {"source": "before"}
+        def changed(*values):
+            result = self.benchmark_stub(*values)
+            state["source"] = "after"
+            return result
+        with patch("main.source_digest", side_effect=lambda: state["source"]), patch("main.benchmark", side_effect=changed), self.assertRaisesRegex(ValueError, "source changed"):
+            command_benchmark(args)
+        self.assertFalse((Path(args.output) / "summary.json").exists())
+
+    def test_benchmark_rejects_inconsistent_method_sets(self):
+        from main import command_benchmark
+        args = self.benchmark_args()
+        def changed(bundle, output, config, *rest):
+            result = self.benchmark_stub(bundle, output, config, *rest)
+            if config.seed == 52:
+                result["methods"]["extra"] = {"accuracy": 0.5}
+            return result
+        with patch("main.benchmark", side_effect=changed), self.assertRaisesRegex(ValueError, "same protocol and methods"):
+            command_benchmark(args)
+        self.assertFalse((Path(args.output) / "summary.json").exists())
+
+    def test_benchmark_preserves_existing_outputs_and_protects_inputs(self):
+        from main import command_benchmark
+        args = self.benchmark_args()
+        root = Path(args.output)
+        root.mkdir()
+        marker = root / "retained.txt"
+        marker.write_text("retained", encoding="utf-8")
+        with patch("main.benchmark") as runner, self.assertRaisesRegex(ValueError, "fresh or empty"):
+            command_benchmark(args)
+        runner.assert_not_called()
+        self.assertEqual(marker.read_text(encoding="utf-8"), "retained")
+        args.output = self.root.as_posix()
+        with self.assertRaisesRegex(ValueError, "cannot contain input"):
+            command_benchmark(args)
+
+    def test_benchmark_real_fixture_keeps_four_independent_reports(self):
+        from main import command_benchmark
+        args = self.benchmark_args()
+        with patch("engine.experiment.METHODS", []):
+            command_benchmark(args)
+        summary = read_json(Path(args.output) / "summary.json")
+        scores = [summary["byseed"][str(seed)]["physical_full"]["accuracy"] for seed in args.seeds]
+        self.assertAlmostEqual(summary["metrics"]["physical_full.accuracy"]["mean"], sum(scores) / 4)
+        for seed in args.seeds:
+            directory = Path(args.output) / ("seed" + str(seed))
+            self.assertTrue((directory / "predictions" / "physical_full.jsonl").is_file())
+            self.assertTrue((directory / "calibration.json").is_file())
 
     def test_absolute_paths_are_rejected(self) -> None:
         with self.assertRaises(ValueError):

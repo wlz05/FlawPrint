@@ -907,7 +907,11 @@ class FormatTests(unittest.TestCase):
         from main import arguments as main_arguments
         from deep import arguments as deep_arguments
         with patch.object(sys, "argv", ["main.py", "benchmark", "./features.npz"]):
-            self.assertEqual(main_arguments().config, "builtin:default")
+            args = main_arguments()
+            self.assertEqual(args.config, "builtin:default")
+            self.assertEqual(args.seeds, [42, 52, 3047, 3407])
+        with patch.object(sys, "argv", ["main.py", "benchmark", "./features.npz", "--seeds", "52"]):
+            self.assertEqual(main_arguments().seeds, [52])
         with patch.object(sys, "argv", ["main.py", "profile", "./features.npz", "--domain", "science"]):
             self.assertEqual(main_arguments().config, "builtin:default")
         with patch.object(sys, "argv", ["deep.py", "train", "./features.npz", "./deep.npz"]):

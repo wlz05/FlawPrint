@@ -3,7 +3,7 @@
 
 from __future__ import annotations
 import argparse
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from pathlib import Path
 import numpy as np
 from PIL.Image import DecompressionBombError
@@ -23,7 +23,7 @@ from engine.robustness import corrupt
 from engine.provenance import manuscript_status, conventions, source_digest, document_path, snapshot_path
 from engine.validation import preflight
 from doctor import environment
-from engine.results import prediction_rows
+from engine.results import SEEDS, prediction_rows, seed_summary
 from engine.synthetic import write_fixture, image_demo
 from engine.theory import verify
 from engine.invariance import verify as verify_invariance
@@ -149,21 +149,62 @@ def command_evaluate(args: argparse.Namespace) -> dict:
     return {key: result.get(key) for key in ("samples", "auc", "macro_f1", "ece", "brier", "macro_domain_auc")}
 
 def command_benchmark(args: argparse.Namespace) -> dict:
-    from engine.storage import digest
-    original_hash = digest(args.features)
-    bundle = load_bundle(args.features)
-    if digest(args.features) != original_hash:
-        raise ValueError("The feature file changed during loading")
-    result = benchmark(bundle, args.output, profile_config(args.config), args.alpha, args.bootstrap, args.ablations)
-    provenance_path = relative_path(args.output) / "provenance.json"
-    provenance = read_json(provenance_path)
-    provenance["input"] = {"path": args.features, "sha256": original_hash}
-    if getattr(args, "dataset", None):
-        provenance["dataset"] = args.dataset
-    if args.config:
-        provenance["configuration_file"] = configuration_record(args.config)
-    write_json(provenance_path, provenance)
-    return {"methods": list(result["methods"]), "skipped": result["skipped"], "output": args.output}
+    from engine.storage import digest, native
+    seeds = list(args.seeds)
+    if not seeds or len(set(seeds)) != len(seeds) or any(type(seed) is not int or seed not in SEEDS for seed in seeds):
+        raise ValueError("Use distinct seeds from 42, 52, 3047, 3407")
+    features, root = relative_path(args.features), relative_path(args.output)
+    inputs = [features] + ([relative_path(args.config)] if args.config and not is_builtin(args.config) else [])
+    if any(resolved(path).is_relative_to(resolved(root)) for path in inputs):
+        raise ValueError("The benchmark output directory cannot contain input files")
+    if root.exists() and (not root.is_dir() or any(root.iterdir())):
+        raise ValueError("Use a fresh or empty benchmark output directory")
+    protect_outputs([root / "summary.json"], inputs)
+    fingerprints = {path.as_posix(): digest(path) for path in inputs}
+    implementation = source_digest()
+    config = profile_config(args.config)
+    settings = asdict(config)
+    settings.pop("seed")
+    configuration_file = configuration_record(args.config) if args.config else None
+
+    def unchanged():
+        if source_digest() != implementation:
+            raise ValueError("The benchmark source changed during the multi-seed run")
+        if any(digest(path) != checksum for path, checksum in fingerprints.items()):
+            raise ValueError("A benchmark input changed during the multi-seed run")
+
+    records = []
+    for seed in seeds:
+        unchanged()
+        bundle = load_bundle(features)
+        unchanged()
+        identities = sorted((row["id"], row.get("label"), row["domain"]) for row in bundle["rows"] if row["split"] == "test")
+        if not identities:
+            raise ValueError("A seed benchmark requires a complete labeled test partition")
+        directory = root / ("seed" + str(seed))
+        result = benchmark(bundle, directory.as_posix(), replace(config, seed=seed), args.alpha, args.bootstrap, args.ablations)
+        unchanged()
+        protocol = {"inputs": fingerprints, "source_sha256": implementation, "profile": settings, "dataset": getattr(args, "dataset", None), "test_identities": identities, "alpha": args.alpha, "bootstrap": args.bootstrap, "ablations": args.ablations, "methods": sorted(result["methods"]), "skipped": result["skipped"]}
+        if records and protocol != records[0]["protocol"]:
+            raise ValueError("All benchmark seeds must use the same protocol and methods")
+        provenance_path = directory / "provenance.json"
+        provenance = read_json(provenance_path)
+        provenance["input"] = {"path": features.as_posix(), "sha256": fingerprints[features.as_posix()]}
+        if getattr(args, "dataset", None):
+            provenance["dataset"] = args.dataset
+        if configuration_file is not None:
+            provenance["configuration_file"] = configuration_file
+        write_json(provenance_path, provenance)
+        # Keep bootstrap intervals in their individual seed reports.
+        metrics = {method: {key: value for key, value in values.items() if key != "bootstrap"} for method, values in result["methods"].items()}
+        record = {"seed": seed, "protocol": protocol, "metrics": native(metrics)}
+        seed_summary([record], [seed])
+        write_json(directory / "result.json", record)
+        records.append(record)
+    unchanged()
+    result = seed_summary(records, seeds)
+    write_json(root / "summary.json", result)
+    return {"seeds": seeds, "seed_count": len(seeds), "methods": protocol["methods"], "skipped": protocol["skipped"], "output": root.as_posix(), "summary": (root / "summary.json").as_posix()}
 
 def command_theory(args: argparse.Namespace) -> dict:
     result = verify(args.seed, args.samples, args.repetitions)
@@ -350,6 +391,7 @@ def arguments() -> argparse.Namespace:
     comparison.add_argument("features")
     comparison.add_argument("--dataset", type=str.lower, choices=("weibo", "weibo21", "finefake"))
     comparison.add_argument("--config", default="builtin:default")
+    comparison.add_argument("--seeds", type=int, nargs="+", choices=SEEDS, default=list(SEEDS))
     comparison.add_argument("--output", default="./outputs/benchmark")
     comparison.add_argument("--bootstrap", type=int, default=200)
     comparison.add_argument("--alpha", type=float, default=0.1)

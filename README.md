@@ -390,7 +390,7 @@ The original trace/copula scoring and external semantic fusion remain available.
 
 ```bash
 python -B main.py fixture --seed 42 --per-split 24 --output ./data/fixture.npz
-python -B main.py benchmark ./data/fixture.npz --config builtin:quick --bootstrap 25 --ablations --output ./outputs/smoke
+python -B main.py benchmark ./data/fixture.npz --config builtin:quick --seeds 42 --bootstrap 25 --ablations --output ./outputs/smoke
 ```
 
 Provide frozen news logits increasing toward fake news, join by exact identity, and benchmark:
@@ -402,10 +402,14 @@ Provide frozen news logits increasing toward fake news, join by exact identity, 
 ```bash
 python -B main.py join ./data/manifest.jsonl ./data/semantic.jsonl --score-key logit --output ./data/semantic_manifest.jsonl
 python -B main.py extract ./data/semantic_manifest.jsonl --output ./data/semantic_features.npz
-python -B main.py benchmark ./data/semantic_features.npz --dataset weibo --config builtin:seed42 --ablations --output ./outputs/seed42
+python -B main.py benchmark ./data/semantic_features.npz --dataset weibo --config builtin:default --seeds 42 52 3047 3407 --ablations --output ./outputs/deterministic
 ```
 
-Repeat with `builtin:seed52`, `builtin:seed3047`, and `builtin:seed3407` and their matching outputs. Built-in controls include TraceLR, MarginalNB, SingleTrace, CharTFIDF, GaussianNovelty, FrozenSemantic, TraceRBF, ImageRBF, and both RBF fusion variants. Deterministic FlawPrint variants are `copula_only`, `sign_only`, `physical_full`, and `flawprint_fusion`.
+`main.py benchmark` defaults to seeds **42, 52, 3047, and 3407**. Each seed fits its own profiles and controls, evaluates the same fixed test identities, and writes predictions, calibration, `report.json`, `provenance.json`, and `result.json` under `seed<seed>/`. The output root's `summary.json` retains all seed metrics in `byseed` and their equal-weight means and sample standard deviations in `metrics`, including keys such as `physical_full.accuracy`. Each metric is computed separately per seed before averaging. Bootstrap intervals remain in the individual seed reports.
+
+Use a fresh or empty output directory. The input archive, configuration, source implementation, method set, and test identities must stay consistent across seeds. An interrupted or inconsistent run does not publish a final mean; completed seed files remain available. Undefined metrics retain an undefined mean. `--config` selects the shared profile settings, and `--seeds` supplies each run's seed, overriding a seed embedded in the preset. `--seeds 42` explicitly selects a single debug run and records a seed count of one. Data partitions remain fixed.
+
+Built-in controls include TraceLR, MarginalNB, SingleTrace, CharTFIDF, GaussianNovelty, FrozenSemantic, TraceRBF, ImageRBF, and both RBF fusion variants. Deterministic FlawPrint variants are `copula_only`, `sign_only`, `physical_full`, and `flawprint_fusion`.
 
 ```bash
 python -B main.py profile ./data/semantic_features.npz --domain Politics --split train --config builtin:seed42 --output ./models/politics.json
