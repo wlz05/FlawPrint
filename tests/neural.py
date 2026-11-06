@@ -1588,6 +1588,108 @@ class NeuralTests(unittest.TestCase):
         reconstructed = potential(logits, observed, graph, "summary")
         torch.testing.assert_close(reconstructed[0], reconstructed[1])
 
+    def test_frozen_rank_reference_and_pair_matrix_match_the_paper_equations(self) -> None:
+        from scipy.special import ndtri
+        from engine.copula import Marginals
+        bundle, _ = self.source_data(("train", "validation", "test"))
+        domain = bundle["rows"][0]["domain"]
+        fitting = subset(bundle, indices(bundle, "train", domain))
+        query = subset(bundle, indices(bundle, "test", domain))
+        profile = DomainProfile.fit(fitting, domain, self.profile)
+        columns = np.asarray(profile.columns)
+        reference = profile.reference.copy()
+        marginals = profile.marginals.sorted_values.copy()
+        query["values"][0, columns[0]] = marginals[len(marginals) // 2, 0]
+        query["observed"][0, columns[-1]] = False
+        clean = np.where(query["observed"][:, columns], query["values"][:, columns], profile.medians)
+        count = len(marginals)
+        ranks = np.column_stack([ndtri(np.clip((np.searchsorted(marginals[:, index], clean[:, index], side="left") + np.searchsorted(marginals[:, index], clean[:, index], side="right")) / (2 * count), .5 / count, 1 - .5 / count)) for index in range(len(columns))])
+        reference_ranks = profile.marginals.transform(fitting["values"][:, columns])
+        expected_reference = (1 - self.profile.shrinkage) * np.corrcoef(reference_ranks, rowvar=False) + self.profile.shrinkage * np.eye(len(columns))
+        np.testing.assert_allclose(reference, expected_reference, rtol=1e-10, atol=1e-10)
+        mask = query["observed"][:, columns]
+        ranks[~mask] = 0
+        operator = np.eye(len(columns)) - np.linalg.solve(reference, np.eye(len(columns)))
+        expected = operator[None] * ranks[:, :, None] * ranks[:, None, :]
+        with patch.object(Marginals, "fit", side_effect=AssertionError("Queries must not refit marginals")):
+            actual_ranks, actual_graph, observed = relation(profile, query)
+        np.testing.assert_allclose(actual_ranks[:, columns], ranks, rtol=1e-6, atol=1e-7)
+        np.testing.assert_allclose(actual_graph[:, columns[:, None], columns[None, :]], expected, rtol=1e-6, atol=1e-6)
+        np.testing.assert_allclose(actual_graph.sum((1, 2)), np.einsum("bi,ij,bj->b", ranks, operator, ranks), rtol=1e-5, atol=1e-5)
+        np.testing.assert_array_equal(observed[:, columns], mask)
+        np.testing.assert_array_equal(profile.reference, reference)
+        np.testing.assert_array_equal(profile.marginals.sorted_values, marginals)
+        for row in query["rows"]:
+            row["label"] = 1 - row["label"]
+        np.testing.assert_array_equal(relation(profile, query)[1], actual_graph)
+
+    def test_bounded_relation_preserves_ordinary_values_zero_gradients_and_large_doubles(self) -> None:
+        from engine.neural import bounded_relation
+        torch.manual_seed(3047)
+        values = (torch.randn(2, 4, 4, dtype=torch.float64) / 10).requires_grad_(True)
+        expected = values / (1 + torch.linalg.matrix_norm(values, keepdim=True))
+        actual = bounded_relation(values)
+        torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+        first, = torch.autograd.grad(actual.sum(), values, retain_graph=True)
+        second, = torch.autograd.grad(expected.sum(), values)
+        torch.testing.assert_close(first, second, rtol=1e-12, atol=1e-12)
+        zero = torch.zeros(1, 4, 4, requires_grad=True)
+        bounded_relation(zero).sum().backward()
+        torch.testing.assert_close(zero.grad, torch.ones_like(zero), rtol=0, atol=0)
+        huge = torch.full((1, 4, 4), 1e300, dtype=torch.float64, requires_grad=True)
+        result = bounded_relation(huge)
+        torch.testing.assert_close(result, torch.full_like(huge, .25), rtol=1e-14, atol=1e-14)
+        result.sum().backward()
+        self.assertTrue(torch.isfinite(huge.grad).all())
+        for invalid in (None, values[0], values[:, :, :3], values.detach().bool(), torch.full_like(values, torch.inf)):
+            with self.subTest(value_type=type(invalid).__name__), self.assertRaises(ValueError):
+                bounded_relation(invalid)
+
+    def test_large_finite_pair_relations_reach_decisions_gradients_and_reload(self) -> None:
+        torch.manual_seed(42)
+        config = replace(self.config, layers=1, dropout=0.)
+        dimensions = {name: 4 for name in embeddings.STREAMS}
+        model = ResidualAttention(dimensions, 4, config).eval()
+        with torch.no_grad():
+            model.identities.mul_(10)
+        hidden = torch.tensor([[0., 1., -1., 0.], [1., 0., 0., -1.], [-1., 0., 0., 1.], [0., -1., 1., 0.]])
+        graph = (torch.stack((hidden, -hidden)) * 1e30).requires_grad_(True)
+        inputs = dict(features={name: torch.randn(1, 4).repeat(2, 1) for name in dimensions}, observed=torch.ones(2, 4, dtype=torch.bool), ranks=torch.zeros(2, 4), trace_observed=torch.ones(2, 4, dtype=torch.bool))
+        relations, nodes = [], []
+        relation_hook = model.blocks[0].register_forward_pre_hook(lambda module, args: relations.append(args[2].detach().clone()))
+        node_hook = model.trace_projection.register_forward_pre_hook(lambda module, args: nodes.append(args[0].detach().clone()))
+        full = model(**inputs, graph=graph)["logit"]
+        relation_hook.remove()
+        node_hook.remove()
+        exact = graph.detach().double()
+        exact = (exact / (1 + torch.linalg.matrix_norm(exact, keepdim=True))).float()
+        torch.testing.assert_close(relations[0], exact, rtol=1e-6, atol=1e-7)
+        torch.testing.assert_close(nodes[0][0], nodes[0][1], rtol=0, atol=0)
+        self.assertGreater(float((full[0] - full[1]).abs().detach()), 1e-6)
+        model.config = replace(config, mode="summary")
+        summarized = model(**inputs, graph=graph)["logit"]
+        torch.testing.assert_close(summarized[0], summarized[1], rtol=0, atol=0)
+        model.config = config
+        with torch.no_grad():
+            model.classifier[-1].bias.sub_(full.mean())
+        decision = model(**inputs, graph=graph)["logit"]
+        self.assertEqual(int((decision >= 0).sum()), 1)
+        model.train()
+        optimizer = torch.optim.AdamW(model.parameters(), lr=1e-4, weight_decay=.01)
+        loss = torch.nn.functional.binary_cross_entropy_with_logits(model(**inputs, graph=graph)["logit"], torch.tensor([1., 0.]))
+        loss.backward()
+        for gradient in (graph.grad, model.blocks[0].strength.grad, model.blocks[0].qkv.weight.grad, model.classifier[-1].weight.grad):
+            self.assertTrue(torch.isfinite(gradient).all())
+            self.assertGreater(float(gradient.abs().sum()), 0)
+        optimizer.step()
+        model.eval()
+        expected = model(**inputs, graph=graph.detach())["logit"].detach()
+        path = self.root / "pair.pt"
+        torch.save(model.state_dict(), path)
+        restored = ResidualAttention(dimensions, 4, config).eval()
+        restored.load_state_dict(torch.load(path, map_location="cpu", weights_only=True))
+        torch.testing.assert_close(restored(**inputs, graph=graph.detach())["logit"], expected, rtol=0, atol=0)
+
     def test_summary_reconstruction_preserves_summaries_and_is_orthogonal(self) -> None:
         torch.manual_seed(42)
         original = torch.randn(3, 6, 6, dtype=torch.float64, requires_grad=True)
@@ -2151,6 +2253,29 @@ class NeuralTests(unittest.TestCase):
         rows = predict(self.bundle, self.archive, directory, device="cpu")
         self.assertTrue(rows and all(not row["physical_reference_available"] for row in rows))
         self.assertTrue(all(np.isfinite(row["fusion_risk"]) for row in rows))
+
+    def test_image_auxiliary_loss_requires_observed_visual_streams(self) -> None:
+        bundle, archive = self.source_data(("train", "validation", "test"))
+        training = indices(bundle, "train")
+        hidden = training[:2]
+        for index in training:
+            bundle["rows"][index]["physical_manipulated"] = bool(index % 2)
+        for name in ("mae", "clip_image"):
+            archive["features"][name][hidden] = 0
+            archive["observed"][hidden, list(archive["features"]).index(name)] = False
+        forward = ResidualAttention.forward
+        def unavailable(model, *args, **kwargs):
+            output = forward(model, *args, **kwargs)
+            columns = [index for index, name in enumerate(model.names) if name in ("mae", "clip_image", "forensic")]
+            missing = ~kwargs["observed"][:, columns].any(-1)
+            output["image_logit"] = output["image_logit"].masked_fill(missing, torch.nan)
+            return output
+        directory = self.root / "visualavailability"
+        with patch.object(ResidualAttention, "forward", unavailable):
+            result = fit(bundle, archive, directory.as_posix(), replace(self.config, epochs=1), self.profile, "cpu")
+        expected = len(training) - len(hidden)
+        self.assertEqual(result["image_supervised_samples"], expected)
+        self.assertEqual(read_json(directory / "model.json")["history"][0]["image_supervised_samples"], expected)
 
     def test_image_auxiliary_loss_requires_independent_image_attributes(self) -> None:
         bundle = copy.deepcopy(self.bundle)

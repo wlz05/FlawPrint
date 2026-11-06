@@ -65,6 +65,8 @@ $$
 
 [relation](engine/learning.py) places these contributions in the fixed trace catalogue. [ResidualAttention](engine/neural.py) forms trace nodes from $[z_i,\bar G_{ii},c_i]$ and keeps the complete $\bar G$ for attention. Here $D=26$ is the default catalogue size and $o_i$ records coordinate availability. Samples without two usable image-trace coordinates have zero relation matrices while retaining their available content nodes.
 
+[bounded_relation](engine/neural.py) evaluates the same normalization as $(G/s)/(s^{-1}+\lVert G/s\rVert_F)$. Ordinary-range inputs use $s=1$; overflow-prone inputs use a magnitude scale that keeps the norm finite. This retains the pair directions and gradients at large finite magnitudes.
+
 **CET, paper (6)-(7).** Every layer and head derives responsibilities from its current content queries:
 
 $$
@@ -96,7 +98,33 @@ The zero-matrix case has $\eta_{\rm pair}=0$. [transport and sensitivity](engine
 
 Recent [MLCCD](https://arxiv.org/html/2610.36569v1) selects task-relevant evidence from MLLM layers, [ARISE](https://arxiv.org/html/2610.36509v1) uses authentic reference geometry during continual training, and [RAEGNet](https://arxiv.org/html/2609.36902v1) models typed retrieved evidence edges. FlawPrint-CRA specifies a different readout object and use position: domain-referenced trace pairs condition current content interactions through $U\bar G U^\top$.
 
-**Supervision, paper (8).** The source news objective is $\mathcal L=\operatorname{BCE}(y,\sigma(\ell))+\omega_a\operatorname{BCE}(a,\sigma(\ell_I))$, with the image term evaluated only where independent manipulation annotations are observed. The [training loop](engine/learning.py) preserves the separate meanings of news veracity $y$ and image manipulation $a$.
+**Supervision, paper (8).** For source batch $\mathcal S_b$ and its image-supervised subset $\mathcal A_b$, the objective is:
+
+$$
+\mathcal L=\frac{1}{|\mathcal S_b|}\sum_{n\in\mathcal S_b}
+\operatorname{BCEWithLogits}(\ell_n,y_n)
++\beta\frac{1}{|\mathcal A_b|}\sum_{n\in\mathcal A_b}
+\operatorname{BCEWithLogits}(\ell^I_n,a_n).
+$$
+
+The image term is zero when $\mathcal A_b$ is empty. Its rows record an image input, at least one observed MAE, CLIP image or forensic stream, and an independent manipulation annotation. In the [training loop](engine/learning.py), `auxiliary_weight` is $\beta$; news veracity $y$ and image manipulation $a$ supervise their respective heads.
+
+## Core Chain Checks
+
+Run the equation and gradient controls without dataset files:
+
+```bash
+python -B -m unittest discover -s tests -p neural.py -k frozen_rank_reference -k bounded_relation_preserves -k large_finite_pair_relations -k image_auxiliary_loss_requires_observed -v
+```
+
+| Path | Checked behavior |
+|---|---|
+| DRC to PPE | Midrank ties, frozen marginals, shrinkage correlation and the pair matrix match independent equation calculations |
+| PPE normalization | Ordinary values match the direct formula; zero and large finite inputs retain valid gradients |
+| CET to the news head | Identical content and node summaries with different pair structure can change logits and decisions; news BCE reaches relation strength and Q/K/V; saved weights reproduce the updated result |
+| Image supervision | Recorded image inputs, observed visual streams and manipulation labels jointly define the source auxiliary subset |
+
+These are CPU implementation controls. The experimental configuration remains one NVIDIA GeForce RTX 4090 with training seeds 42, 52, 3047 and 3407.
 
 ## Project Structure
 

@@ -12,6 +12,19 @@ from torch import nn
 MODES = ("coupled", "unbiased", "independent", "deep", "concat", "uniform", "broadcast", "diagonal", "shuffled", "summary")
 BIASED = ("coupled", "uniform", "broadcast", "diagonal", "shuffled", "summary")
 
+def bounded_relation(relation: torch.Tensor) -> torch.Tensor:
+    """Paper (5): Gbar = (G / s) / (1 / s + ||G / s||_F) for safe s > 0."""
+    if not isinstance(relation, torch.Tensor) or relation.ndim != 3 or relation.shape[-1] < 1 or relation.shape[-2] != relation.shape[-1] or not relation.is_floating_point():
+        raise ValueError("Relation normalization requires square floating matrices")
+    if not torch.isfinite(relation).all():
+        raise ValueError("Observed pair relations must be finite before normalization")
+    largest = relation.abs().amax(dim=(-2, -1), keepdim=True)
+    limit = math.sqrt(torch.finfo(relation.dtype).max) / (2 * relation.shape[-1])
+    # Scale only overflow-prone matrices to preserve ordinary arithmetic.
+    scale = torch.where(largest > limit, largest, torch.ones_like(largest))
+    scaled = relation / scale
+    return scaled / (scale.reciprocal() + torch.linalg.matrix_norm(scaled, keepdim=True))
+
 def summarize(relation: torch.Tensor, observed: torch.Tensor) -> torch.Tensor:
     """Paper Section 4.1: H = Gbar - G_summary has zero diagonal and row sums."""
     if not isinstance(relation, torch.Tensor) or not isinstance(observed, torch.Tensor) or relation.ndim != 3 or relation.shape[-1] < 1 or relation.shape[-1] != relation.shape[-2] or not relation.is_floating_point() or observed.dtype != torch.bool or observed.device != relation.device or observed.shape != relation.shape[:2]:
@@ -403,7 +416,7 @@ class ResidualAttention(nn.Module):
         if self.config.mode == "independent":
             graph = torch.zeros_like(graph)
         # Paper (5): Gbar = G / (1 + ||G||_F) preserves the trace-pair matrix.
-        base = graph / (1 + torch.linalg.matrix_norm(graph, keepdim=True))
+        base = bounded_relation(graph)
         contributions = base.sum(-1) / math.sqrt(self.traces)
         trace_values = torch.stack((ranks, base.diagonal(dim1=-2, dim2=-1), contributions), dim=-1)
         trace_tokens = self.trace_projection(trace_values)

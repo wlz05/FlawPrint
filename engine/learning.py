@@ -572,6 +572,13 @@ def fit(bundle: dict, archive: dict, output: str, config: NeuralConfig, profile_
     packet, normalizers = standardize(packet, partitions["train"])
     dimensions = {name: int(values.shape[1]) for name, values in packet["features"].items()}
     model = ResidualAttention(dimensions, len(bundle["names"]), config).to(device)
+    image_columns = [index for index, name in enumerate(dimensions) if name in ("mae", "clip_image", "forensic")]
+    image_supervised = np.zeros(len(rows), dtype=bool)
+    image_available = packet["observed"][:, image_columns].any(1)
+    # Paper (8): Auxiliary labels require an observed visual encoder stream.
+    for index in partitions["train"]:
+        row = rows[index]
+        image_supervised[index] = image_available[index] and bool(row.get("image")) and isinstance(row.get("physical_manipulated"), (bool, np.bool_))
     optimizer = torch.optim.AdamW((value for value in model.parameters() if value.requires_grad), lr=config.learning_rate, weight_decay=config.weight_decay)
     rng, history, best, best_score, patience, selected_epoch = np.random.default_rng(config.seed), [], None, -1.0, 0, 0
     start_epoch = 0
@@ -592,7 +599,7 @@ def fit(bundle: dict, archive: dict, output: str, config: NeuralConfig, profile_
             target = torch.as_tensor([rows[index]["label"] for index in indices], dtype=torch.float32, device=device)
             smoothed = target * (1 - config.label_smoothing) + config.label_smoothing / 2
             loss = torch.nn.functional.binary_cross_entropy_with_logits(predicted["logit"], smoothed)
-            available = [position for position, index in enumerate(indices) if isinstance(rows[index].get("physical_manipulated"), (bool, np.bool_)) and rows[index].get("image")]
+            available = [position for position, index in enumerate(indices) if image_supervised[index]]
             if available and config.auxiliary_weight:
                 # Image supervision uses manipulation labels rather than news labels.
                 image_target = torch.as_tensor([float(rows[indices[position]]["physical_manipulated"]) for position in available], device=device)
@@ -654,7 +661,7 @@ def fit(bundle: dict, archive: dict, output: str, config: NeuralConfig, profile_
     metadata["selected_epoch"] = selected_epoch
     metadata["calibration_protocol"] = "independent_source_partitions" if state is not None else "uncalibrated"
     publish(destination, best, profiles, metadata, provenance)
-    image_samples = sum(isinstance(rows[index].get("physical_manipulated"), (bool, np.bool_)) and bool(rows[index].get("image")) for index in partitions["train"]) if config.auxiliary_weight else 0
+    image_samples = int(image_supervised[partitions["train"]].sum()) if config.auxiliary_weight else 0
     return {"output": output, "epochs": len(history), "selected_epoch": selected_epoch, "best_validation_macro_f1": best_score, "trainable_parameters": metadata["trainable_parameters"], "image_supervised_samples": image_samples, "calibration_samples": len(partitions["calibration"])}
 
 def predict(bundle: dict, archive: dict, directory: str, split: str = "test", device: str = "cuda:0", reference_domain: str | None = None, explain: bool = False) -> list[dict]:
