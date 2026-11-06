@@ -4,17 +4,18 @@
 from __future__ import annotations
 import copy
 from pathlib import Path
+import sys
 import tempfile
 import unittest
 from unittest.mock import patch
 import numpy as np
-from engine.evidence import paired, mixture, mechanism, stratified, orientation
+from engine.evidence import paired, mixture, mechanism, stratified, orientation, transmission
 from engine.experiment import indices
 from engine.profile import DomainProfile, ProfileConfig
 from engine.metrics import evaluate
 from engine.decision import deployment_report
 from engine.results import prediction_rows
-from engine.storage import read_rows, write_rows, subset
+from engine.storage import read_rows, write_rows, read_json, digest, subset
 from engine.synthetic import fixture
 
 class EvidenceTests(unittest.TestCase):
@@ -28,6 +29,72 @@ class EvidenceTests(unittest.TestCase):
 
     def tearDown(self) -> None:
         self.temporary.cleanup()
+
+    def explained(self) -> list[dict]:
+        rows = copy.deepcopy(self.rows)
+        for index, row in enumerate(rows):
+            original = row["fusion_risk"]
+            full = -original if index == 0 else original
+            summary = -original if index in (2, 3) else original
+            row.update(fusion_risk=full, checkpoint_sha256="a" * 64, checkpoint_version="flawprint-neural-v2", model_mode="coupled", relation_operator="content-conditioned-reference-v2", pair_relation_fraction=.5, pair_contrast_rms=.1, pair_attention_shift_tv=.05, pair_value_transport_rms=.2, pair_tangent_transport_rms=.19, pair_transport_remainder_rms=.01, pair_transport_remainder_bound=.02, summary_readout_risk=summary, pair_readout_delta=full - summary, uniform_readout_risk=original, query_readout_delta=full - original, potential_disabled_risk=0., potential_risk_delta=full)
+        return rows
+
+    def test_transport_analysis_links_fixed_checkpoint_measurements_and_raw_decisions(self) -> None:
+        rows = self.explained()
+        for row in rows:
+            row.update(prediction=1 - int(row["fusion_risk"] >= 0), abstain=True)
+        original = copy.deepcopy(rows)
+        result = transmission(rows, repeats=20)
+        change = result["comparisons"]["summary"]["transitions"]
+        self.assertEqual((change["rescued"], change["harmed"], change["net_corrected"]), (2, 1, 1))
+        self.assertEqual(change["matched_accuracy_delta"], 1 / 16)
+        self.assertEqual(result["remainder_check"]["violations"], 0)
+        details = {row["id"]: row for row in result["rows"]}
+        self.assertEqual(details["2"]["interventions"]["summary"]["transition"], "rescued")
+        self.assertEqual(details["0"]["interventions"]["summary"]["transition"], "harmed")
+        self.assertEqual(rows, original)
+        self.assertEqual(result["samples"], result["labeled_samples"])
+        rows[0]["pair_transport_remainder_rms"] = .1
+        self.assertEqual(transmission(rows, repeats=20)["remainder_check"]["violations"], 1)
+
+    def test_transport_analysis_keeps_unlabeled_coverage_and_rejects_mixed_evidence(self) -> None:
+        rows = self.explained()
+        for row in rows:
+            row.pop("label")
+        result = transmission(rows, repeats=20)
+        self.assertEqual((result["samples"], result["labeled_samples"], result["label_coverage"]), (16, 0, 0))
+        self.assertTrue(all(value is None for value in result["comparisons"].values()))
+        self.assertTrue(all(item["interventions"]["summary"]["transition"] is None for item in result["rows"]))
+        rows[0]["pair_transport_remainder_bound"] = 1e300
+        self.assertTrue(np.isfinite(transmission(rows, repeats=20)["rows"][0]["remainder_bound_tolerance"]))
+        changes = ({"checkpoint_sha256": "b" * 64}, {"checkpoint_sha256": "invalid"}, {"model_mode": "summary"}, {"relation_operator": "broadcast-reference-v1"}, {"pair_readout_delta": 123.}, {"pair_value_transport_rms": None}, {"pair_transport_remainder_rms": -1.}, {"split": "train"}, {"group": ""}, {"id": "1"})
+        for change in changes:
+            damaged = copy.deepcopy(rows)
+            damaged[0].update(change)
+            with self.subTest(change=change), self.assertRaises(ValueError):
+                transmission(damaged, repeats=20)
+        with self.assertRaises(ValueError):
+            transmission([], repeats=20)
+
+    def test_transport_analysis_roundtrips_and_runs_through_the_public_cli(self) -> None:
+        import research
+        rows = self.explained()
+        for row in rows:
+            row["group"] = "shared-event"
+        expected = transmission(rows, repeats=20)
+        for suffix in ("jsonl", "ndjson", "json", "csv", "tsv"):
+            path = self.root / ("explained." + suffix)
+            write_rows(path, rows)
+            self.assertEqual(transmission(read_rows(path), repeats=20), expected)
+        output = self.root / "transport.json"
+        source = self.root / "explained.jsonl"
+        arguments = ["research.py", "transport", source.as_posix(), "--dataset", "weibo", "--scope", "synthetic", "--repeats", "20", "--output", output.as_posix()]
+        with patch.object(sys, "argv", arguments), patch("builtins.print"):
+            research.main()
+        actual = read_json(output)
+        self.assertEqual(actual["remainder_check"], expected["remainder_check"])
+        self.assertEqual(actual["inputs"], [{"path": source.as_posix(), "sha256": digest(source)}])
+        self.assertEqual(actual["evidence_scope"], "synthetic")
 
     def pool(self) -> tuple[dict, dict]:
         bundle = fixture(per_split=24)

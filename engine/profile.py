@@ -51,6 +51,7 @@ class DomainProfile:
 
     @classmethod
     def fit(cls, bundle: dict, domain: str, config: ProfileConfig, columns: list[int] | None = None) -> DomainProfile:
+        """Paper (3): R_d = (1-rho) Corr(Z_d) + rho I defines the frozen domain reference."""
         config.validate()
         validate_bundle(bundle)
         roles = {row.get("split") for row in prediction_rows(bundle["rows"])}

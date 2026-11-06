@@ -13,6 +13,7 @@ MODES = ("coupled", "unbiased", "independent", "deep", "concat", "uniform", "bro
 BIASED = ("coupled", "uniform", "broadcast", "diagonal", "shuffled", "summary")
 
 def summarize(relation: torch.Tensor, observed: torch.Tensor) -> torch.Tensor:
+    """Paper Section 4.1: H = Gbar - G_summary has zero diagonal and row sums."""
     if not isinstance(relation, torch.Tensor) or not isinstance(observed, torch.Tensor) or relation.ndim != 3 or relation.shape[-1] < 1 or relation.shape[-1] != relation.shape[-2] or not relation.is_floating_point() or observed.dtype != torch.bool or observed.device != relation.device or observed.shape != relation.shape[:2]:
         raise ValueError("Summary reconstruction requires square relations and aligned Boolean masks")
     pairs = observed[:, :, None] & observed[:, None, :]
@@ -49,6 +50,7 @@ def contrast(values: torch.Tensor, observed: torch.Tensor) -> torch.Tensor:
     return (values - center).masked_fill(~(keys & observed[:, None, :, None]), 0)
 
 def transport(current: torch.Tensor, reference: torch.Tensor, values: torch.Tensor, observed: torch.Tensor) -> torch.Tensor:
+    """Paper Section 3.4: Delta m = (A - A_0) V with shared value vectors."""
     if not all(isinstance(value, torch.Tensor) for value in (current, reference, values, observed)) or current.ndim != 4 or current.shape[-1] < 1 or current.shape[-2] != current.shape[-1] or reference.shape != current.shape or values.ndim != 4 or values.shape[:3] != current.shape[:3] or values.shape[-1] < 1:
         raise ValueError("Value transport requires aligned attention and value tensors")
     if not current.is_floating_point() or reference.dtype != current.dtype or values.dtype != current.dtype or reference.device != current.device or values.device != current.device or observed.device != current.device or observed.dtype != torch.bool or observed.shape != (current.shape[0], current.shape[-1]):
@@ -68,6 +70,7 @@ def transport(current: torch.Tensor, reference: torch.Tensor, values: torch.Tens
     return result.masked_fill(~observed[:, None, :, None], 0)
 
 def sensitivity(reference: torch.Tensor, direction: torch.Tensor, values: torch.Tensor, observed: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    """Paper (10): Delta m = Cov_p(V, delta) + R with ||R|| <= D_V L_delta^2 / 8."""
     transport(reference, reference, values, observed)
     if not isinstance(direction, torch.Tensor) or direction.shape != reference.shape or direction.dtype != reference.dtype or direction.device != reference.device:
         raise ValueError("Transport sensitivity requires aligned floating logit changes")
@@ -96,6 +99,7 @@ def sensitivity(reference: torch.Tensor, direction: torch.Tensor, values: torch.
     return tangent, bound
 
 def potential(logits: torch.Tensor, observed: torch.Tensor, relation: torch.Tensor, mode: str, unit: bool = False) -> torch.Tensor:
+    """Paper (6)-(7): alpha = softmax(L_content,trace) and B = U Gbar U^T."""
     if not all(isinstance(value, torch.Tensor) for value in (logits, observed, relation)) or logits.ndim != 4 or logits.shape[-1] != logits.shape[-2] or not logits.is_floating_point() or relation.ndim != 3 or relation.dtype != logits.dtype or relation.device != logits.device or observed.dtype != torch.bool or observed.device != logits.device:
         raise ValueError("Attention potentials require square floating matrices and a Boolean node mask")
     if type(unit) is not bool:
@@ -217,7 +221,7 @@ class ResidualBlock(nn.Module):
         original, bias = logits, None
         if mode in BIASED:
             strength = self.limit * torch.sigmoid(self.strength)
-            # Condition every interaction on content-selected reference relations.
+            # Paper (7): A = softmax(L + lambda * U @ Gbar @ U.T + M).
             bias = strength * potential(logits, observed, relation, mode, unit=self.unit_coordinates)
             logits = logits + bias
         selected = observed.clone()
@@ -259,6 +263,9 @@ class ResidualBlock(nn.Module):
                 measured.update(pair_relation_fraction=fraction.clamp(0, 1), pair_contrast_rms=(difference.square().sum((1, 2, 3)) / pairs).sqrt(), pair_attention_shift_tv=change.sum((1, 2)) / (2 * self.heads * queries.sum(-1).clamp_min(1)))
                 measured["pair_value_transport_rms"] = (pair_update[:, :prefix].square().sum((1, 2)) / updates).sqrt()
                 measured["pair_tangent_transport_rms"] = (tangent[:, :prefix].square().sum((1, 2)) / updates).sqrt()
+                # Paper (10): Measure the projected finite-strength remainder directly.
+                residual = pair_update[:, :prefix] - tangent[:, :prefix]
+                measured["pair_transport_remainder_rms"] = (residual.square().sum((1, 2)) / updates).sqrt()
                 measured["pair_transport_remainder_bound"] = ((remainder[:, :prefix].square() * queries).sum(1) / updates).sqrt()
             diagnostics.append(measured)
         mixed = (weights @ value).transpose(1, 2).reshape(batch, length, dimension)
@@ -395,6 +402,7 @@ class ResidualAttention(nn.Module):
         ranks = ranks.masked_fill(~trace_observed, 0)
         if self.config.mode == "independent":
             graph = torch.zeros_like(graph)
+        # Paper (5): Gbar = G / (1 + ||G||_F) preserves the trace-pair matrix.
         base = graph / (1 + torch.linalg.matrix_norm(graph, keepdim=True))
         contributions = base.sum(-1) / math.sqrt(self.traces)
         trace_values = torch.stack((ranks, base.diagonal(dim1=-2, dim2=-1), contributions), dim=-1)

@@ -2186,6 +2186,10 @@ class NeuralTests(unittest.TestCase):
                 self.assertEqual(prediction_rows(read_rows(output)), expected)
                 reports.append(read_json(output.with_name("predictions.report.json")))
         self.assertTrue(all(report == reports[0] for report in reports))
+        from engine.evidence import transmission
+        analysis = transmission(expected, repeats=20)
+        self.assertEqual(analysis["checkpoint_sha256"], checksum)
+        self.assertEqual(analysis["remainder_check"]["violations"], 0)
         self.assertFalse(list(self.root.glob(".flawprint-*")))
 
     def test_neural_cli_trains_and_predicts_from_aligned_caches(self) -> None:
@@ -2776,13 +2780,14 @@ class NeuralTests(unittest.TestCase):
         error = transport(current, reference, value, observed) - tangent
         error = torch.nn.functional.linear(error.transpose(1, 2).reshape(2, 7, self.config.dimension), block.output.weight)
         measured_error = (error[:, :3].square().sum((1, 2)) / (3 * self.config.dimension)).sqrt()
+        torch.testing.assert_close(measurements[0]["pair_transport_remainder_rms"], measured_error, atol=1e-13, rtol=1e-7)
         self.assertTrue(torch.all(measured_error <= measurements[0]["pair_transport_remainder_bound"] + 1e-13))
         torch.testing.assert_close(block(tokens, observed, relation, "coupled"), expected, atol=0, rtol=0)
         with torch.no_grad():
             block.output.weight.zero_()
         measurements = []
         block(tokens, observed, relation, "coupled", measurements)
-        for name in ("pair_tangent_transport_rms", "pair_transport_remainder_bound"):
+        for name in ("pair_tangent_transport_rms", "pair_transport_remainder_rms", "pair_transport_remainder_bound"):
             torch.testing.assert_close(measurements[0][name], torch.zeros(2, dtype=torch.float64), atol=0, rtol=0)
 
     def test_reference_mixture_changes_pair_direction_with_the_content_state_fixed(self) -> None:

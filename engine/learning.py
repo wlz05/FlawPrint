@@ -112,6 +112,7 @@ def reference_folds(rows: list[dict], folds: int, seed: int, balanced: bool = Fa
     return list(StratifiedGroupKFold(folds, shuffle=True, random_state=seed).split(rows, labels, groups=identifiers))
 
 def relation(profile: DomainProfile, bundle: dict) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Paper (4): G_ij = o_i o_j (I - P_d)_ij z_i z_j with frozen P_d = R_d^-1."""
     if any(profile.overlap(bundle["rows"])):
         raise ValueError("A neural query overlaps its fitted physical reference")
     transformed = profile.transform(bundle)
@@ -247,7 +248,7 @@ def logits(model: ResidualAttention, packet: dict, indices: list[int], device: s
                 raise ValueError("Neural inference requires one finite risk per selected sample")
             values.append(risk)
             if diagnostics is not None:
-                for name in ("attention_contrast_rms", "attention_shift_tv", "pair_relation_fraction", "pair_contrast_rms", "pair_attention_shift_tv", "value_transport_rms", "pair_value_transport_rms", "pair_tangent_transport_rms", "pair_transport_remainder_bound"):
+                for name in ("attention_contrast_rms", "attention_shift_tv", "pair_relation_fraction", "pair_contrast_rms", "pair_attention_shift_tv", "value_transport_rms", "pair_value_transport_rms", "pair_tangent_transport_rms", "pair_transport_remainder_rms", "pair_transport_remainder_bound"):
                     if name in output:
                         if not isinstance(output[name], torch.Tensor):
                             raise ValueError("Neural diagnostics require tensors: " + name)
@@ -506,6 +507,7 @@ def publish(destination: Path, parameters: dict, profiles: dict, metadata: dict,
             raise
 
 def fit(bundle: dict, archive: dict, output: str, config: NeuralConfig, profile_config: ProfileConfig, device: str = "cuda:0", provenance: dict | None = None, state_path: str | None = None, resume: bool = False) -> dict:
+    """Paper (8): News BCE uses source labels; image BCE uses observed manipulation labels."""
     if not isinstance(config, NeuralConfig) or not isinstance(profile_config, ProfileConfig):
         raise ValueError("Training requires neural and reference configurations")
     config, profile_config = copy.deepcopy(config), copy.deepcopy(profile_config)
@@ -767,7 +769,7 @@ def predict(bundle: dict, archive: dict, directory: str, split: str = "test", de
             row["query_readout_delta"] = float(risks[index]) - float(uniform[index]) if uniform is not None else None
             row["summary_readout_risk"] = float(summarized[index]) if summarized is not None else None
             row["pair_readout_delta"] = float(risks[index]) - float(summarized[index]) if summarized is not None else None
-            for name in ("attention_contrast_rms", "attention_shift_tv", "pair_relation_fraction", "pair_contrast_rms", "pair_attention_shift_tv", "value_transport_rms", "pair_value_transport_rms", "pair_tangent_transport_rms", "pair_transport_remainder_bound"):
+            for name in ("attention_contrast_rms", "attention_shift_tv", "pair_relation_fraction", "pair_contrast_rms", "pair_attention_shift_tv", "value_transport_rms", "pair_value_transport_rms", "pair_tangent_transport_rms", "pair_transport_remainder_rms", "pair_transport_remainder_bound"):
                 row[name] = float(measurements[name][index]) if name in measurements else None
             row["intervention_scope"] = "Fixed checkpoint and nodes; local attention contrasts and potential-off, uniform, and summary readouts"
     # Bind every returned prediction to one complete checkpoint snapshot.

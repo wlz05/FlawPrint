@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 from collections import defaultdict
+import re
 import numpy as np
 from scipy.optimize import brentq
 from engine.conformal import validate_labels, validate_partitions
@@ -16,6 +17,90 @@ from engine.data import missing
 from engine.storage import subset, validate_bundle
 
 METRICS = ("auc", "macro_f1", "accuracy", "ece", "brier", "log_loss", "macro_domain_auc", "macro_domain_f1")
+
+def transmission(records: list[dict], repeats: int = 1000, seed: int = 42, group_key: str = "group") -> dict:
+    """Paper Section 4.4 links eta_pair, TV, projected transport and raw-head correction."""
+    if type(repeats) is not int or repeats < 20 or type(seed) is not int or not 0 <= seed < 2 ** 32 or group_key not in ("domain", "group"):
+        raise ValueError("Transport analysis requires twenty repeats, a valid seed and event or domain grouping")
+    rows = score_rows(records, "fusion_risk")
+    if not rows:
+        raise ValueError("Transport analysis requires nonempty explained predictions")
+    validate_partitions(rows)
+    fields = ("pair_relation_fraction", "pair_contrast_rms", "pair_attention_shift_tv", "pair_value_transport_rms", "pair_tangent_transport_rms", "pair_transport_remainder_rms", "pair_transport_remainder_bound")
+    controls = {"summary": ("summary_readout_risk", "pair_readout_delta"), "uniform": ("uniform_readout_risk", "query_readout_delta"), "potential_off": ("potential_disabled_risk", "potential_risk_delta")}
+    checkpoints, details = set(), []
+    for row in rows:
+        checksum = row.get("checkpoint_sha256")
+        if not isinstance(checksum, str) or re.fullmatch("[0-9a-f]{64}", checksum) is None:
+            raise ValueError("Transport analysis requires a checkpoint SHA256 for every row")
+        checkpoints.add(checksum)
+        if row.get("model_mode") != "coupled" or row.get("checkpoint_version") != "flawprint-neural-v2" or row.get("relation_operator") != "content-conditioned-reference-v2":
+            raise ValueError("Transport analysis requires explained content-conditioned coupled predictions")
+        if row.get("split") != "test" or row.get("profile_overlap", False) or not isinstance(row.get(group_key), str) or not row[group_key].strip():
+            raise ValueError("Transport analysis requires held-out test rows with grouping metadata")
+        required = (*fields, *(key for pair in controls.values() for key in pair))
+        if any(row.get(key) is None for key in required):
+            raise ValueError("Transport analysis requires complete --explain diagnostics")
+        for name, (risk, difference) in controls.items():
+            if not np.isclose(row["fusion_risk"] - row[risk], row[difference], rtol=1e-5, atol=1e-7):
+                raise ValueError("Transport analysis found an inconsistent " + name + " intervention delta")
+        # Paper (10): Check the measured projected remainder against its bound.
+        remainder, bound = row["pair_transport_remainder_rms"], row["pair_transport_remainder_bound"]
+        tolerance = 32.0 * float(np.finfo(np.float32).eps) * (1 + bound)
+        detail = {key: row[key] for key in ("id", "domain", "group", "label", *fields) if key in row}
+        full_prediction = int(row["fusion_risk"] >= 0)
+        interventions = {}
+        for name, (risk, difference) in controls.items():
+            decision = int(row[risk] >= 0)
+            outcome = None
+            if "label" in row:
+                states = {(False, True): "rescued", (True, False): "harmed", (True, True): "unchanged_correct", (False, False): "unchanged_wrong"}
+                outcome = states[decision == row["label"], full_prediction == row["label"]]
+            interventions[name] = {"risk": row[risk], "prediction": decision, "risk_delta": row[difference], "transition": outcome}
+        detail.update(remainder_bound_satisfied=bool(remainder <= bound + tolerance), remainder_bound_tolerance=float(tolerance), raw_head_risk=row["fusion_risk"], raw_head_prediction=full_prediction, interventions=interventions)
+        details.append(detail)
+    if len(checkpoints) != 1:
+        raise ValueError("Transport analysis cannot combine different checkpoints")
+    order = sorted(range(len(rows)), key=lambda index: rows[index]["id"])
+    rows, details = [rows[index] for index in order], [details[index] for index in order]
+    labeled = [row for row in rows if "label" in row]
+    def raw_head(key: str) -> list[dict]:
+        result = []
+        for original in labeled:
+            row = dict(original, fusion_risk=original[key], prediction=int(original[key] >= 0))
+            for field in ("probability", "probability_calibrated", "prediction_set", "abstain"):
+                row.pop(field, None)
+            result.append(row)
+        return result
+    full = raw_head("fusion_risk")
+    comparisons = {}
+    for name, (risk, _) in controls.items():
+        reference = raw_head(risk)
+        comparison = paired(reference, full, repeats=repeats, seed=seed, group_key=group_key) if labeled else None
+        if comparison is not None:
+            change = transitions(reference, full, "fusion_risk")
+            change["net_corrected"] = change["rescued"] - change["harmed"]
+            comparison["transitions"] = change
+        comparisons[name] = comparison
+    diagnostics = {}
+    for key in fields:
+        values = np.asarray([row[key] for row in rows], dtype=float)
+        diagnostics[key] = {"mean": float((values / len(values)).sum()), "minimum": float(values.min()), "maximum": float(values.max())}
+    return {
+        "version": "flawprint-transport-analysis-v1",
+        "checkpoint_sha256": next(iter(checkpoints)),
+        "seed": seed, "repeats": repeats,
+        "samples": len(rows), "labeled_samples": len(labeled), "label_coverage": len(labeled) / len(rows),
+        "independent_groups": len({row[group_key] for row in rows}), "group_key": group_key,
+        "diagnostics": diagnostics,
+        "remainder_check": {"checked": len(details), "violations": sum(not row["remainder_bound_satisfied"] for row in details), "tolerance": "32 * float32_epsilon * (1 + projected_bound)"},
+        "comparisons": comparisons, "rows": details,
+        "local_reference": "Summary reconstruction at the same layer state",
+        "aggregation": "Project each head, take RMS over available class/content queries and output width, then average layers",
+        "decision_rule": "Raw news-head risk >= 0 for every intervention; probability calibration and abstention are excluded",
+        "scope": "Same-checkpoint interventions on fixed test identities; independently trained ablations are evaluated separately",
+        "formulas": {"pair_energy": "eta_pair = ||Gbar - G_summary||_F^2 / ||Gbar||_F^2", "projected_remainder": "r_proj = RMS(Delta o_pair - S_projected)", "net_correction": "rescued - harmed"}
+    }
 
 def orientation(genuine: np.ndarray, fake: np.ndarray, fractions: list[float] | None = None) -> dict:
     if any(np.asarray(reference).dtype.kind == "b" for reference in (genuine, fake)):

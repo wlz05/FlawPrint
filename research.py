@@ -4,7 +4,7 @@
 from __future__ import annotations
 import argparse
 from dataclasses import asdict
-from engine.evidence import paired, mixture, mechanism, stratified, orientation
+from engine.evidence import paired, mixture, mechanism, stratified, orientation, transmission
 from engine.quotient import audit as quotient
 from engine.selection import filtering
 from engine.channels import compare as channel_comparison
@@ -26,6 +26,11 @@ def main() -> None:
     comparison.add_argument("--group-key", choices=("domain", "group"), default="domain")
     comparison.add_argument("--repeats", type=int, default=1000)
     comparison.add_argument("--output", default="./outputs/research/comparison.json")
+    transport = commands.add_parser("transport", help="Connect retained pairs, projected transport and task corrections")
+    transport.add_argument("predictions")
+    transport.add_argument("--group-key", choices=("domain", "group"), default="group")
+    transport.add_argument("--repeats", type=int, default=1000)
+    transport.add_argument("--output", default="./outputs/research/transport.json")
     strata = commands.add_parser("strata")
     strata.add_argument("reference")
     strata.add_argument("candidate")
@@ -81,18 +86,20 @@ def main() -> None:
     channels.add_argument("--alpha", type=float, default=0.1)
     channels.add_argument("--regularization", type=float, default=1e-4)
     channels.add_argument("--output", default="./outputs/research/channels.json")
-    for command in (comparison, strata, sensitivity, demonstration, direction, geometry, selection, channels):
+    for command in (comparison, transport, strata, sensitivity, demonstration, direction, geometry, selection, channels):
         command.add_argument("--scope", choices=("synthetic",) if command in (demonstration, direction) else ("synthetic", "real"), required=True)
         command.add_argument("--dataset", type=str.lower, required=True)
         command.add_argument("--seed", type=int, default=42)
     args = parser.parse_args()
     try:
-        inputs = [getattr(args, field) for field in ("reference", "candidate", "annotations", "pool", "features", "config", "matrices", "selector_predictions", "selector_metadata", "semantic", "physical", "deep", "provenance") if hasattr(args, field) and not (field == "config" and is_builtin(getattr(args, field)))]
+        inputs = [getattr(args, field) for field in ("reference", "candidate", "predictions", "annotations", "pool", "features", "config", "matrices", "selector_predictions", "selector_metadata", "semantic", "physical", "deep", "provenance") if hasattr(args, field) and not (field == "config" and is_builtin(getattr(args, field)))]
         if any(same_path(path, args.output) for path in inputs):
             raise ValueError("Research output cannot overwrite an input")
         fingerprints = [{"path": path, "sha256": digest(path)} for path in inputs]
         if args.command == "compare":
             result = paired(prediction_rows(read_rows(args.reference)), prediction_rows(read_rows(args.candidate)), args.score_key, args.repeats, args.seed, args.group_key)
+        elif args.command == "transport":
+            result = transmission(read_rows(args.predictions), args.repeats, args.seed, args.group_key)
         elif args.command == "strata":
             result = stratified(read_rows(args.reference), read_rows(args.candidate), read_rows(args.annotations), args.score_key, args.repeats, args.seed, args.group_key)
         elif args.command == "mixture":

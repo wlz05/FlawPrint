@@ -37,6 +37,67 @@ The [core operation in step 4](engine/neural.py) makes trace relations part of t
 
 Pair information contributes through the current query's trace responsibilities. The component lost by diagonal and row summaries has zero row sums: a uniform query cancels its direct contribution, while content-specific responsibilities can turn it into relative attention preferences. The diagnostics below measure retained pair energy, its local use, and the resulting whole-model response separately.
 
+## Paper Equations and Implementation
+
+FlawPrint preserves **which trace pairs agree or disagree with the domain reference until the current content selects them**. BERT, MAE, and CLIP supply content nodes. DRC defines the comparison coordinates, PPE retains the pair matrix, and CET reads that matrix into content interactions. The trained news head determines its use for veracity.
+
+**DRC, paper (2)-(3).** A frozen reference pool defines midrank empirical marginals and a shrinkage correlation:
+
+$$
+z_i=\Phi^{-1}\!\left[\operatorname{clip}
+  \left(\widehat F_{d,i}(\varphi_i),\frac{1}{2n_d},1-\frac{1}{2n_d}\right)\right],
+\qquad
+\widehat R_d=(1-\rho)\operatorname{Corr}(Z_d)+\rho I,
+\qquad P_d=\widehat R_d^{-1}.
+$$
+
+[Marginals.transform](engine/copula.py) implements the frozen rank transform; [DomainProfile.fit](engine/profile.py) estimates the domain reference. Source queries use group cross-fitting, while saved references and inference follow the supplied source or independent profile roles.
+
+**PPE, paper (4)-(5).** Each observed trace pair retains its own quadratic contribution:
+
+$$
+G_{ij}=o_i o_j(\delta_{ij}-P_{d,ij})z_i z_j,
+\qquad
+\bar G=\frac{G}{1+\lVert G\rVert_F},
+\qquad
+c_i=\frac{1}{\sqrt D}\sum_j\bar G_{ij}.
+$$
+
+[relation](engine/learning.py) places these contributions in the fixed trace catalogue. [ResidualAttention](engine/neural.py) forms trace nodes from $[z_i,\bar G_{ii},c_i]$ and keeps the complete $\bar G$ for attention. Here $D=26$ is the default catalogue size and $o_i$ records coordinate availability. Samples without two usable image-trace coordinates have zero relation matrices while retaining their available content nodes.
+
+**CET, paper (6)-(7).** Every layer and head derives responsibilities from its current content queries:
+
+$$
+\alpha_{ai}=\operatorname{softmax}_{i\in\mathcal O}(L_{a,\tau_i}),
+\qquad
+U=\begin{bmatrix}\alpha\\\operatorname{diag}(o)\end{bmatrix},
+\qquad
+B=U\bar G U^\top,
+\qquad
+A=\operatorname{softmax}_{\rm key}(L+\lambda B+M).
+$$
+
+[potential](engine/neural.py) implements the two-endpoint readout; [ResidualBlock](engine/neural.py) applies it before shared-value aggregation. The same operation creates content-content, content-trace, and trace-trace conditions. Responsibilities change with the layer state; the frozen reference retains the meaning of each measurement coordinate.
+
+**Retained pairs and actual updates, paper Sections 4.1-4.4.** Let $\bar G_\Sigma$ be the minimum-norm matrix with the same diagonal and row sums, and $H=\bar G-\bar G_\Sigma$. [summarize](engine/neural.py) constructs this control. The pair-only attention change uses $\delta=\lambda UHU^\top$ while holding that layer's nodes, queries, keys, values, and masks fixed:
+
+$$
+\eta_{\rm pair}=\frac{\lVert H\rVert_F^2}{\lVert\bar G\rVert_F^2},
+\qquad
+\Delta m=(A-A_\Sigma)V,
+\qquad
+S=\operatorname{Cov}_{A_\Sigma}(V,\delta),
+\qquad
+\Delta m=S+R,\quad
+\lVert R\rVert_2\le\frac{D_V L_\delta^2}{8}.
+$$
+
+The zero-matrix case has $\eta_{\rm pair}=0$. [transport and sensitivity](engine/neural.py) compute the finite update, tangent and bound. Each head is mapped through its output projection before query RMS and layer means are recorded. `pair_transport_remainder_rms` directly measures the projected difference between the finite update and its tangent, using the same values and projections as the bound.
+
+Recent [MLCCD](https://arxiv.org/html/2610.36569v1) selects task-relevant evidence from MLLM layers, [ARISE](https://arxiv.org/html/2610.36509v1) uses authentic reference geometry during continual training, and [RAEGNet](https://arxiv.org/html/2609.36902v1) models typed retrieved evidence edges. FlawPrint-CRA specifies a different readout object and use position: domain-referenced trace pairs condition current content interactions through $U\bar G U^\top$.
+
+**Supervision, paper (8).** The source news objective is $\mathcal L=\operatorname{BCE}(y,\sigma(\ell))+\omega_a\operatorname{BCE}(a,\sigma(\ell_I))$, with the image term evaluated only where independent manipulation annotations are observed. The [training loop](engine/learning.py) preserves the separate meanings of news veracity $y$ and image manipulation $a$.
+
 ## Project Structure
 
 ```text
@@ -335,12 +396,25 @@ python -B deep.py predict ./data/features.npz ./data/deep.npz --model ./models/n
 | `value_transport_rms` | Layer-mean RMS of the projected content-query update versus the same layer without the reference potential |
 | `pair_value_transport_rms` | Layer-mean RMS of the projected content-query update after removing only unsummarized pair relations |
 | `pair_tangent_transport_rms` | Layer-mean RMS of the projected value-logit covariance at the summary attention state |
+| `pair_transport_remainder_rms` | Measured layer-mean RMS of the finite projected pair update minus its first-order tangent |
 | `pair_transport_remainder_bound` | Upper bound on the layer-mean RMS error of that first-order update at the full pair-bias strength |
 | `potential_disabled_risk` / `potential_risk_delta` | Whole-model raw risk with the potential disabled / original minus disabled risk |
 | `uniform_readout_risk` / `query_readout_delta` | Whole-model risk with uniform content responsibilities / original minus uniform risk |
 | `summary_readout_risk` / `pair_readout_delta` | Whole-model risk with summary-reconstructed relations / original minus summary risk |
 
 Local measurements include the class node and available content queries, with all available keys; masked nodes are excluded from their denominators. A missing relation gives zero local change. The concat control has no attention measurements and exports missing values. Coupled checkpoints add three diagnostic forwards: potential off, uniform responsibility, and summary reconstruction. Uniform and summary checkpoints report zero for their corresponding self-intervention delta; other inapplicable readouts export missing values. Input nodes and weights stay fixed while hidden states update normally in each forward pass. Probabilities and prediction sets use the original model risk.
+
+Connect those measurements to individual news decisions with:
+
+```bash
+python -B research.py transport ./outputs/neural42/intervention.jsonl --dataset weibo --scope real --group-key group --repeats 1000 --seed 42 --output ./outputs/neural42/transport.json
+```
+
+This CPU analysis reads the explained predictions from one coupled checkpoint. It preserves every input ID, reports label coverage, checks the measured projected remainder against its bound, and connects each row to its summary, uniform, and potential-off risk changes. Labeled rows additionally produce rescued, harmed, and net-corrected counts with event-group paired bootstrap intervals.
+
+All intervention decisions use the same raw news-head threshold, $\hat y=\mathbb{1}[\ell\ge0]$. Thus the normalized accuracy change is $(N_{\rm rescued}-N_{\rm harmed})/N_{\rm labeled}$. Probability calibration and abstention remain part of their separately exported evaluation flow. Unknown labels retain their mechanism measurements and contribute to total coverage. Mixed checkpoints, missing diagnostics and inconsistent risk differences are rejected.
+
+The remainder check reports the numerical tolerance $32\epsilon_{\rm float32}(1+b_{\rm rem})$ per row. It measures local finite-strength error after projection; whole-model risk changes come from the separate intervention forwards. Independently trained summary/coupled and uniform/coupled comparisons continue to use the four-seed experiment and paired comparison commands.
 
 Pair diagnostics are available for coupled checkpoints. Local summary removal reuses the current Q/K/V tensors and masks; it does not launch another whole-model forward. Other modes export missing values for these fields. Compare these measurements by news ID with `pair_readout_delta` and the paired task outcomes: retained matrix energy, local attention use, and final correction measure different stages of the same readout.
 

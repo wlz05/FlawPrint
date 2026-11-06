@@ -92,6 +92,7 @@ class Marginals:
             raise ValueError("Marginal reference columns must be sorted")
 
     def transform(self, values: np.ndarray) -> np.ndarray:
+        """Paper (2): z_i = Phi^-1(clip(Fhat_i(x_i), 1/(2n), 1-1/(2n)))."""
         values = matrix(values, 1)
         if values.shape[1] != self.sorted_values.shape[1]:
             raise ValueError("Marginal dimensions do not match")
