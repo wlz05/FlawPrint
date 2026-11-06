@@ -6,24 +6,23 @@ The deterministic FlawPrint baseline achieves **state-of-the-art performance on 
 
 ## Method Chain
 
-```text
-Original text ---> BERT and CLIP text vectors ----+
-Original image -> MAE and CLIP image vectors ----+--> Content queries
-        |                                                |
-        +--> Pixel and container traces                  |
-Text ------> Narrative coordinates                        |
-                       |                                 |
-Independent pool --> Frozen ranks and domain copula      |
-                       |                                 |
-                  Pairwise residual G                    |
-                       |                                 |
-                       +------ Query-selected coordinates U
-                                       |
-                                B = U Gbar U^T
-                                       |
-                           Reference-conditioned attention
-                                       |
-                             News risk and calibration
+```mermaid
+flowchart TD
+    T["Original text"] --> TV["BERT and CLIP text vectors"]
+    I["Original image"] --> IV["MAE and CLIP image vectors"]
+    TV --> Q["Content queries"]
+    IV --> Q
+    I --> P["Pixel and container traces"]
+    T --> N["Narrative coordinates"]
+    R["Independent pool"] --> C["Frozen ranks and domain copula"]
+    P --> G["Pairwise residual G"]
+    N --> G
+    C --> G
+    Q --> U["Query-selected coordinates U"]
+    G --> B["B = U Gbar U^T"]
+    U --> B
+    B --> A["Reference-conditioned attention"]
+    A --> Y["News risk and calibration"]
 ```
 
 1. **Encode content.** Retain the BERT text, MAE image, CLIP text, and CLIP image vectors as four global content nodes.
