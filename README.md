@@ -1,6 +1,6 @@
 # FlawPrint: Cross-Domain Multimodal Fake News Detection via Copula Residuals of Physical Imperfection Traces
 
-**FlawPrint-CRA** uses trace relations selected by the current news content to condition its multimodal interactions. A frozen domain reference defines the trace-pair matrix; current queries read it through `B = U Gbar U^T`, and shared value vectors carry the resulting content update.
+**FlawPrint-CRA** uses trace relations selected by the current news content to condition its multimodal interactions. A frozen domain reference defines the trace-pair matrix; current queries read it through $B = U\bar G U^\top$, and shared value vectors carry the resulting content update.
 
 The deterministic FlawPrint baseline achieves **state-of-the-art performance on Weibo, Weibo21, and FineFake**. The content-conditioned CRA results are recorded separately. Experiment settings use a **single NVIDIA GeForce RTX 4090** and seeds **42, 52, 3047, and 3407**.
 
@@ -28,7 +28,7 @@ flowchart TD
 1. **Encode content.** Retain the BERT text, MAE image, CLIP text, and CLIP image vectors as four global content nodes.
 2. **Measure trace coordinates.** Read noise, frequency, gradient, JPEG, resampling, and container proxies from the original image. Six narrative statistics complete the default 26-coordinate catalogue.
 3. **Define a domain reference.** Frozen empirical marginals establish rank coordinates. The copula precision matrix defines pairwise support relative to independent pairing.
-4. **Read relations through content.** Each attention head reuses its query/key scores to assign a distribution over available trace anchors. The lifted matrix `U Gbar U^T` supplies distinct content-to-content, content-to-trace, and trace-to-trace interaction conditions.
+4. **Read relations through content.** Each attention head reuses its query/key scores to assign a distribution over available trace anchors. The lifted matrix $U\bar G U^\top$ supplies distinct content-to-content, content-to-trace, and trace-to-trace interaction conditions.
 5. **Learn the news decision.** Residual attention updates the nodes and the news head reads the class node. Source news labels train projections and interactions; separately observed manipulation labels supervise an optional image head.
 
 DRC (Domain-Referenced Coordinates) fixes the statistical comparison scale. PPE (Pair-Preserving Evidence) retains the trace-pair matrix. CET (Content-Conditioned Evidence Transport) maps that matrix through the current queries into attention and value updates. Encoders supply observations, and the unified news head learns their task use.
@@ -41,14 +41,16 @@ Pair information contributes through the current query's trace responsibilities.
 
 FlawPrint preserves **which trace pairs agree or disagree with the domain reference until the current content selects them**. BERT, MAE, and CLIP supply content nodes. DRC defines the comparison coordinates, PPE retains the pair matrix, and CET reads that matrix into content interactions. The trained news head determines its use for veracity.
 
-**DRC, paper (2)-(3).** A frozen reference pool defines midrank empirical marginals and a shrinkage correlation:
+**DRC, paper (2)-(3).** A frozen reference pool defines midrank empirical marginals and a shrinkage correlation. Let $\epsilon_d = 1/(2n_d)$:
 
 $$
-z_i=\Phi^{-1}\!\left[\operatorname{clip}
-  \left(\widehat F_{d,i}(\varphi_i),\frac{1}{2n_d},1-\frac{1}{2n_d}\right)\right],
-\qquad
-\widehat R_d=(1-\rho)\operatorname{Corr}(Z_d)+\rho I,
-\qquad P_d=\widehat R_d^{-1}.
+\begin{aligned}
+z_i &= \Phi^{-1}\!\left[
+  \operatorname{clip}\!\left(\widehat F_{d,i}(\varphi_i),\epsilon_d,1-\epsilon_d\right)
+\right], \\[4pt]
+\widehat R_d &= (1-\rho)\operatorname{Corr}(Z_d)+\rho I, \\[4pt]
+P_d &= \widehat R_d^{-1}.
+\end{aligned}
 $$
 
 [Marginals.transform](engine/copula.py) implements the frozen rank transform; [DomainProfile.fit](engine/profile.py) estimates the domain reference. Source queries use group cross-fitting, while saved references and inference follow the supplied source or independent profile roles.
@@ -56,27 +58,29 @@ $$
 **PPE, paper (4)-(5).** Each observed trace pair retains its own quadratic contribution:
 
 $$
-G_{ij}=o_i o_j(\delta_{ij}-P_{d,ij})z_i z_j,
-\qquad
-\bar G=\frac{G}{1+\lVert G\rVert_F},
-\qquad
-c_i=\frac{1}{\sqrt D}\sum_j\bar G_{ij}.
+\begin{aligned}
+G_{ij} &= o_i o_j(\delta_{ij}-P_{d,ij})z_i z_j, \\[4pt]
+\bar G &= \frac{G}{1+\lVert G\rVert_F}, \\[4pt]
+c_i &= \frac{1}{\sqrt D}\sum_j\bar G_{ij}.
+\end{aligned}
 $$
 
 [relation](engine/learning.py) places these contributions in the fixed trace catalogue. [ResidualAttention](engine/neural.py) forms trace nodes from $[z_i,\bar G_{ii},c_i]$ and keeps the complete $\bar G$ for attention. Here $D=26$ is the default catalogue size and $o_i$ records coordinate availability. Samples without two usable image-trace coordinates have zero relation matrices while retaining their available content nodes.
 
-[bounded_relation](engine/neural.py) evaluates the same normalization as $(G/s)/(s^{-1}+\lVert G/s\rVert_F)$. Ordinary-range inputs use $s=1$; overflow-prone inputs use a magnitude scale that keeps the norm finite. This retains the pair directions and gradients at large finite magnitudes.
+[bounded_relation](engine/neural.py) evaluates the same normalization as $\frac{G/s}{s^{-1}+\lVert G/s\rVert_F}$. Ordinary-range inputs use $s=1$; overflow-prone inputs use a magnitude scale that keeps the norm finite. This retains the pair directions and gradients at large finite magnitudes.
 
 **CET, paper (6)-(7).** Every layer and head derives responsibilities from its current content queries:
 
 $$
-\alpha_{ai}=\operatorname{softmax}_{i\in\mathcal O}(L_{a,\tau_i}),
-\qquad
-U=\begin{bmatrix}\alpha\\\operatorname{diag}(o)\end{bmatrix},
-\qquad
-B=U\bar G U^\top,
-\qquad
-A=\operatorname{softmax}_{\rm key}(L+\lambda B+M).
+\begin{aligned}
+\alpha_{ai} &= \operatorname{softmax}_{i\in\mathcal O}(L_{a,\tau_i}), \\[4pt]
+U &= \begin{bmatrix}
+  \alpha \\
+  \operatorname{diag}(o)
+\end{bmatrix}, \\[4pt]
+B &= U\bar G U^\top, \\[4pt]
+A &= \operatorname{softmax}_{\mathrm{key}}(L+\lambda B+M).
+\end{aligned}
 $$
 
 [potential](engine/neural.py) implements the two-endpoint readout; [ResidualBlock](engine/neural.py) applies it before shared-value aggregation. The same operation creates content-content, content-trace, and trace-trace conditions. Responsibilities change with the layer state; the frozen reference retains the meaning of each measurement coordinate.
@@ -84,27 +88,29 @@ $$
 **Retained pairs and actual updates, paper Sections 4.1-4.4.** Let $\bar G_\Sigma$ be the minimum-norm matrix with the same diagonal and row sums, and $H=\bar G-\bar G_\Sigma$. [summarize](engine/neural.py) constructs this control. The pair-only attention change uses $\delta=\lambda UHU^\top$ while holding that layer's nodes, queries, keys, values, and masks fixed:
 
 $$
-\eta_{\rm pair}=\frac{\lVert H\rVert_F^2}{\lVert\bar G\rVert_F^2},
-\qquad
-\Delta m=(A-A_\Sigma)V,
-\qquad
-S=\operatorname{Cov}_{A_\Sigma}(V,\delta),
-\qquad
-\Delta m=S+R,\quad
-\lVert R\rVert_2\le\frac{D_V L_\delta^2}{8}.
+\begin{aligned}
+\eta_{\mathrm{pair}} &= \frac{\lVert H\rVert_F^2}{\lVert\bar G\rVert_F^2}, \\[4pt]
+\Delta m &= (A-A_\Sigma)V, \\[4pt]
+S &= \operatorname{Cov}_{A_\Sigma}(V,\delta), \\[4pt]
+\Delta m &= S+R, \\[4pt]
+\lVert R\rVert_2 &\le \frac{D_V L_\delta^2}{8}.
+\end{aligned}
 $$
 
-The zero-matrix case has $\eta_{\rm pair}=0$. [transport and sensitivity](engine/neural.py) compute the finite update, tangent and bound. Each head is mapped through its output projection before query RMS and layer means are recorded. `pair_transport_remainder_rms` directly measures the projected difference between the finite update and its tangent, using the same values and projections as the bound.
+The zero-matrix case has $\eta_{\mathrm{pair}}=0$. [transport and sensitivity](engine/neural.py) compute the finite update, tangent and bound. Each head is mapped through its output projection before query RMS and layer means are recorded. `pair_transport_remainder_rms` directly measures the projected difference between the finite update and its tangent, using the same values and projections as the bound.
 
 Recent [MLCCD](https://arxiv.org/html/2610.36569v1) selects task-relevant evidence from MLLM layers, [ARISE](https://arxiv.org/html/2610.36509v1) uses authentic reference geometry during continual training, and [RAEGNet](https://arxiv.org/html/2609.36902v1) models typed retrieved evidence edges. FlawPrint-CRA specifies a different readout object and use position: domain-referenced trace pairs condition current content interactions through $U\bar G U^\top$.
 
 **Supervision, paper (8).** For source batch $\mathcal S_b$ and its image-supervised subset $\mathcal A_b$, the objective is:
 
 $$
-\mathcal L=\frac{1}{|\mathcal S_b|}\sum_{n\in\mathcal S_b}
-\operatorname{BCEWithLogits}(\ell_n,y_n)
-+\beta\frac{1}{|\mathcal A_b|}\sum_{n\in\mathcal A_b}
-\operatorname{BCEWithLogits}(\ell^I_n,a_n).
+\begin{aligned}
+\mathcal L
+&= \frac{1}{|\mathcal S_b|}\sum_{n\in\mathcal S_b}
+   \operatorname{BCEWithLogits}(\ell_n,y_n) \\[4pt]
+&\quad + \beta\frac{1}{|\mathcal A_b|}\sum_{n\in\mathcal A_b}
+   \operatorname{BCEWithLogits}(\ell^I_n,a_n).
+\end{aligned}
 $$
 
 The image term is zero when $\mathcal A_b$ is empty. Its rows record an image input, at least one observed MAE, CLIP image or forensic stream, and an independent manipulation annotation. In the [training loop](engine/learning.py), `auxiliary_weight` is $\beta$; news veracity $y$ and image manipulation $a$ supervise their respective heads.
@@ -440,9 +446,16 @@ python -B research.py transport ./outputs/neural42/intervention.jsonl --dataset 
 
 This CPU analysis reads the explained predictions from one coupled checkpoint. It preserves every input ID, reports label coverage, checks the measured projected remainder against its bound, and connects each row to its summary, uniform, and potential-off risk changes. Labeled rows additionally produce rescued, harmed, and net-corrected counts with event-group paired bootstrap intervals.
 
-All intervention decisions use the same raw news-head threshold, $\hat y=\mathbb{1}[\ell\ge0]$. Thus the normalized accuracy change is $(N_{\rm rescued}-N_{\rm harmed})/N_{\rm labeled}$. Probability calibration and abstention remain part of their separately exported evaluation flow. Unknown labels retain their mechanism measurements and contribute to total coverage. Mixed checkpoints, missing diagnostics and inconsistent risk differences are rejected.
+All intervention decisions use the same raw news-head threshold, $\hat y=\mathbb{1}[\ell\ge0]$. The normalized accuracy change is:
 
-The remainder check reports the numerical tolerance $32\epsilon_{\rm float32}(1+b_{\rm rem})$ per row. It measures local finite-strength error after projection; whole-model risk changes come from the separate intervention forwards. Independently trained summary/coupled and uniform/coupled comparisons continue to use the four-seed experiment and paired comparison commands.
+$$
+\Delta\mathrm{Accuracy}
+= \frac{N_{\mathrm{rescued}}-N_{\mathrm{harmed}}}{N_{\mathrm{labeled}}}.
+$$
+
+Probability calibration and abstention remain part of their separately exported evaluation flow. Unknown labels retain their mechanism measurements and contribute to total coverage. Mixed checkpoints, missing diagnostics and inconsistent risk differences are rejected.
+
+The remainder check reports the numerical tolerance $32\epsilon_{\mathrm{float32}}(1+b_{\mathrm{rem}})$ per row. It measures local finite-strength error after projection; whole-model risk changes come from the separate intervention forwards. Independently trained summary/coupled and uniform/coupled comparisons continue to use the four-seed experiment and paired comparison commands.
 
 Pair diagnostics are available for coupled checkpoints. Local summary removal reuses the current Q/K/V tensors and masks; it does not launch another whole-model forward. Other modes export missing values for these fields. Compare these measurements by news ID with `pair_readout_delta` and the paired task outcomes: retained matrix energy, local attention use, and final correction measure different stages of the same readout.
 
