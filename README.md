@@ -41,29 +41,29 @@ Pair information contributes through the current query's trace responsibilities.
 
 FlawPrint preserves **which trace pairs agree or disagree with the domain reference until the current content selects them**. BERT, MAE, and CLIP supply content nodes. DRC defines the comparison coordinates, PPE retains the pair matrix, and CET reads that matrix into content interactions. The trained news head determines its use for veracity.
 
-**DRC, paper (2)-(3).** A frozen reference pool defines midrank empirical marginals and a shrinkage correlation. Let $\epsilon_d = 1/(2n_d)$:
+**DRC, paper (2)-(3).** A frozen reference pool defines midrank empirical marginals and a shrinkage correlation. Let $u_i=\widehat F_{d,i}(\varphi_i)$ and $\epsilon_d=1/(2n_d)$:
 
-$$
+```math
 \begin{aligned}
 z_i &= \Phi^{-1}\!\left[
-  \operatorname{clip}\!\left(\widehat F_{d,i}(\varphi_i),\epsilon_d,1-\epsilon_d\right)
-\right], \\[4pt]
-\widehat R_d &= (1-\rho)\operatorname{Corr}(Z_d)+\rho I, \\[4pt]
+  \mathrm{clip}\!\left(u_i,\epsilon_d,1-\epsilon_d\right)
+\right], \\
+\widehat R_d &= (1-\rho)\mathrm{Corr}(Z_d)+\rho I, \\
 P_d &= \widehat R_d^{-1}.
 \end{aligned}
-$$
+```
 
 [Marginals.transform](engine/copula.py) implements the frozen rank transform; [DomainProfile.fit](engine/profile.py) estimates the domain reference. Source queries use group cross-fitting, while saved references and inference follow the supplied source or independent profile roles.
 
 **PPE, paper (4)-(5).** Each observed trace pair retains its own quadratic contribution:
 
-$$
+```math
 \begin{aligned}
-G_{ij} &= o_i o_j(\delta_{ij}-P_{d,ij})z_i z_j, \\[4pt]
-\bar G &= \frac{G}{1+\lVert G\rVert_F}, \\[4pt]
+G_{ij} &= o_i o_j(\delta_{ij}-P_{d,ij})z_i z_j, \\
+\bar G &= \frac{G}{1+\lVert G\rVert_F}, \\
 c_i &= \frac{1}{\sqrt D}\sum_j\bar G_{ij}.
 \end{aligned}
-$$
+```
 
 [relation](engine/learning.py) places these contributions in the fixed trace catalogue. [ResidualAttention](engine/neural.py) forms trace nodes from $[z_i,\bar G_{ii},c_i]$ and keeps the complete $\bar G$ for attention. Here $D=26$ is the default catalogue size and $o_i$ records coordinate availability. Samples without two usable image-trace coordinates have zero relation matrices while retaining their available content nodes.
 
@@ -71,47 +71,47 @@ $$
 
 **CET, paper (6)-(7).** Every layer and head derives responsibilities from its current content queries:
 
-$$
+```math
 \begin{aligned}
-\alpha_{ai} &= \operatorname{softmax}_{i\in\mathcal O}(L_{a,\tau_i}), \\[4pt]
+\alpha_{ai} &= \mathrm{softmax}_{i\in\mathcal O}(L_{a,\tau_i}), \\
 U &= \begin{bmatrix}
   \alpha \\
-  \operatorname{diag}(o)
-\end{bmatrix}, \\[4pt]
-B &= U\bar G U^\top, \\[4pt]
-A &= \operatorname{softmax}_{\mathrm{key}}(L+\lambda B+M).
+  \mathrm{diag}(o)
+\end{bmatrix}, \\
+B &= U\bar G U^\top, \\
+A &= \mathrm{softmax}_{\mathrm{key}}(L+\lambda B+M).
 \end{aligned}
-$$
+```
 
 [potential](engine/neural.py) implements the two-endpoint readout; [ResidualBlock](engine/neural.py) applies it before shared-value aggregation. The same operation creates content-content, content-trace, and trace-trace conditions. Responsibilities change with the layer state; the frozen reference retains the meaning of each measurement coordinate.
 
 **Retained pairs and actual updates, paper Sections 4.1-4.4.** Let $\bar G_\Sigma$ be the minimum-norm matrix with the same diagonal and row sums, and $H=\bar G-\bar G_\Sigma$. [summarize](engine/neural.py) constructs this control. The pair-only attention change uses $\delta=\lambda UHU^\top$ while holding that layer's nodes, queries, keys, values, and masks fixed:
 
-$$
+```math
 \begin{aligned}
-\eta_{\mathrm{pair}} &= \frac{\lVert H\rVert_F^2}{\lVert\bar G\rVert_F^2}, \\[4pt]
-\Delta m &= (A-A_\Sigma)V, \\[4pt]
-S &= \operatorname{Cov}_{A_\Sigma}(V,\delta), \\[4pt]
-\Delta m &= S+R, \\[4pt]
+\eta_{\mathrm{pair}} &= \frac{\lVert H\rVert_F^2}{\lVert\bar G\rVert_F^2}, \\
+\Delta m &= (A-A_\Sigma)V, \\
+S &= \mathrm{Cov}_{A_\Sigma}(V,\delta), \\
+\Delta m &= S+R, \\
 \lVert R\rVert_2 &\le \frac{D_V L_\delta^2}{8}.
 \end{aligned}
-$$
+```
 
 The zero-matrix case has $\eta_{\mathrm{pair}}=0$. [transport and sensitivity](engine/neural.py) compute the finite update, tangent and bound. Each head is mapped through its output projection before query RMS and layer means are recorded. `pair_transport_remainder_rms` directly measures the projected difference between the finite update and its tangent, using the same values and projections as the bound.
 
 Recent [MLCCD](https://arxiv.org/html/2610.36569v1) selects task-relevant evidence from MLLM layers, [ARISE](https://arxiv.org/html/2610.36509v1) uses authentic reference geometry during continual training, and [RAEGNet](https://arxiv.org/html/2609.36902v1) models typed retrieved evidence edges. FlawPrint-CRA specifies a different readout object and use position: domain-referenced trace pairs condition current content interactions through $U\bar G U^\top$.
 
-**Supervision, paper (8).** For source batch $\mathcal S_b$ and its image-supervised subset $\mathcal A_b$, the objective is:
+**Supervision, paper (8).** For source batch $\mathcal S_b$ and its image-supervised subset $\mathcal A_b$, the objective uses binary cross-entropy from logits:
 
-$$
+```math
 \begin{aligned}
 \mathcal L
 &= \frac{1}{|\mathcal S_b|}\sum_{n\in\mathcal S_b}
-   \operatorname{BCEWithLogits}(\ell_n,y_n) \\[4pt]
+   \mathrm{BCE}(\ell_n,y_n) \\
 &\quad + \beta\frac{1}{|\mathcal A_b|}\sum_{n\in\mathcal A_b}
-   \operatorname{BCEWithLogits}(\ell^I_n,a_n).
+   \mathrm{BCE}(\ell^I_n,a_n).
 \end{aligned}
-$$
+```
 
 The image term is zero when $\mathcal A_b$ is empty. Its rows record an image input, at least one observed MAE, CLIP image or forensic stream, and an independent manipulation annotation. In the [training loop](engine/learning.py), `auxiliary_weight` is $\beta$; news veracity $y$ and image manipulation $a$ supervise their respective heads.
 
@@ -448,10 +448,10 @@ This CPU analysis reads the explained predictions from one coupled checkpoint. I
 
 All intervention decisions use the same raw news-head threshold, $\hat y=\mathbb{1}[\ell\ge0]$. The normalized accuracy change is:
 
-$$
+```math
 \Delta\mathrm{Accuracy}
 = \frac{N_{\mathrm{rescued}}-N_{\mathrm{harmed}}}{N_{\mathrm{labeled}}}.
-$$
+```
 
 Probability calibration and abstention remain part of their separately exported evaluation flow. Unknown labels retain their mechanism measurements and contribute to total coverage. Mixed checkpoints, missing diagnostics and inconsistent risk differences are rejected.
 
