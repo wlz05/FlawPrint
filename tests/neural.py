@@ -1085,9 +1085,15 @@ class NeuralTests(unittest.TestCase):
         np.testing.assert_array_equal([row["fusion_risk"] for row in before], [row["fusion_risk"] for row in legacy])
 
     def test_checkpoint_rejects_malformed_metadata_before_inference(self) -> None:
+        from engine.learning import checkpoint
         directory = self.root / "metadata"
         fit(self.bundle, self.archive, directory.as_posix(), replace(self.config, epochs=1), self.profile, "cpu")
         original = read_json(directory / "model.json")
+        self.assertEqual(original["evidence_identity_policy"], "split-independent-content")
+        legacy = dict(original, benchmark_protocols=["finefake-paper-3407"])
+        legacy.pop("evidence_identity_policy")
+        with self.assertRaisesRegex(ValueError, "split-independent"):
+            checkpoint(legacy)
         cases = [None, [], 1, {}, {key: value for key, value in original.items() if key != "config"}]
         for key, value in (("config", []), ("config", {"unexpected": 1}), ("profiles", []), ("profile_sha256", {}), ("fit_history", None), ("fit_identifiers", [["invalid"]]), ("fit_identifiers", ["a", "a"]), ("feature_order", {}), ("trace_names", ["x", "x"]), ("normalizers", []), ("embedding_protocol", []), ("calibration", {})):
             damaged = copy.deepcopy(original)

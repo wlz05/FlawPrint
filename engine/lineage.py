@@ -3,7 +3,6 @@
 
 from __future__ import annotations
 import os
-import hashlib
 import re
 from engine.data import identifier, missing, portable_image, text_fingerprint, row_namespace
 from engine.storage import resolved
@@ -19,12 +18,8 @@ def evidence(row: dict, field: str) -> object:
                 raise ValueError("Stored text fingerprints must match the news text")
         else:
             value = fingerprint
-    namespace = row_namespace(row)
-    if namespace and field != "group" and not missing(value):
-        # Keep paper roles distinct while retaining within-role duplicate groups.
-        if field == "image":
-            return "benchmark/" + namespace + "/" + portable_image(value)
-        return hashlib.sha256((namespace + "|" + identifier(value)).encode("utf-8")).hexdigest()
+    # Split labels never change the identity of observed content.
+    row_namespace(row)
     return value
 
 def identity(field: str, value: object) -> str | None:

@@ -107,8 +107,7 @@ def preflight(records: list[dict], check_images: bool = False, benchmark: bool =
                 errors.append(f"Image for {row['id']}: {error}")
         leaking = [checksum for checksum, partitions in hashes.items() if len(partitions) > 1]
         if leaking:
-            destination = warnings if audit is not None and audit.get("benchmark_protocol") == "finefake-paper-3407" else errors
-            destination.append(f"Image bytes cross splits under {len(leaking)} content hashes")
+            errors.append(f"Image bytes cross splits under {len(leaking)} content hashes")
     return {"version": "FlawPrint preflight 1", "passed": not errors, "errors": errors, "warnings": warnings, "samples": len(rows), "counts": {key: dict(value) for key, value in sorted(counts.items())}, "missing_images": missing_images, "empty_text": empty_text, "semantic_scores": semantic, "audit": audit, "image_check_requested": check_images, "images": image_report, "benchmark_check_requested": benchmark, "minimum_profile_size": min_samples, "calibration_available": bool(splits["calibration"]), "label_contract": "zero-real-one-fake", "path_base": "process working directory"}
 
 # Author: Weiliang Zhu

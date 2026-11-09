@@ -466,18 +466,17 @@ class OfficialTests(unittest.TestCase):
     def paper(self, ordinal, role):
         return {"id": "finefake:" + str(ordinal), "source_ordinal": ordinal, "group": "finefake:" + str(ordinal), "split": role, "benchmark_protocol": "finefake-paper-3407", "text": "Shared published caption.", "image": "", "domain": "Politics", "label": 0}
 
-    def test_paper_protocol_reports_overlap_and_preserves_rows(self):
+    def test_paper_protocol_rejects_overlap_and_preserves_rows(self):
         from engine.data import audit_splits
         rows = [self.paper(0, "train"), self.paper(1, "test")]
-        report = audit_splits(rows)
-        self.assertEqual(len(report["leakage"]["text"]), 1)
-        self.assertEqual(report["benchmark_protocol"], "finefake-paper-3407")
+        with self.assertRaisesRegex(ValueError, "Cross-split leakage"):
+            audit_splits(rows)
         self.assertEqual([row["split"] for row in rows], ["train", "test"])
 
     def test_paper_history_preserves_within_role_exclusion(self):
         from engine.lineage import collect, overlaps
         history = collect([self.paper(0, "train")])
-        self.assertEqual(overlaps([self.paper(1, "test")], history), [False])
+        self.assertEqual(overlaps([self.paper(1, "test")], history), [True])
         self.assertEqual(overlaps([self.paper(2, "train")], history), [True])
         self.assertEqual(overlaps([self.paper(0, "test")], history), [True])
 

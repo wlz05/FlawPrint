@@ -280,6 +280,8 @@ def checkpoint(metadata: dict) -> NeuralConfig:
         raise ValueError("The neural checkpoint version is unsupported")
     if metadata["version"] == "flawprint-neural-v2" and metadata.get("relation_operator") != "content-conditioned-reference-v2":
         raise ValueError("The neural checkpoint relation operator is unsupported")
+    if "finefake-paper-3407" in metadata.get("benchmark_protocols", []) and metadata.get("evidence_identity_policy") != "split-independent-content":
+        raise ValueError("FineFake checkpoints require split-independent content identities; refit legacy split-scoped histories")
     mappings = ("config", "dimensions", "normalizers", "encoder_signature", "fit_history", "profiles", "profile_sha256")
     if any(not isinstance(metadata[name], dict) for name in mappings) or metadata["calibration"] is not None and not isinstance(metadata["calibration"], dict) or "embedding_protocol" in metadata and not isinstance(metadata["embedding_protocol"], dict):
         raise ValueError("Neural checkpoint settings must contain objects")
@@ -655,6 +657,7 @@ def fit(bundle: dict, archive: dict, output: str, config: NeuralConfig, profile_
     metadata["partition_policy"] = "Preserve supplied sample identities and partition roles"
     policies = {row.get("benchmark_protocol", "strict-content") for row in rows}
     metadata["benchmark_protocols"] = sorted(policies)
+    metadata["evidence_identity_policy"] = "split-independent-content"
     if policies == {"finefake-paper-3407"}:
         metadata["paper_content_overlap"] = {name: len(values) for name, values in audit_splits(rows)["leakage"].items()}
     metadata["reference_partition_policy"] = "Source group partitions with class proportion preservation" if config.balanced_reference else "GroupKFold source partitions"

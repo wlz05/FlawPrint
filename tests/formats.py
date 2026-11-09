@@ -442,7 +442,7 @@ class FormatTests(unittest.TestCase):
 
     def test_finefake_preset_keeps_released_row_contract_and_label_direction(self) -> None:
         from engine.package import configuration
-        records = [{"id": "finefake:" + str(index), "group": "finefake:" + str(index), "source_ordinal": index, "benchmark_protocol": "finefake-paper-3407", "text": "A repeated released caption.", "domain": "Science", "split": role, "label": index} for index, role in enumerate(("train", "test"))]
+        records = [{"id": "finefake:" + str(index), "group": "finefake:" + str(index), "source_ordinal": index, "benchmark_protocol": "finefake-paper-3407", "text": "Released caption " + str(index), "domain": "Science", "split": role, "label": index} for index, role in enumerate(("train", "test"))]
         source = self.root / "released.csv"
         write_rows(source, records)
         rows, report = convert_files([source.as_posix()], Conversion(**configuration("builtin:finefake")))

@@ -249,13 +249,12 @@ def audit_splits(rows: list[dict], check_files: bool = False) -> dict:
         if row.get("content_sha256"):
             contents[str(row["content_sha256"])].add(split)
     leaks = {"groups": [key for key, splits in groups.items() if len(splits) > 1], "paths": [paths[key] for key, splits in images.items() if len(splits) > 1], "content": [key for key, splits in contents.items() if len(splits) > 1], "text": [key for key, splits in texts.items() if len(splits) > 1]}
-    if any(namespaces):
-        if leaks["groups"]:
-            raise ValueError("Released row identities overlap benchmark roles")
-        return {"counts": dict(counts), "samples": len(rows), "leakage": leaks, "benchmark_protocol": "finefake-paper-3407", "overlap_policy": "Preserve paper row partitions and report reused content; this is row-disjoint evaluation", "label_convention": "zero-real-one-fake"}
     if any(leaks.values()):
         raise ValueError(f"Cross-split leakage detected: {leaks}")
-    return {"counts": dict(counts), "samples": len(rows), "leakage": leaks, "label_convention": "zero-real-one-fake"}
+    report = {"counts": dict(counts), "samples": len(rows), "leakage": leaks, "label_convention": "zero-real-one-fake"}
+    if any(namespaces):
+        report.update(benchmark_protocol="finefake-paper-3407", overlap_policy="Preserve fixed row partitions and reject shared groups, images and text")
+    return report
 
 def join_predictions(rows: list[dict], predictions: list[dict], score_key: str = "logit", real_positive: bool = False) -> list[dict]:
     lookup = {}
