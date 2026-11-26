@@ -9,7 +9,13 @@ The deterministic FlawPrint baseline achieves **state-of-the-art performance on 
 ```mermaid
 ---
 config:
+  block:
+    padding: 26
   themeCSS: |
+    path[marker-end] {
+      stroke: #687a90 !important;
+      stroke-width: 1.4px !important;
+    }
     marker[id$="-pointEnd"], marker[id$="-pointEnd-margin"] {
       overflow: visible;
     }
@@ -29,29 +35,18 @@ config:
     marker[id$="-pointEnd-margin"] path {
       d: path("M 7.8 3.85 L 11.5 7 L 7.8 10.15");
     }
-  flowchart:
-    curve: monotoneY
-    diagramPadding: 18
-    nodeSpacing: 28
-    rankSpacing: 40
-    wrappingWidth: 235
 ---
-flowchart TB
-    X["Original text and image"]
-    X --> D["BERT, MAE and CLIP embeddings<br/>Content and class nodes"]
-    X --> T["Pixel, container and narrative traces"]
-    R["Independent reference pool"] --> C["Frozen marginals and copula"]
-    T --> Z["Masked rank coordinates"]
-    C --> Z
-    Z --> G["Copula pairwise residual G<br/>and normalized Gbar"]
-    G --> V["Build trace nodes from ranks and summaries<br/>Carry the full pair matrix forward"]
-    D --> L["Query-key scores and shared values"]
-    V --> L
-    L --> B["Query-selected coordinates U<br/>Lifted relation B = U Gbar U^T"]
-    L --> A["Reference-conditioned attention"]
-    B --> A
-    A --> Y["News head reads the class node<br/>Optional calibration"]
-    linkStyle default stroke:#687a90,stroke-width:1.4px
+block-beta
+    columns 1
+    A["<b>1. Read the original text and image</b><br/>Encode content with BERT, MAE, and CLIP<br/>Measure pixel, container, and narrative traces"]
+    B["<b>2. Apply the frozen domain reference</b><br/>Independent reference marginals and copula<br/>Rank observed traces and normalize pair residual G"]
+    C["<b>3. Assemble the attention nodes</b><br/>Content, class, and trace nodes<br/>Keep the complete normalized pair matrix Gbar"]
+    D["<b>4. Condition attention on current content</b><br/>Query-key scores select trace coordinates U<br/>B = U Gbar U^T conditions shared-value updates"]
+    E["<b>5. Read the news risk</b><br/>The news head reads the class node<br/>Apply calibration when configured"]
+    A --> B
+    B --> C
+    C --> D
+    D --> E
 ```
 
 1. **Encode content.** Retain the BERT text, MAE image, CLIP text, and CLIP image vectors as four global content nodes.
