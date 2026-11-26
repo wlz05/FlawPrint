@@ -7,30 +7,40 @@ The deterministic FlawPrint baseline achieves **state-of-the-art performance on 
 ## Method Chain
 
 ```mermaid
-flowchart TD
-    T["Original text"] --> TV["BERT and CLIP text vectors"]
-    I["Original image"] --> IV["MAE and CLIP image vectors"]
-    TV --> Q["Content and class nodes"]
-    IV --> Q
-    I --> P["Pixel and container traces"]
-    T --> N["Narrative coordinates"]
+---
+config:
+  themeCSS: |
+    marker[id*="-pointEnd"] path {
+      fill: none !important;
+      stroke: #687a90 !important;
+      stroke-width: 1.4px !important;
+      stroke-linecap: round;
+      stroke-linejoin: round;
+      d: path("M 1 1 L 9 5 L 1 9");
+    }
+  flowchart:
+    curve: monotoneY
+    diagramPadding: 18
+    nodeSpacing: 28
+    rankSpacing: 40
+    wrappingWidth: 235
+---
+flowchart TB
+    X["Original text and image"]
+    X --> D["BERT, MAE and CLIP embeddings<br/>Content and class nodes"]
+    X --> T["Pixel, container and narrative traces"]
     R["Independent reference pool"] --> C["Frozen marginals and copula"]
-    P --> Z["Masked rank coordinates"]
-    N --> Z
+    T --> Z["Masked rank coordinates"]
     C --> Z
-    C --> G["Pairwise residual G and normalized Gbar"]
-    Z --> G
-    Z --> V["Trace nodes"]
-    G --> V
-    Q --> L["Query-key scores and shared values"]
+    Z --> G["Copula pairwise residual G<br/>and normalized Gbar"]
+    G --> V["Build trace nodes from ranks and summaries<br/>Carry the full pair matrix forward"]
+    D --> L["Query-key scores and shared values"]
     V --> L
-    L --> U["Query-selected coordinates U"]
-    G --> B["B = U Gbar U^T"]
-    U --> B
-    B --> A["Reference-conditioned attention"]
-    L --> A
-    A --> Y["News head reads the class node"]
-    Y --> K["News risk with optional calibration"]
+    L --> B["Query-selected coordinates U<br/>Lifted relation B = U Gbar U^T"]
+    L --> A["Reference-conditioned attention"]
+    B --> A
+    A --> Y["News head reads the class node<br/>Optional calibration"]
+    linkStyle default stroke:#687a90,stroke-width:1.4px
 ```
 
 1. **Encode content.** Retain the BERT text, MAE image, CLIP text, and CLIP image vectors as four global content nodes.
